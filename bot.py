@@ -110,22 +110,22 @@ def ema(prices, period):
 
 def get_prices_bulk():
     try:
-        syms = ",".join([f"{s}USDT" for s in TOKENS.keys()])
-        res = requests.get(
-            "https://api.binance.com/api/v3/ticker/price",
-            timeout=8
-        )
-        data = res.json()
-        price_map = {item["symbol"]: float(item["price"]) for item in data}
         prices = {}
-        for sym in TOKENS:
-            key = f"{sym}USDT"
-            if key in price_map:
-                prices[sym] = price_map[key]
+        for sym, binance_sym in BINANCE_SYMBOLS.items():
+            res = requests.get(
+                f"https://api.binance.com/api/v3/ticker/price",
+                params={"symbol": binance_sym},
+                timeout=8
+            )
+            data = res.json()
+            if "price" in data:
+                prices[sym] = float(data["price"])
+            time.sleep(0.2)
         return prices
     except Exception as e:
         log("warn", f"Price fetch failed: {e}")
         return {}
+
 
 
 
