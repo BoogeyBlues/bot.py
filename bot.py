@@ -110,27 +110,23 @@ def ema(prices, period):
 
 def get_prices_bulk():
     try:
-        ids = ",".join([t["coingecko"] for t in TOKENS.values()])
+        syms = ",".join([f"{s}USDT" for s in TOKENS.keys()])
         res = requests.get(
-            "https://api.coingecko.com/api/v3/simple/price",
-            params={
-                "ids": ids,
-                "vs_currencies": "usd",
-                "include_24hr_vol": "true"
-            },
+            "https://api.binance.com/api/v3/ticker/price",
             timeout=8
         )
         data = res.json()
+        price_map = {item["symbol"]: float(item["price"]) for item in data}
         prices = {}
-        gecko_to_sym = {t["coingecko"]: sym for sym, t in TOKENS.items()}
-        for gecko_id, vals in data.items():
-            sym = gecko_to_sym.get(gecko_id)
-            if sym and "usd" in vals:
-                prices[sym] = float(vals["usd"])
+        for sym in TOKENS:
+            key = f"{sym}USDT"
+            if key in price_map:
+                prices[sym] = price_map[key]
         return prices
     except Exception as e:
         log("warn", f"Price fetch failed: {e}")
         return {}
+
 
 
 def get_volume_ratio(coingecko_id):
