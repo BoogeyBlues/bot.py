@@ -78,6 +78,17 @@ TOKENS = {
         "min_vol":   1.5,
     },
 }
+BINANCE_SYMBOLS = {
+    "SOL":  "SOLUSDT",
+    "JUP":  "JUPUSDT",
+    "RAY":  "RAYUSDT",
+    "PYTH": "PYTHUSDT",
+    "WIF":  "WIFUSDT",
+    "BONK": "BONKUSDT",
+    "POPCAT": "POPCATUSDT",
+    "MYRO": "MYROUSDT",
+    "SAMO": "SAMOUSDT",
+}
 
 capital          = float(os.environ.get("STARTING_CAPITAL", "60"))
 capital_lock     = threading.Lock()
