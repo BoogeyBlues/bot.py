@@ -1,4 +1,4 @@
-import os, time, threading, requests, base64, json
+import os, time, threading, requests
 from flask import Flask, jsonify
 from collections import deque
 
@@ -18,11 +18,9 @@ EMA_FAST_LEN       = int(os.environ.get("EMA_FAST", "5"))
 EMA_SLOW_LEN       = int(os.environ.get("EMA_SLOW", "10"))
 MAX_OPEN_TRADES    = int(os.environ.get("MAX_OPEN_TRADES", "1"))
 
-USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-
-# SolanaTracker public RPC — no API key needed for swaps
-SWAP_API  = "https://swap-v2.solanatracker.io"
-PUBLIC_RPC = "https://rpc.solanatracker.io/public?advancedTx=true"
+SOL_RPC       = "https://api.mainnet-beta.solana.com"
+PUMPPORTAL    = "https://pumpportal.fun/api/trade-local"
+USDC_MINT     = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
 TOKENS = {
     "SOL":  {"gecko": "solana",                  "type": "major", "min_vol": 1.2, "mint": "So11111111111111111111111111111111111111112"},
@@ -82,7 +80,7 @@ def safe_coingecko_call(params, retries=3):
                 continue
             return data
         except Exception as e:
-            log("warn", f"API error: {e}")
+            log("warn", f"Price API error: {e}")
             time.sleep(10)
     return {}
 
@@ -108,86 +106,94 @@ def get_prices_bulk():
         log("warn", "No prices returned")
     return prices
 
-# ── SOLANATRACKER SWAP ───────────────────────────────────────────
+# ── PUMPPORTAL SWAP ──────────────────────────────────────────────
 def execute_swap(amount_usdc, output_mint, symbol):
     """
-    Execute swap using SolanaTracker API.
-    - No API key needed
-    - No geo-restrictions
-    - Supports Raydium, Orca, Pump.fun, Meteora
-    - 0.5% fee per successful swap only
+    PumpPortal Local Transaction API.
+    - No API key required
+    - No geo-restrictions — protocol level
+    - Supports Raydium, Pump-AMM, auto routing
+    - We sign locally with our own private key
     - Funds go directly to Phantom wallet
     """
     try:
-        log("info", f"Getting swap route: ${amount_usdc:.2f} USDC -> {symbol}", symbol)
+        from solders.keypair import Keypair
+        from solders.transaction import VersionedTransaction
+        from solana.rpc.api import Client
+        from solana.rpc.types import TxOpts
+        from solana.rpc.commitment import Confirmed
 
-        # Step 1: Get swap instructions
-        params = {
-            "from":     USDC_MINT,
-            "to":       output_mint,
-            "amount":   amount_usdc,
-            "slippage": 15,
-            "payer":    WALLET,
-        }
+        log("info", f"Building swap: ${amount_usdc:.4f} USDC -> {symbol}", symbol)
 
-        res = requests.get(
-            f"{SWAP_API}/swap-instructions",
-            params=params,
+        # Build swap request to PumpPortal
+        # We send USDC amount in SOL-equivalent since PumpPortal works in SOL
+        # First convert USDC amount to SOL amount using current price
+        sol_price = get_sol_price_simple()
+        if not sol_price:
+            log("err", "Could not get SOL price for conversion", symbol)
+            return None
+
+        # Amount in SOL equivalent
+        sol_amount = amount_usdc / sol_price
+
+        response = requests.post(
+            PUMPPORTAL,
+            data={
+                "publicKey":        WALLET,
+                "action":           "buy",
+                "mint":             output_mint,
+                "denominatedInSol": "true",
+                "amount":           str(round(sol_amount, 6)),
+                "slippage":         15,
+                "priorityFee":      0.0005,
+                "pool":             "auto"
+            },
             timeout=15
         )
-        swap_data = res.json()
 
-        if "error" in swap_data:
-            log("err", f"Swap route error: {swap_data['error']}", symbol)
+        if response.status_code != 200:
+            log("err", f"PumpPortal error {response.status_code}: {response.text[:200]}", symbol)
             return None
 
-        # Step 2: Get serialized transaction
-        tx_data = swap_data.get("txn") or swap_data.get("transaction") or swap_data.get("tx")
-
-        if not tx_data:
-            log("err", f"No transaction in response: {list(swap_data.keys())}", symbol)
-            return None
-
-        log("info", f"Transaction built — submitting to Solana...", symbol)
-
-        # Step 3: Submit to Solana RPC
-        rpc_res = requests.post(
-            PUBLIC_RPC,
-            json={
-                "jsonrpc": "2.0",
-                "id":      1,
-                "method":  "sendTransaction",
-                "params":  [
-                    tx_data,
-                    {
-                        "encoding":            "base64",
-                        "skipPreflight":       True,
-                        "preflightCommitment": "processed",
-                        "maxRetries":          5,
-                    }
-                ]
-            },
-            headers={"Content-Type": "application/json"},
-            timeout=30
+        # Sign and send the transaction
+        keypair = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+        tx = VersionedTransaction(
+            VersionedTransaction.from_bytes(response.content).message,
+            [keypair]
         )
-        rpc_data = rpc_res.json()
 
-        if "error" in rpc_data:
-            log("err", f"RPC submit error: {rpc_data['error']}", symbol)
-            return None
+        client = Client(SOL_RPC)
+        opts = TxOpts(skip_preflight=True, preflight_commitment=Confirmed)
+        result = client.send_raw_transaction(bytes(tx), opts=opts)
 
-        tx_sig = rpc_data.get("result")
+        tx_sig = result.value
         if tx_sig:
-            log("ok", f"Swap submitted! Tx: {tx_sig[:20]}...", symbol)
-            log("ok", f"Solscan: https://solscan.io/tx/{tx_sig}", symbol)
-            log("ok", f"Check Phantom — balance updating!", symbol)
-            return tx_sig
+            sig_str = str(tx_sig)
+            log("ok", f"Swap confirmed! Tx: {sig_str[:20]}...", symbol)
+            log("ok", f"Solscan: https://solscan.io/tx/{sig_str}", symbol)
+            log("ok", f"Check Phantom — balance updated!", symbol)
+            return sig_str
 
-        log("err", f"No signature in RPC response: {rpc_data}", symbol)
+        log("err", f"No signature returned: {result}", symbol)
         return None
 
+    except ImportError as e:
+        log("err", f"Missing library: {e} — add solders solana to requirements.txt", symbol)
+        return None
     except Exception as e:
-        log("err", f"Swap failed: {e}", symbol)
+        log("err", f"Swap error: {e}", symbol)
+        return None
+
+def get_sol_price_simple():
+    """Get just SOL price for USDC->SOL conversion."""
+    try:
+        res = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": "solana", "vs_currencies": "usd"},
+            timeout=8
+        )
+        return float(res.json()["solana"]["usd"])
+    except:
         return None
 
 # ── SIGNAL ──────────────────────────────────────────────────────
@@ -267,13 +273,12 @@ def enter_trade(signal):
         tokens_received = risk_amt / price
         log("ok", f"[PAPER] Buy ${risk_amt:.2f} USDC -> {symbol} @ ${price:.4f} | Got {tokens_received:.6f}", symbol)
     else:
-        log("info", f"[LIVE] SolanaTracker swap: ${risk_amt:.2f} USDC -> {symbol}", symbol)
+        log("info", f"[LIVE] Swapping ${risk_amt:.2f} USDC -> {symbol} via PumpPortal", symbol)
         tx_sig = execute_swap(risk_amt, mint, symbol)
         if not tx_sig:
-            log("err", "Swap failed — skipping trade", symbol)
+            log("err", "Swap failed — skipping", symbol)
             return False
         tokens_received = risk_amt / price
-        log("ok", f"[LIVE] Trade executed! ${risk_amt:.2f} USDC -> {symbol}", symbol)
 
     with trades_lock:
         open_trades[symbol] = {
@@ -353,7 +358,7 @@ def scanner_loop():
     global scan_active
     log("ok", f"Scanner starting | {', '.join(TOKENS.keys())}")
     log("ok", f"Mode: {'PAPER' if PAPER_MODE else 'LIVE'} | Risk:{RISK_PCT}% | TP:{TP_PCT}% | SL:{SL_PCT}%")
-    log("ok", f"Swap: {'PAPER' if PAPER_MODE else 'SolanaTracker -> Phantom (Raydium/Orca)'}")
+    log("ok", f"Swap: {'PAPER' if PAPER_MODE else 'PumpPortal -> Phantom'}")
     log("info", f"Warming up EMA ({EMA_SLOW_LEN} samples)...")
 
     for i in range(EMA_SLOW_LEN):
@@ -433,7 +438,7 @@ def status():
         "goal":            100,
         "progress_pct":    round(capital / 100 * 100, 1),
         "paper_mode":      PAPER_MODE,
-        "swap_engine":     "SolanaTracker (Raydium/Orca)" if not PAPER_MODE else "PAPER",
+        "swap_engine":     "PumpPortal (Raydium/auto)" if not PAPER_MODE else "PAPER",
         "wallet":          f"{WALLET[:8]}...{WALLET[-4:]}" if WALLET else "NOT SET",
         "open_trades":     open_trades,
         "wins":            wins,
@@ -458,5 +463,5 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     log("ok", f"JupiterBot starting — {len(TOKENS)} tokens | Port {port}")
     log("ok", f"Wallet: {WALLET[:8]}...{WALLET[-4:] if WALLET else 'NOT SET'}")
-    log("ok", f"Swap engine: {'SolanaTracker API -> Phantom' if not PAPER_MODE else 'PAPER MODE'}")
+    log("ok", f"Swap: {'PumpPortal Local API -> Phantom' if not PAPER_MODE else 'PAPER MODE'}")
     app.run(host="0.0.0.0", port=port, use_reloader=False)
