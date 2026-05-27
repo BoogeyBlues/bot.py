@@ -1,25 +1,28 @@
-import os, time, threading, requests, base64, json, hmac, hashlib
+import os, time, threading, requests, base64, json
 from flask import Flask, jsonify
 from collections import deque
 
 app = Flask(__name__)
 
 # ── CONFIG ──────────────────────────────────────────────────────
-CLAUDE_KEY        = os.environ.get("CLAUDE_KEY", "")
-WALLET            = os.environ.get("WALLET", "")
+CLAUDE_KEY         = os.environ.get("CLAUDE_KEY", "")
+WALLET             = os.environ.get("WALLET", "")
 WALLET_PRIVATE_KEY = os.environ.get("WALLET_PRIVATE_KEY", "")
-PAPER_MODE        = os.environ.get("PAPER_MODE", "true").lower() == "true"
-RISK_PCT          = float(os.environ.get("RISK_PCT", "1"))
-TP_PCT            = float(os.environ.get("TP_PCT", "4"))
-SL_PCT            = float(os.environ.get("SL_PCT", "2"))
-SCAN_INTERVAL     = int(os.environ.get("SCAN_INTERVAL", "120"))
-MONITOR_INTERVAL  = int(os.environ.get("MONITOR_INTERVAL", "30"))
-EMA_FAST_LEN      = int(os.environ.get("EMA_FAST", "5"))
-EMA_SLOW_LEN      = int(os.environ.get("EMA_SLOW", "10"))
-MAX_OPEN_TRADES   = int(os.environ.get("MAX_OPEN_TRADES", "1"))
+PAPER_MODE         = os.environ.get("PAPER_MODE", "true").lower() == "true"
+RISK_PCT           = float(os.environ.get("RISK_PCT", "1"))
+TP_PCT             = float(os.environ.get("TP_PCT", "4"))
+SL_PCT             = float(os.environ.get("SL_PCT", "2"))
+SCAN_INTERVAL      = int(os.environ.get("SCAN_INTERVAL", "120"))
+MONITOR_INTERVAL   = int(os.environ.get("MONITOR_INTERVAL", "30"))
+EMA_FAST_LEN       = int(os.environ.get("EMA_FAST", "5"))
+EMA_SLOW_LEN       = int(os.environ.get("EMA_SLOW", "10"))
+MAX_OPEN_TRADES    = int(os.environ.get("MAX_OPEN_TRADES", "1"))
 
-USDC_MINT  = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-SOL_CHAIN  = "501"  # Solana chain ID on OKX
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+# SolanaTracker public RPC — no API key needed for swaps
+SWAP_API  = "https://swap-v2.solanatracker.io"
+PUBLIC_RPC = "https://rpc.solanatracker.io/public?advancedTx=true"
 
 TOKENS = {
     "SOL":  {"gecko": "solana",                  "type": "major", "min_vol": 1.2, "mint": "So11111111111111111111111111111111111111112"},
@@ -105,81 +108,62 @@ def get_prices_bulk():
         log("warn", "No prices returned")
     return prices
 
-# ── OKX DEX SWAP ─────────────────────────────────────────────────
-def get_okx_quote(amount_usdc, output_mint):
-    """Get swap quote from OKX DEX API — no geo-restrictions."""
+# ── SOLANATRACKER SWAP ───────────────────────────────────────────
+def execute_swap(amount_usdc, output_mint, symbol):
+    """
+    Execute swap using SolanaTracker API.
+    - No API key needed
+    - No geo-restrictions
+    - Supports Raydium, Orca, Pump.fun, Meteora
+    - 0.5% fee per successful swap only
+    - Funds go directly to Phantom wallet
+    """
     try:
-        amount_raw = int(amount_usdc * 1_000_000)  # USDC has 6 decimals
-        res = requests.get(
-            "https://web3.okx.com/api/v6/dex/aggregator/quote",
-            params={
-                "chainIndex":        SOL_CHAIN,
-                "fromTokenAddress":  USDC_MINT,
-                "toTokenAddress":    output_mint,
-                "amount":            str(amount_raw),
-                "slippagePercent":   "0.5",
-            },
-            headers={"Content-Type": "application/json"},
-            timeout=10
-        )
-        data = res.json()
-        if data.get("code") != "0":
-            log("err", f"OKX quote error: {data.get('msg', 'Unknown error')}")
-            return None
-        return data.get("data", [{}])[0]
-    except Exception as e:
-        log("err", f"OKX quote failed: {e}")
-        return None
+        log("info", f"Getting swap route: ${amount_usdc:.2f} USDC -> {symbol}", symbol)
 
-def execute_okx_swap(amount_usdc, output_mint, symbol):
-    """Execute swap via OKX DEX API directly to Phantom wallet."""
-    try:
-        amount_raw = int(amount_usdc * 1_000_000)
-        log("info", f"Getting OKX swap transaction...", symbol)
+        # Step 1: Get swap instructions
+        params = {
+            "from":     USDC_MINT,
+            "to":       output_mint,
+            "amount":   amount_usdc,
+            "slippage": 15,
+            "payer":    WALLET,
+        }
 
         res = requests.get(
-            "https://web3.okx.com/api/v6/dex/aggregator/swap",
-            params={
-                "chainIndex":        SOL_CHAIN,
-                "fromTokenAddress":  USDC_MINT,
-                "toTokenAddress":    output_mint,
-                "amount":            str(amount_raw),
-                "slippagePercent":   "0.5",
-                "userWalletAddress": WALLET,
-            },
-            headers={"Content-Type": "application/json"},
+            f"{SWAP_API}/swap-instructions",
+            params=params,
             timeout=15
         )
-        data = res.json()
+        swap_data = res.json()
 
-        if data.get("code") != "0":
-            log("err", f"OKX swap error: {data.get('msg', 'Unknown')}", symbol)
+        if "error" in swap_data:
+            log("err", f"Swap route error: {swap_data['error']}", symbol)
             return None
 
-        swap_data = data.get("data", [{}])[0]
-        tx_data   = swap_data.get("tx", {})
-        raw_tx    = tx_data.get("data")
+        # Step 2: Get serialized transaction
+        tx_data = swap_data.get("txn") or swap_data.get("transaction") or swap_data.get("tx")
 
-        if not raw_tx:
-            log("err", "No transaction data returned from OKX", symbol)
+        if not tx_data:
+            log("err", f"No transaction in response: {list(swap_data.keys())}", symbol)
             return None
 
-        log("info", "Signing and submitting transaction to Solana...", symbol)
+        log("info", f"Transaction built — submitting to Solana...", symbol)
 
-        # Submit signed transaction to Solana RPC
+        # Step 3: Submit to Solana RPC
         rpc_res = requests.post(
-            "https://api.mainnet-beta.solana.com",
+            PUBLIC_RPC,
             json={
                 "jsonrpc": "2.0",
                 "id":      1,
                 "method":  "sendTransaction",
                 "params":  [
-                    raw_tx,
+                    tx_data,
                     {
                         "encoding":            "base64",
-                        "skipPreflight":       False,
-                        "preflightCommitment": "confirmed",
-                        "maxRetries":          3,
+                        "skipPreflight":       True,
+                        "preflightCommitment": "processed",
+                        "maxRetries":          5,
                     }
                 ]
             },
@@ -189,21 +173,21 @@ def execute_okx_swap(amount_usdc, output_mint, symbol):
         rpc_data = rpc_res.json()
 
         if "error" in rpc_data:
-            log("err", f"RPC error: {rpc_data['error']}", symbol)
+            log("err", f"RPC submit error: {rpc_data['error']}", symbol)
             return None
 
         tx_sig = rpc_data.get("result")
         if tx_sig:
-            log("ok", f"Swap confirmed! Tx: {tx_sig[:20]}...", symbol)
-            log("ok", f"View: https://solscan.io/tx/{tx_sig}", symbol)
-            log("ok", f"Check Phantom — balance updated!", symbol)
+            log("ok", f"Swap submitted! Tx: {tx_sig[:20]}...", symbol)
+            log("ok", f"Solscan: https://solscan.io/tx/{tx_sig}", symbol)
+            log("ok", f"Check Phantom — balance updating!", symbol)
             return tx_sig
 
-        log("err", f"No tx signature: {rpc_data}", symbol)
+        log("err", f"No signature in RPC response: {rpc_data}", symbol)
         return None
 
     except Exception as e:
-        log("err", f"OKX swap execution failed: {e}", symbol)
+        log("err", f"Swap failed: {e}", symbol)
         return None
 
 # ── SIGNAL ──────────────────────────────────────────────────────
@@ -281,27 +265,15 @@ def enter_trade(signal):
 
     if PAPER_MODE:
         tokens_received = risk_amt / price
-        log("ok", f"[PAPER] Buy ${risk_amt:.2f} -> {symbol} @ ${price:.4f} | Got {tokens_received:.6f}", symbol)
+        log("ok", f"[PAPER] Buy ${risk_amt:.2f} USDC -> {symbol} @ ${price:.4f} | Got {tokens_received:.6f}", symbol)
     else:
-        log("info", f"[LIVE] Executing OKX DEX swap: ${risk_amt:.2f} USDC -> {symbol}", symbol)
-
-        # Get quote first
-        quote = get_okx_quote(risk_amt, mint)
-        if not quote:
-            log("err", "Quote failed — skipping", symbol)
-            return False
-
-        out_amount = float(quote.get("toTokenAmount", 0))
-        log("info", f"Quote: ${risk_amt:.2f} USDC -> {out_amount:.6f} {symbol}", symbol)
-
-        # Execute swap
-        tx_sig = execute_okx_swap(risk_amt, mint, symbol)
+        log("info", f"[LIVE] SolanaTracker swap: ${risk_amt:.2f} USDC -> {symbol}", symbol)
+        tx_sig = execute_swap(risk_amt, mint, symbol)
         if not tx_sig:
-            log("err", "Swap failed — skipping", symbol)
+            log("err", "Swap failed — skipping trade", symbol)
             return False
-
-        tokens_received = out_amount
-        log("ok", f"[LIVE] Swap done! Got {tokens_received:.6f} {symbol}", symbol)
+        tokens_received = risk_amt / price
+        log("ok", f"[LIVE] Trade executed! ${risk_amt:.2f} USDC -> {symbol}", symbol)
 
     with trades_lock:
         open_trades[symbol] = {
@@ -381,7 +353,7 @@ def scanner_loop():
     global scan_active
     log("ok", f"Scanner starting | {', '.join(TOKENS.keys())}")
     log("ok", f"Mode: {'PAPER' if PAPER_MODE else 'LIVE'} | Risk:{RISK_PCT}% | TP:{TP_PCT}% | SL:{SL_PCT}%")
-    log("ok", f"Swap engine: {'PAPER' if PAPER_MODE else 'OKX DEX API -> Phantom'}")
+    log("ok", f"Swap: {'PAPER' if PAPER_MODE else 'SolanaTracker -> Phantom (Raydium/Orca)'}")
     log("info", f"Warming up EMA ({EMA_SLOW_LEN} samples)...")
 
     for i in range(EMA_SLOW_LEN):
@@ -449,7 +421,7 @@ def scanner_loop():
 def home():
     with trades_lock:
         n = len(open_trades)
-    return f"JupiterBot | Capital: ${capital:.2f} | Trades: {n}/{MAX_OPEN_TRADES} | {'PAPER' if PAPER_MODE else 'LIVE via OKX->Phantom'}", 200
+    return f"JupiterBot | Capital: ${capital:.2f} | Trades: {n}/{MAX_OPEN_TRADES} | {'PAPER' if PAPER_MODE else 'LIVE -> Phantom'}", 200
 
 @app.route("/status", methods=["GET"])
 def status():
@@ -461,7 +433,8 @@ def status():
         "goal":            100,
         "progress_pct":    round(capital / 100 * 100, 1),
         "paper_mode":      PAPER_MODE,
-        "swap_engine":     "OKX DEX API" if not PAPER_MODE else "PAPER",
+        "swap_engine":     "SolanaTracker (Raydium/Orca)" if not PAPER_MODE else "PAPER",
+        "wallet":          f"{WALLET[:8]}...{WALLET[-4:]}" if WALLET else "NOT SET",
         "open_trades":     open_trades,
         "wins":            wins,
         "losses":          losses,
@@ -485,5 +458,5 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     log("ok", f"JupiterBot starting — {len(TOKENS)} tokens | Port {port}")
     log("ok", f"Wallet: {WALLET[:8]}...{WALLET[-4:] if WALLET else 'NOT SET'}")
-    log("ok", f"Swap: {'OKX DEX API -> Phantom' if not PAPER_MODE else 'PAPER MODE'}")
+    log("ok", f"Swap engine: {'SolanaTracker API -> Phantom' if not PAPER_MODE else 'PAPER MODE'}")
     app.run(host="0.0.0.0", port=port, use_reloader=False)
