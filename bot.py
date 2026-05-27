@@ -108,14 +108,6 @@ def get_prices_bulk():
 
 # ── PUMPPORTAL SWAP ──────────────────────────────────────────────
 def execute_swap(amount_usdc, output_mint, symbol):
-    """
-    PumpPortal Local Transaction API.
-    - No API key required
-    - No geo-restrictions — protocol level
-    - Supports Raydium, Pump-AMM, auto routing
-    - We sign locally with our own private key
-    - Funds go directly to Phantom wallet
-    """
     try:
         from solders.keypair import Keypair
         from solders.transaction import VersionedTransaction
@@ -123,39 +115,36 @@ def execute_swap(amount_usdc, output_mint, symbol):
         from solana.rpc.types import TxOpts
         from solana.rpc.commitment import Confirmed
 
-        log("info", f"Building swap: ${amount_usdc:.4f} USDC -> {symbol}", symbol)
-
-        # Build swap request to PumpPortal
-        # We send USDC amount in SOL-equivalent since PumpPortal works in SOL
-        # First convert USDC amount to SOL amount using current price
-        sol_price = get_sol_price_simple()
+        # Get SOL price for conversion
+        sol_price = get_sol_price()
         if not sol_price:
-            log("err", "Could not get SOL price for conversion", symbol)
+            log("err", "Could not fetch SOL price", symbol)
             return None
 
-        # Amount in SOL equivalent
-        sol_amount = amount_usdc / sol_price
+        sol_amount = round(amount_usdc / sol_price, 6)
+        log("info", f"${amount_usdc:.4f} USDC = {sol_amount} SOL -> {symbol}", symbol)
 
+        # PumpPortal expects JSON not form data
         response = requests.post(
             PUMPPORTAL,
-            data={
+            headers={"Content-Type": "application/json"},
+            json={
                 "publicKey":        WALLET,
                 "action":           "buy",
                 "mint":             output_mint,
                 "denominatedInSol": "true",
-                "amount":           str(round(sol_amount, 6)),
+                "amount":           sol_amount,
                 "slippage":         15,
                 "priorityFee":      0.0005,
-                "pool":             "auto"
+                "pool":             "raydium"
             },
             timeout=15
         )
 
         if response.status_code != 200:
-            log("err", f"PumpPortal error {response.status_code}: {response.text[:200]}", symbol)
+            log("err", f"PumpPortal {response.status_code}: {response.text[:150]}", symbol)
             return None
 
-        # Sign and send the transaction
         keypair = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
         tx = VersionedTransaction(
             VersionedTransaction.from_bytes(response.content).message,
@@ -166,23 +155,20 @@ def execute_swap(amount_usdc, output_mint, symbol):
         opts = TxOpts(skip_preflight=True, preflight_commitment=Confirmed)
         result = client.send_raw_transaction(bytes(tx), opts=opts)
 
-        tx_sig = result.value
-        if tx_sig:
-            sig_str = str(tx_sig)
-            log("ok", f"Swap confirmed! Tx: {sig_str[:20]}...", symbol)
-            log("ok", f"Solscan: https://solscan.io/tx/{sig_str}", symbol)
-            log("ok", f"Check Phantom — balance updated!", symbol)
-            return sig_str
+        tx_sig = str(result.value)
+        if tx_sig and len(tx_sig) > 10:
+            log("ok", f"Swap done! Tx: {tx_sig[:20]}...", symbol)
+            log("ok", f"Solscan: https://solscan.io/tx/{tx_sig}", symbol)
+            log("ok", "Check Phantom — balance updated!", symbol)
+            return tx_sig
 
-        log("err", f"No signature returned: {result}", symbol)
+        log("err", f"Bad signature: {result}", symbol)
         return None
 
-    except ImportError as e:
-        log("err", f"Missing library: {e} — add solders solana to requirements.txt", symbol)
-        return None
     except Exception as e:
         log("err", f"Swap error: {e}", symbol)
         return None
+
 
 def get_sol_price_simple():
     """Get just SOL price for USDC->SOL conversion."""
