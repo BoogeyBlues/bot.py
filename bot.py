@@ -1,20 +1,23 @@
-import os, time, threading, requests
+import os, time, threading, requests, base64
 from flask import Flask, jsonify
 from collections import deque
 
 app = Flask(__name__)
 
 CLAUDE_KEY       = os.environ.get("CLAUDE_KEY", "")
+JUPITER_KEY      = os.environ.get("JUPITER_KEY", "")
 WALLET           = os.environ.get("WALLET", "")
 PAPER_MODE       = os.environ.get("PAPER_MODE", "true").lower() == "true"
-RISK_PCT         = float(os.environ.get("RISK_PCT", "2"))
+RISK_PCT         = float(os.environ.get("RISK_PCT", "1"))
 TP_PCT           = float(os.environ.get("TP_PCT", "4"))
 SL_PCT           = float(os.environ.get("SL_PCT", "2"))
 SCAN_INTERVAL    = int(os.environ.get("SCAN_INTERVAL", "120"))
 MONITOR_INTERVAL = int(os.environ.get("MONITOR_INTERVAL", "30"))
 EMA_FAST_LEN     = int(os.environ.get("EMA_FAST", "5"))
 EMA_SLOW_LEN     = int(os.environ.get("EMA_SLOW", "10"))
-MAX_OPEN_TRADES  = int(os.environ.get("MAX_OPEN_TRADES", "3"))
+MAX_OPEN_TRADES  = int(os.environ.get("MAX_OPEN_TRADES", "1"))
+
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
 TOKENS = {
     "SOL":  {"gecko": "solana",                  "type": "major", "min_vol": 1.2, "mint": "So11111111111111111111111111111111111111112"},
@@ -24,7 +27,7 @@ TOKENS = {
     "BONK": {"gecko": "bonk",                    "type": "meme",  "min_vol": 1.5, "mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"},
 }
 
-capital          = float(os.environ.get("STARTING_CAPITAL", "60"))
+capital          = float(os.environ.get("STARTING_CAPITAL", "54.86"))
 capital_lock     = threading.Lock()
 open_trades      = {}
 trades_lock      = threading.Lock()
@@ -55,7 +58,6 @@ def ema(prices, period):
     return val
 
 def safe_coingecko_call(params, retries=3):
-    """Single CoinGecko call with automatic retry on rate limit."""
     for attempt in range(retries):
         try:
             res = requests.get(
@@ -67,7 +69,7 @@ def safe_coingecko_call(params, retries=3):
             data = res.json()
             if "status" in data or not data:
                 wait = 30 * (attempt + 1)
-                log("warn", f"Rate limit hit — waiting {wait}s (attempt {attempt+1}/{retries})")
+                log("warn", f"Rate limit — waiting {wait}s")
                 time.sleep(wait)
                 continue
             return data
@@ -77,13 +79,11 @@ def safe_coingecko_call(params, retries=3):
     return {}
 
 def get_prices_bulk():
-    """Fetch all 5 token prices in ONE call to save rate limit."""
     ids  = ",".join([t["gecko"] for t in TOKENS.values()])
     data = safe_coingecko_call({
-        "ids":                 ids,
-        "vs_currencies":       "usd",
-        "include_24hr_vol":    "true",
-        "include_24hr_change": "true",
+        "ids":              ids,
+        "vs_currencies":    "usd",
+        "include_24hr_vol": "true",
     })
     gecko_to_sym = {t["gecko"]: sym for sym, t in TOKENS.items()}
     prices = {}
@@ -97,8 +97,96 @@ def get_prices_bulk():
             vol_cache[sym] = min(max(vol / baseline, 0.1), 5.0)
             log("info", f"${vals['usd']:.4f} | Vol:{vol_cache[sym]:.2f}x", sym)
     if not prices:
-        log("warn", "No prices returned from CoinGecko")
+        log("warn", "No prices returned")
     return prices
+
+def get_jupiter_quote(amount_usdc, output_mint):
+    """Get swap quote from Jupiter."""
+    try:
+        res = requests.get(
+            "https://quote-api.jup.ag/v6/quote",
+            params={
+                "inputMint":   USDC_MINT,
+                "outputMint":  output_mint,
+                "amount":      int(amount_usdc * 1_000_000),
+                "slippageBps": 50,
+            },
+            timeout=10
+        )
+        data = res.json()
+        if "error" in data:
+            log("err", f"Quote error: {data['error']}")
+            return None
+        return data
+    except Exception as e:
+        log("err", f"Quote failed: {e}")
+        return None
+
+def execute_jupiter_swap(quote):
+    """Submit swap to Jupiter and return tx signature."""
+    try:
+        # Build swap transaction
+        res = requests.post(
+            "https://quote-api.jup.ag/v6/swap",
+            json={
+                "quoteResponse":             quote,
+                "userPublicKey":             WALLET,
+                "wrapAndUnwrapSol":          True,
+                "prioritizationFeeLamports": 5000,
+            },
+            headers={"Content-Type": "application/json"},
+            timeout=15
+        )
+        data = res.json()
+        if "error" in data:
+            log("err", f"Swap build error: {data['error']}")
+            return None
+
+        swap_tx = data.get("swapTransaction")
+        if not swap_tx:
+            log("err", "No swap transaction returned")
+            return None
+
+        log("info", "Swap transaction built — submitting to Solana...")
+
+        # Submit transaction to Solana RPC
+        rpc_res = requests.post(
+            "https://api.mainnet-beta.solana.com",
+            json={
+                "jsonrpc": "2.0",
+                "id":      1,
+                "method":  "sendTransaction",
+                "params":  [
+                    swap_tx,
+                    {
+                        "encoding":            "base64",
+                        "skipPreflight":       False,
+                        "preflightCommitment": "confirmed",
+                        "maxRetries":          3,
+                    }
+                ]
+            },
+            headers={"Content-Type": "application/json"},
+            timeout=30
+        )
+        rpc_data = rpc_res.json()
+
+        if "error" in rpc_data:
+            log("err", f"RPC error: {rpc_data['error']}")
+            return None
+
+        tx_sig = rpc_data.get("result")
+        if tx_sig:
+            log("ok", f"TX submitted: {tx_sig[:20]}...")
+            log("ok", f"View on Solscan: https://solscan.io/tx/{tx_sig}")
+            return tx_sig
+
+        log("err", f"Unexpected RPC response: {rpc_data}")
+        return None
+
+    except Exception as e:
+        log("err", f"Swap execution failed: {e}")
+        return None
 
 def check_signal(symbol, price, vol_ratio):
     hist = price_history[symbol]
@@ -124,6 +212,9 @@ def check_signal(symbol, price, vol_ratio):
 
 def ask_claude(signal):
     try:
+        if not CLAUDE_KEY or CLAUDE_KEY == "none":
+            approved = signal["vol_ratio"] >= TOKENS[signal["symbol"]]["min_vol"]
+            return approved, "Local filter (no Claude key)"
         type_note = {
             "major": "Major coin — standard risk.",
             "defi":  "DeFi token — confirm strong signal.",
@@ -155,28 +246,54 @@ APPROVE or REJECT + one reason."""
         log("ai", text, signal["symbol"])
         return "APPROVE" in text.upper(), text
     except Exception as e:
-        log("warn", f"Claude unavailable: {e}")
+        log("warn", f"Claude error: {e}")
         return signal["vol_ratio"] >= TOKENS[signal["symbol"]]["min_vol"], "Local filter"
 
 def enter_trade(signal):
     global capital
     with capital_lock:
         risk_amt = capital * (RISK_PCT / 100)
-    symbol          = signal["symbol"]
-    price           = signal["price"]
-    tokens_received = risk_amt / price
-    log("ok", f"[PAPER] Buy ${risk_amt:.2f} -> {symbol} @ ${price:.4f} | Got {tokens_received:.4f}", symbol)
+
+    symbol = signal["symbol"]
+    price  = signal["price"]
+    mint   = signal["mint"]
+
+    if PAPER_MODE:
+        # Paper trade — simulate only
+        tokens_received = risk_amt / price
+        log("ok", f"[PAPER] Buy ${risk_amt:.2f} -> {symbol} @ ${price:.4f} | Got {tokens_received:.6f}", symbol)
+    else:
+        # LIVE trade — execute on Jupiter
+        log("info", f"[LIVE] Getting Jupiter quote for ${risk_amt:.2f} USDC -> {symbol}...", symbol)
+        quote = get_jupiter_quote(risk_amt, mint)
+        if not quote:
+            log("err", "Failed to get quote — skipping trade", symbol)
+            return False
+
+        out_amount = int(quote.get("outAmount", 0))
+        log("info", f"Quote: ${risk_amt:.2f} USDC -> {out_amount} {symbol} tokens", symbol)
+
+        tx_sig = execute_jupiter_swap(quote)
+        if not tx_sig:
+            log("err", "Swap failed — skipping trade", symbol)
+            return False
+
+        tokens_received = out_amount / 1e9
+        log("ok", f"[LIVE] Swap confirmed! Got {tokens_received:.6f} {symbol}", symbol)
+        log("ok", f"Check Phantom — USDC should be ${risk_amt:.2f} less", symbol)
+
     with trades_lock:
         open_trades[symbol] = {
             "symbol":          symbol,
-            "mint":            signal["mint"],
+            "mint":            mint,
             "type":            signal["type"],
             "entry":           price,
             "tp":              signal["tp"],
             "sl":              signal["sl"],
             "risk_amt":        risk_amt,
-            "tokens_received": tokens_received,
+            "tokens_received": risk_amt / price,
             "opened_at":       time.strftime("%H:%M:%S"),
+            "live":            not PAPER_MODE,
         }
     return True
 
@@ -186,22 +303,28 @@ def exit_trade(symbol, current_price, reason):
         if symbol not in open_trades:
             return
         trade = open_trades.pop(symbol)
+
     risk_amt = trade["risk_amt"]
     pnl      = risk_amt * (TP_PCT / SL_PCT) if reason == "TP" else -risk_amt
+
     with capital_lock:
         capital += pnl
+
     log("ok" if pnl > 0 else "err",
         f"{'TP HIT' if reason=='TP' else 'SL HIT'} @ ${current_price:.4f} | {'+' if pnl>0 else ''}${pnl:.2f} | Capital: ${capital:.2f}", symbol)
+
     completed_trades.append({
         "symbol": symbol,
         "entry":  trade["entry"],
         "exit":   current_price,
         "result": reason,
         "pnl":    round(pnl, 2),
+        "live":   trade.get("live", False),
         "time":   time.strftime("%H:%M:%S"),
     })
+
     if capital >= 100:
-        log("ok", "GOAL REACHED - $60 to $100!")
+        log("ok", "GOAL REACHED - $54.86 to $100!")
     if capital < 5:
         global scan_active
         scan_active = False
@@ -234,7 +357,7 @@ def scanner_loop():
     global scan_active
     log("ok", f"Scanner starting | {', '.join(TOKENS.keys())}")
     log("ok", f"Mode: {'PAPER' if PAPER_MODE else 'LIVE'} | Risk:{RISK_PCT}% | TP:{TP_PCT}% | SL:{SL_PCT}%")
-    log("info", f"Warming up EMA ({EMA_SLOW_LEN} samples — ~{EMA_SLOW_LEN * 30 // 60} mins)...")
+    log("info", f"Warming up EMA ({EMA_SLOW_LEN} samples)...")
 
     for i in range(EMA_SLOW_LEN):
         prices = get_prices_bulk()
