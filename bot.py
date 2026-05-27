@@ -183,4 +183,168 @@ def enter_trade(signal):
     with trades_lock:
         open_trades[symbol] = {
             "symbol":          symbol,
-            "mint
+            "mint":            signal["mint"],
+            "type":            signal["type"],
+            "entry":           price,
+            "tp":              signal["tp"],
+            "sl":              signal["sl"],
+            "risk_amt":        risk_amt,
+            "tokens_received": tokens_received,
+            "opened_at":       time.strftime("%H:%M:%S"),
+        }
+    return True
+
+def exit_trade(symbol, current_price, reason):
+    global capital
+    with trades_lock:
+        if symbol not in open_trades:
+            return
+        trade = open_trades.pop(symbol)
+    risk_amt = trade["risk_amt"]
+    pnl      = risk_amt * (TP_PCT / SL_PCT) if reason == "TP" else -risk_amt
+    with capital_lock:
+        capital += pnl
+    log("ok" if pnl > 0 else "err",
+        f"{'TP HIT' if reason=='TP' else 'SL HIT'} @ ${current_price:.4f} | {'+' if pnl>0 else ''}${pnl:.2f} | Capital: ${capital:.2f}", symbol)
+    completed_trades.append({
+        "symbol": symbol,
+        "entry":  trade["entry"],
+        "exit":   current_price,
+        "result": reason,
+        "pnl":    round(pnl, 2),
+        "time":   time.strftime("%H:%M:%S"),
+    })
+    if capital >= 100:
+        log("ok", "GOAL REACHED - $60 to $100!")
+    if capital < 5:
+        global scan_active
+        scan_active = False
+        log("err", "Capital critical — stopping")
+
+def monitor_loop():
+    while True:
+        time.sleep(MONITOR_INTERVAL)
+        with trades_lock:
+            symbols = list(open_trades.keys())
+        if not symbols:
+            continue
+        prices = get_prices_bulk()
+        for symbol in symbols:
+            with trades_lock:
+                if symbol not in open_trades:
+                    continue
+                trade = open_trades[symbol]
+            price = prices.get(symbol)
+            if not price:
+                continue
+            move = ((price - trade["entry"]) / trade["entry"]) * 100
+            log("info", f"${price:.4f} | Move: {move:+.2f}% | TP: ${trade['tp']:.4f} | SL: ${trade['sl']:.4f}", symbol)
+            if price >= trade["tp"]:
+                exit_trade(symbol, price, "TP")
+            elif price <= trade["sl"]:
+                exit_trade(symbol, price, "SL")
+
+def scanner_loop():
+    global scan_active
+    log("ok", f"Scanner starting | {', '.join(TOKENS.keys())}")
+    log("ok", f"Mode: {'PAPER' if PAPER_MODE else 'LIVE'} | Risk:{RISK_PCT}% | TP:{TP_PCT}% | SL:{SL_PCT}%")
+    log("info", f"Warming up EMA ({EMA_SLOW_LEN} samples — takes ~5 mins)...")
+
+    for i in range(EMA_SLOW_LEN):
+        prices = get_prices_bulk()
+        log("info", f"Warm-up {i+1}/{EMA_SLOW_LEN} | Got {len(prices)} prices")
+        time.sleep(15)  # 15s between warm-up calls — stays within rate limit
+
+    log("ok", "Warm-up complete — scanning for signals")
+
+    while scan_active:
+        try:
+            with trades_lock:
+                num_open = len(open_trades)
+
+            if num_open >= MAX_OPEN_TRADES:
+                log("info", f"Max trades open ({num_open}/{MAX_OPEN_TRADES})")
+                time.sleep(SCAN_INTERVAL)
+                continue
+
+            log("info", "--- Scan start ---")
+            prices = get_prices_bulk()
+
+            if not prices:
+                log("warn", "No prices — skipping scan")
+                time.sleep(SCAN_INTERVAL)
+                continue
+
+            signals_found = []
+
+            for symbol, price in prices.items():
+                with trades_lock:
+                    if symbol in open_trades:
+                        continue
+                vol_ratio = get_volume_ratio(symbol)
+                time.sleep(3)  # 3s between volume calls — avoids rate limit
+                signal = check_signal(symbol, price, vol_ratio)
+                if signal:
+                    log("ok", f"SIGNAL FOUND! Vol:{vol_ratio:.2f}x", symbol)
+                    signals_found.append(signal)
+
+            signals_found.sort(key=lambda s: s["vol_ratio"], reverse=True)
+
+            for signal in signals_found:
+                with trades_lock:
+                    if len(open_trades) >= MAX_OPEN_TRADES:
+                        break
+                    if signal["symbol"] in open_trades:
+                        continue
+                approved, reason = ask_claude(signal)
+                if approved:
+                    enter_trade(signal)
+                else:
+                    log("ai", f"Rejected: {reason}", signal["symbol"])
+
+            if not signals_found:
+                log("info", f"No signals across {len(prices)} tokens")
+
+        except Exception as e:
+            log("err", f"Scanner error: {e}")
+
+        time.sleep(SCAN_INTERVAL)
+
+@app.route("/", methods=["GET"])
+def home():
+    with trades_lock:
+        n = len(open_trades)
+    return f"JupiterBot | Capital: ${capital:.2f} | Trades: {n}/{MAX_OPEN_TRADES} | {'PAPER' if PAPER_MODE else 'LIVE'}", 200
+
+@app.route("/status", methods=["GET"])
+def status():
+    wins   = len([t for t in completed_trades if t["result"] == "TP"])
+    losses = len([t for t in completed_trades if t["result"] == "SL"])
+    wr     = round(wins / (wins + losses) * 100, 1) if (wins + losses) > 0 else 0
+    return jsonify({
+        "capital":         round(capital, 2),
+        "goal":            100,
+        "progress_pct":    round(capital / 100 * 100, 1),
+        "paper_mode":      PAPER_MODE,
+        "open_trades":     open_trades,
+        "wins":            wins,
+        "losses":          losses,
+        "win_rate_pct":    wr,
+        "tokens_watching": list(TOKENS.keys()),
+        "scan_active":     scan_active,
+    })
+
+@app.route("/trades", methods=["GET"])
+def trades():
+    return jsonify({"completed": completed_trades[-50:], "open": open_trades})
+
+@app.route("/log", methods=["GET"])
+def get_log():
+    return jsonify({"logs": trade_log[-50:]})
+
+if __name__ == "__main__":
+    threading.Thread(target=monitor_loop, daemon=True).start()
+    threading.Thread(target=scanner_loop, daemon=True).start()
+    port = int(os.environ.get("PORT", 5000))
+    log("ok", f"JupiterBot starting — {len(TOKENS)} tokens | Port {port}")
+    app.run(host="0.0.0.0", port=port, use_reloader=False)
