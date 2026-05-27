@@ -16,12 +16,13 @@ EMA_FAST_LEN     = int(os.environ.get("EMA_FAST", "9"))
 EMA_SLOW_LEN     = int(os.environ.get("EMA_SLOW", "21"))
 MAX_OPEN_TRADES  = int(os.environ.get("MAX_OPEN_TRADES", "3"))
 
+# CoinGecko IDs — no exchange, no geo-restriction
 TOKENS = {
-    "SOL":    {"type": "major", "min_vol": 1.2, "mint": "So11111111111111111111111111111111111111112",  "binance": "SOLUSDT"},
-    "JUP":    {"type": "defi",  "min_vol": 1.3, "mint": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN","binance": "JUPUSDT"},
-    "RAY":    {"type": "defi",  "min_vol": 1.3, "mint": "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R","binance": "RAYUSDT"},
-    "WIF":    {"type": "meme",  "min_vol": 1.5, "mint": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm","binance": "WIFUSDT"},
-    "BONK":   {"type": "meme",  "min_vol": 1.5, "mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263","binance": "BONKUSDT"},
+    "SOL":  {"gecko": "solana",                  "type": "major", "min_vol": 1.2, "mint": "So11111111111111111111111111111111111111112"},
+    "JUP":  {"gecko": "jupiter-exchange-solana", "type": "defi",  "min_vol": 1.3, "mint": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"},
+    "RAY":  {"gecko": "raydium",                 "type": "defi",  "min_vol": 1.3, "mint": "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R"},
+    "WIF":  {"gecko": "dogwifcoin",              "type": "meme",  "min_vol": 1.5, "mint": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm"},
+    "BONK": {"gecko": "bonk",                    "type": "meme",  "min_vol": 1.5, "mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"},
 }
 
 capital          = float(os.environ.get("STARTING_CAPITAL", "60"))
@@ -54,37 +55,55 @@ def ema(prices, period):
     return val
 
 def get_prices_bulk():
-    prices = {}
-    for sym, info in TOKENS.items():
-        try:
-            res = requests.get(
-                "https://api.binance.com/api/v3/ticker/price",
-                params={"symbol": info["binance"]},
-                timeout=8
-            )
-            data = res.json()
-            if "price" in data:
-                prices[sym] = float(data["price"])
-                log("info", f"${float(data['price']):.4f}", sym)
-            else:
-                log("warn", f"No price in response: {data}", sym)
-        except Exception as e:
-            log("warn", f"Fetch error: {e}", sym)
-        time.sleep(0.3)
-    return prices
-
-def get_volume_ratio(symbol):
+    """Fetch all token prices from CoinGecko — no API key, no geo-restrictions."""
     try:
-        binance_sym = TOKENS[symbol]["binance"]
+        ids = ",".join([t["gecko"] for t in TOKENS.values()])
         res = requests.get(
-            "https://api.binance.com/api/v3/ticker/24hr",
-            params={"symbol": binance_sym},
-            timeout=6
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={
+                "ids":                 ids,
+                "vs_currencies":       "usd",
+                "include_24hr_vol":    "true",
+                "include_24hr_change": "true",
+            },
+            headers={"accept": "application/json"},
+            timeout=10
         )
         data = res.json()
-        vol     = float(data.get("volume", 0))
-        avg_vol = float(data.get("quoteVolume", 1)) / max(float(data.get("weightedAvgPrice", 1)), 0.000001)
-        ratio   = vol / avg_vol if avg_vol > 0 else 1.0
+        gecko_to_sym = {t["gecko"]: sym for sym, t in TOKENS.items()}
+        prices = {}
+        for gecko_id, vals in data.items():
+            sym = gecko_to_sym.get(gecko_id)
+            if sym and "usd" in vals:
+                prices[sym] = float(vals["usd"])
+                log("info", f"${vals['usd']:.4f}", sym)
+        if not prices:
+            log("warn", f"CoinGecko returned empty: {data}")
+        return prices
+    except Exception as e:
+        log("warn", f"Price fetch failed: {e}")
+        return {}
+
+def get_volume_ratio(symbol):
+    """Get 24hr volume ratio from CoinGecko."""
+    try:
+        gecko_id = TOKENS[symbol]["gecko"]
+        res = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={
+                "ids":              gecko_id,
+                "vs_currencies":    "usd",
+                "include_24hr_vol": "true",
+            },
+            headers={"accept": "application/json"},
+            timeout=8
+        )
+        data = res.json()
+        vol = data.get(gecko_id, {}).get("usd_24h_vol", 0)
+        # Use a baseline volume per token type
+        baselines = {"major": 2e9, "defi": 5e7, "meme": 1e8}
+        baseline  = baselines.get(TOKENS[symbol]["type"], 1e8)
+        ratio     = vol / baseline if baseline > 0 else 1.0
         return min(max(ratio, 0.1), 5.0)
     except:
         return 1.0
@@ -122,7 +141,7 @@ def ask_claude(signal):
 Token: {signal['symbol']} ({signal['type']})
 Price: ${signal['price']:.6f}
 EMA{EMA_FAST_LEN}: {signal['ema_fast']:.6f} | EMA{EMA_SLOW_LEN}: {signal['ema_slow']:.6f}
-Volume: {signal['vol_ratio']:.2f}x avg
+Volume: {signal['vol_ratio']:.2f}x baseline
 TP: +{TP_PCT}% | SL: -{SL_PCT}% | R:R: {TP_PCT/SL_PCT:.1f}:1
 {type_note}
 APPROVE or REJECT + one reason."""
@@ -154,7 +173,7 @@ def enter_trade(signal):
     symbol          = signal["symbol"]
     price           = signal["price"]
     tokens_received = risk_amt / price
-    log("ok", f"[PAPER] Buy ${risk_amt:.2f} USDC -> {symbol} @ ${price:.4f} | Got {tokens_received:.4f}", symbol)
+    log("ok", f"[PAPER] Buy ${risk_amt:.2f} -> {symbol} @ ${price:.4f} | Got {tokens_received:.4f}", symbol)
     with trades_lock:
         open_trades[symbol] = {
             "symbol":          symbol,
@@ -220,13 +239,14 @@ def monitor_loop():
 
 def scanner_loop():
     global scan_active
-    log("ok", f"Scanner started | {', '.join(TOKENS.keys())}")
+    log("ok", f"Scanner starting | Tokens: {', '.join(TOKENS.keys())}")
+    log("ok", f"Mode: {'PAPER' if PAPER_MODE else 'LIVE'} | Risk: {RISK_PCT}% | TP: {TP_PCT}% | SL: {SL_PCT}%")
     log("info", f"Warming up EMA ({EMA_SLOW_LEN} samples)...")
     for i in range(EMA_SLOW_LEN):
         prices = get_prices_bulk()
         log("info", f"Warm-up {i+1}/{EMA_SLOW_LEN} | Got {len(prices)} prices")
         time.sleep(5)
-    log("ok", "Warm-up done - scanning for signals")
+    log("ok", "Warm-up complete — scanning for signals")
     while scan_active:
         try:
             with trades_lock:
@@ -235,10 +255,10 @@ def scanner_loop():
                 log("info", f"Max trades open ({num_open}/{MAX_OPEN_TRADES})")
                 time.sleep(SCAN_INTERVAL)
                 continue
-            log("info", f"--- Scanning {len(TOKENS)} tokens ---")
+            log("info", f"--- Scan start ---")
             prices = get_prices_bulk()
             if not prices:
-                log("warn", "No prices returned - skipping scan")
+                log("warn", "No prices — skipping scan")
                 time.sleep(SCAN_INTERVAL)
                 continue
             signals_found = []
@@ -247,7 +267,8 @@ def scanner_loop():
                     if symbol in open_trades:
                         continue
                 vol_ratio = get_volume_ratio(symbol)
-                signal    = check_signal(symbol, price, vol_ratio)
+                time.sleep(1)
+                signal = check_signal(symbol, price, vol_ratio)
                 if signal:
                     log("ok", f"SIGNAL FOUND! Vol:{vol_ratio:.2f}x", symbol)
                     signals_found.append(signal)
@@ -264,7 +285,7 @@ def scanner_loop():
                 else:
                     log("ai", f"Rejected: {reason}", signal["symbol"])
             if not signals_found:
-                log("info", f"No signals found across {len(prices)} tokens")
+                log("info", f"No signals across {len(prices)} tokens")
         except Exception as e:
             log("err", f"Scanner error: {e}")
         time.sleep(SCAN_INTERVAL)
@@ -305,5 +326,5 @@ if __name__ == "__main__":
     threading.Thread(target=monitor_loop, daemon=True).start()
     threading.Thread(target=scanner_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
-    log("ok", f"JupiterBot starting - {len(TOKENS)} tokens | Port {port}")
+    log("ok", f"JupiterBot starting — {len(TOKENS)} tokens | Port {port}")
     app.run(host="0.0.0.0", port=port, use_reloader=False)
