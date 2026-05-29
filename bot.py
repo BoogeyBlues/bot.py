@@ -1,6 +1,6 @@
-import os, time, threading, requests
+import os, time, threading, requests, re
 from flask import Flask, jsonify
-from collections import deque
+from collections import deque, defaultdict
 
 app = Flask(__name__)
 
@@ -9,34 +9,52 @@ CLAUDE_KEY         = os.environ.get("CLAUDE_KEY", "")
 WALLET             = os.environ.get("WALLET", "")
 WALLET_PRIVATE_KEY = os.environ.get("WALLET_PRIVATE_KEY", "")
 PAPER_MODE         = os.environ.get("PAPER_MODE", "true").lower() == "true"
-RISK_PCT           = float(os.environ.get("RISK_PCT", "1"))
-TP_PCT             = float(os.environ.get("TP_PCT", "4"))
-SL_PCT             = float(os.environ.get("SL_PCT", "2"))
-SCAN_INTERVAL      = int(os.environ.get("SCAN_INTERVAL", "60"))
-MONITOR_INTERVAL   = int(os.environ.get("MONITOR_INTERVAL", "30"))
-MAX_OPEN_TRADES    = int(os.environ.get("MAX_OPEN_TRADES", "1"))
+
+# Trade settings — $5 per trade, 10-20% TP, tight SL
+TRADE_AMOUNT   = float(os.environ.get("TRADE_AMOUNT", "5"))       # $5 fixed per trade
+TP_LOW         = float(os.environ.get("TP_LOW", "10"))            # 10% min TP
+TP_HIGH        = float(os.environ.get("TP_HIGH", "20"))           # 20% max TP
+SL_PCT         = float(os.environ.get("SL_PCT", "5"))             # 5% tight SL
+MAX_HOLD_MINS  = int(os.environ.get("MAX_HOLD_MINS", "10"))       # 10 min max hold
+MAX_OPEN       = int(os.environ.get("MAX_OPEN", "2"))             # 2 trades at once
+MAX_PER_COIN   = int(os.environ.get("MAX_PER_COIN", "2"))         # max 2 trades per coin
+SCAN_INTERVAL  = int(os.environ.get("SCAN_INTERVAL", "30"))       # scan every 30s
+
+# Profit targets
+MIN_PROFIT_USD = float(os.environ.get("MIN_PROFIT", "1.0"))       # minimum $1 profit target
+MAX_PROFIT_USD = float(os.environ.get("MAX_PROFIT", "10.0"))      # maximum 2x = $10 on $5
 
 SOL_RPC    = "https://api.mainnet-beta.solana.com"
 PUMPPORTAL = "https://pumpportal.fun/api/trade-local"
 
-# DexScreener pair addresses
-TOKENS = {
-    "SOL":  {"mint": "So11111111111111111111111111111111111111112",  "dex_pair": "8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj"},
-    "BONK": {"mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263","dex_pair": "Bzc9NZfMqkXR6fz1DBph7BDf9BroyEf6pnzESP7v5iiw"},
-    "WIF":  {"mint": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm", "dex_pair": "EP2ib6dYdEaFLiMLfVcB75ptqvPrdEm3Ha5cMdnRRoiB"},
-    "RAY":  {"mint": "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R", "dex_pair": "AVs9TA4nWDzfPJE9gGVNJMVhcQy3V9PGazuz33BfG2RA"},
-    "JUP":  {"mint": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",  "dex_pair": "C1MgLojNLWBKADvu9BHdtgzz1oZX4dZ5zGdGcgvvW5G4"},
-}
+# ── KOL WATCH LIST ───────────────────────────────────────────────
+# These are the accounts we track mentions of
+# We use Reddit + RSS instead of Twitter since X API costs $200/mo
+KOL_NAMES = [
+    "elonmusk", "elon", "ansem", "murad", "cobie",
+    "hsaka", "gainzy", "degen", "kaleo", "pentoshi",
+    "cryptokaleo", "blknoiz06", "notthreadguy",
+    "inversebrah", "lookonchain", "wublockchain",
+]
 
+# Coins that KOLs often move
+KOL_COINS = [
+    "DOGE", "SHIB", "PEPE", "WIF", "BONK", "FLOKI",
+    "BABYDOGE", "MEME", "WOJAK", "TURBO", "MOG", "BRETT"
+]
+
+# ── STATE ────────────────────────────────────────────────────────
 capital          = float(os.environ.get("STARTING_CAPITAL", "54.86"))
 capital_lock     = threading.Lock()
 open_trades      = {}
 trades_lock      = threading.Lock()
-price_history    = {sym: deque(maxlen=50) for sym in TOKENS}
+coin_trade_count = defaultdict(int)
 trade_log        = []
 completed_trades = []
 log_lock         = threading.Lock()
 scan_active      = True
+kol_signals      = []   # signals from KOL/social scanning
+kol_lock         = threading.Lock()
 
 # ── LOGGING ─────────────────────────────────────────────────────
 def log(tag, msg, symbol=""):
@@ -45,55 +63,10 @@ def log(tag, msg, symbol=""):
     print(entry, flush=True)
     with log_lock:
         trade_log.append({"time": time.strftime('%H:%M:%S'), "tag": tag, "symbol": symbol, "msg": msg})
-        if len(trade_log) > 200:
+        if len(trade_log) > 300:
             trade_log.pop(0)
 
-# ── EMA ─────────────────────────────────────────────────────────
-def ema(prices, period):
-    p = list(prices)
-    if len(p) < period:
-        return None
-    k = 2 / (period + 1)
-    val = p[0]
-    for px in p[1:]:
-        val = px * k + val * (1 - k)
-    return val
-
-# ── DEXSCREENER ──────────────────────────────────────────────────
-def get_all_prices():
-    """Fetch all token data from DexScreener in one call."""
-    try:
-        pair_addresses = ",".join([t["dex_pair"] for t in TOKENS.values()])
-        res = requests.get(
-            f"https://api.dexscreener.com/latest/dex/pairs/solana/{pair_addresses}",
-            timeout=10
-        )
-        pairs = res.json().get("pairs", [])
-        pair_to_sym = {t["dex_pair"]: sym for sym, t in TOKENS.items()}
-        result = {}
-        for pair in pairs:
-            sym = pair_to_sym.get(pair.get("pairAddress", ""))
-            if not sym:
-                continue
-            price   = float(pair.get("priceUsd", 0) or 0)
-            vol1h   = float(pair.get("volume", {}).get("h1", 0) or 0)
-            vol6h   = float(pair.get("volume", {}).get("h6", 0) or 0)
-            change1h = float(pair.get("priceChange", {}).get("h1", 0) or 0)
-            change6h = float(pair.get("priceChange", {}).get("h6", 0) or 0)
-            if price > 0:
-                result[sym] = {
-                    "price":    price,
-                    "vol1h":    vol1h,
-                    "vol6h":    vol6h,
-                    "change1h": change1h,
-                    "change6h": change6h,
-                }
-                log("info", f"${price:.4f} | 1h:{change1h:+.2f}% | Vol1h:${vol1h:,.0f}", sym)
-        return result
-    except Exception as e:
-        log("warn", f"DexScreener error: {e}")
-        return {}
-
+# ── SOL PRICE ────────────────────────────────────────────────────
 def get_sol_price():
     try:
         res = requests.get(
@@ -107,49 +80,253 @@ def get_sol_price():
         pass
     return None
 
-# ── SIGNAL DETECTION ─────────────────────────────────────────────
-def check_signal(symbol, data):
-    """
-    Uses PRICE MOMENTUM instead of volume ratio.
-    Fires when price is moving up consistently.
-    Works in any market condition.
-    """
-    price    = data["price"]
-    change1h = data["change1h"]
-    change6h = data["change6h"]
-
-    price_history[symbol].append(price)
-    fast = ema(price_history[symbol], 5)
-    slow = ema(price_history[symbol], 10)
-
-    if not fast or not slow:
+# ── COIN DATA ────────────────────────────────────────────────────
+def get_coin_data(mint):
+    try:
+        res = requests.get(
+            f"https://api.dexscreener.com/latest/dex/tokens/{mint}",
+            timeout=8
+        )
+        pairs = res.json().get("pairs", [])
+        if not pairs:
+            return None
+        sol_pairs = [p for p in pairs if p.get("chainId") == "solana"]
+        if not sol_pairs:
+            return None
+        pair = max(sol_pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
+        return {
+            "price":     float(pair.get("priceUsd", 0) or 0),
+            "mcap":      float(pair.get("marketCap", 0) or 0),
+            "liq":       float(pair.get("liquidity", {}).get("usd", 0) or 0),
+            "vol5m":     float(pair.get("volume", {}).get("m5", 0) or 0),
+            "vol1h":     float(pair.get("volume", {}).get("h1", 0) or 0),
+            "change5m":  float(pair.get("priceChange", {}).get("m5", 0) or 0),
+            "change1h":  float(pair.get("priceChange", {}).get("h1", 0) or 0),
+            "txns5m_buy": int((pair.get("txns", {}).get("m5", {}) or {}).get("buys", 0)),
+            "symbol":    pair.get("baseToken", {}).get("symbol", ""),
+            "name":      pair.get("baseToken", {}).get("name", ""),
+            "pair_addr": pair.get("pairAddress", ""),
+        }
+    except:
         return None
 
-    # Signal conditions — price momentum based, not volume
-    ema_cross    = fast > slow                 # EMA crossover
-    rising_1h    = change1h > 0.3              # rising in last hour
-    not_extended = change1h < 8.0              # not already overbought
+# ── TRENDING PUMP.FUN COINS ──────────────────────────────────────
+def get_trending_coins():
+    """Get trending pump.fun coins from DexScreener."""
+    coins = []
+    try:
+        # Boosted/trending tokens
+        res = requests.get("https://api.dexscreener.com/token-boosts/latest/v1", timeout=10)
+        data = res.json()
+        if isinstance(data, list):
+            for t in data[:30]:
+                if t.get("chainId") == "solana":
+                    coins.append({
+                        "mint":   t.get("tokenAddress", ""),
+                        "symbol": t.get("description", "")[:12],
+                        "source": "dexscreener_boost"
+                    })
+    except Exception as e:
+        log("warn", f"Trending fetch error: {e}")
 
-    log("info", f"EMA5:{fast:.4f} EMA10:{slow:.4f} | 1h:{change1h:+.2f}% Cross:{'✓' if ema_cross else '✗'}", symbol)
+    # New pairs search
+    try:
+        res = requests.get("https://api.dexscreener.com/latest/dex/search?q=pump.fun", timeout=10)
+        pairs = res.json().get("pairs", [])
+        for p in pairs[:20]:
+            if p.get("chainId") != "solana":
+                continue
+            mint = p.get("baseToken", {}).get("address", "")
+            sym  = p.get("baseToken", {}).get("symbol", "")
+            if mint and mint not in [c["mint"] for c in coins]:
+                coins.append({"mint": mint, "symbol": sym, "source": "dexscreener_search"})
+    except:
+        pass
 
-    if ema_cross and rising_1h and not_extended:
-        return {
-            "symbol":    symbol,
-            "mint":      TOKENS[symbol]["mint"],
-            "price":     price,
-            "ema_fast":  fast,
-            "ema_slow":  slow,
-            "change1h":  change1h,
-            "change6h":  change6h,
-            "tp":        price * (1 + TP_PCT / 100),
-            "sl":        price * (1 - SL_PCT / 100),
-        }
-    return None
+    return [c for c in coins if c["mint"]][:50]
 
-# ── SWAP ─────────────────────────────────────────────────────────
-def execute_swap(amount_usdc, output_mint, symbol):
+# ── SOCIAL SIGNAL SCANNER ────────────────────────────────────────
+def scan_social_signals():
+    """
+    Scans free social sources for KOL mentions and coin signals.
+    Uses Reddit, RSS feeds, and DexScreener social data.
+    No Twitter API needed.
+    """
+    signals = []
+
+    # 1. Reddit r/cryptomoonshots — often has pump.fun coins before they moon
+    try:
+        res = requests.get(
+            "https://www.reddit.com/r/cryptomoonshots/new.json?limit=25",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10
+        )
+        posts = res.json().get("data", {}).get("children", [])
+        for post in posts:
+            p     = post["data"]
+            title = p.get("title", "").upper()
+            text  = p.get("selftext", "").upper()
+            ups   = p.get("ups", 0)
+            combined = title + " " + text
+
+            # Check if any KOL mentioned
+            kol_mentioned = any(kol.upper() in combined for kol in KOL_NAMES)
+
+            # Check if Solana/pump.fun coin
+            is_solana = any(w in combined for w in ["SOLANA", "SOL", "PUMP.FUN", "PUMPFUN", "SPL"])
+
+            # Extract potential coin tickers ($TICKER format)
+            tickers = re.findall(r'\$([A-Z]{2,10})', combined)
+
+            if (kol_mentioned or ups > 50) and is_solana and tickers:
+                for ticker in tickers[:2]:
+                    signals.append({
+                        "source":  "reddit",
+                        "ticker":  ticker,
+                        "context": title[:100],
+                        "kol":     kol_mentioned,
+                        "score":   ups,
+                    })
+                    log("info", f"Reddit signal: ${ticker} | KOL:{kol_mentioned} | Ups:{ups}")
+
+    except Exception as e:
+        log("warn", f"Reddit scan error: {e}")
+
+    # 2. DexScreener trending — coins getting social attention
+    try:
+        res = requests.get("https://api.dexscreener.com/token-boosts/top/v1", timeout=10)
+        data = res.json()
+        if isinstance(data, list):
+            for t in data[:10]:
+                if t.get("chainId") == "solana":
+                    desc = t.get("description", "")
+                    links = t.get("links", [])
+                    has_twitter = any("twitter" in str(l).lower() or "x.com" in str(l).lower() for l in links)
+                    signals.append({
+                        "source":  "dexscreener_top",
+                        "mint":    t.get("tokenAddress", ""),
+                        "ticker":  desc[:10],
+                        "kol":     has_twitter,
+                        "score":   t.get("amount", 0),
+                    })
+                    if has_twitter:
+                        log("info", f"DexScreener top boost with Twitter: {desc[:20]}")
+    except Exception as e:
+        log("warn", f"DexScreener boost error: {e}")
+
+    # 3. CoinGecko trending — catches coins going viral
+    try:
+        res = requests.get(
+            "https://api.coingecko.com/api/v3/search/trending",
+            timeout=8
+        )
+        coins = res.json().get("coins", [])
+        for c in coins[:7]:
+            item   = c.get("item", {})
+            symbol = item.get("symbol", "").upper()
+            name   = item.get("name", "")
+            score  = item.get("score", 0)
+            # Only care about meme-like coins
+            meme_words = ["DOGE", "PEPE", "SHIB", "MEME", "INU", "FLOKI", "WIF", "BONK", "CAT", "FROG", "MOON"]
+            is_meme = any(w in symbol or w in name.upper() for w in meme_words)
+            if is_meme:
+                signals.append({
+                    "source":  "coingecko_trending",
+                    "ticker":  symbol,
+                    "context": f"Trending #{score+1} on CoinGecko",
+                    "kol":     False,
+                    "score":   100 - score,
+                })
+                log("info", f"CoinGecko trending meme: {symbol}")
+    except Exception as e:
+        log("warn", f"CoinGecko trending error: {e}")
+
+    with kol_lock:
+        kol_signals.clear()
+        kol_signals.extend(signals)
+
+    log("info", f"Social scan complete — {len(signals)} signals found")
+    return signals
+
+# ── CALCULATE TAKE PROFIT ─────────────────────────────────────────
+def calc_tp(price, signal_strength):
+    """
+    Dynamic TP between 10-20% based on signal strength.
+    Strong KOL signal = 20% TP
+    Normal signal = 10% TP
+    """
+    if signal_strength == "strong":
+        tp_pct = TP_HIGH   # 20%
+    elif signal_strength == "medium":
+        tp_pct = (TP_LOW + TP_HIGH) / 2  # 15%
+    else:
+        tp_pct = TP_LOW    # 10%
+
+    tp_price = price * (1 + tp_pct / 100)
+    profit   = TRADE_AMOUNT * (tp_pct / 100)
+
+    # Ensure minimum $1 profit, cap at 2x ($10 on $5)
+    profit = max(MIN_PROFIT_USD, min(profit, MAX_PROFIT_USD))
+
+    return tp_price, tp_pct, profit
+
+# ── CLAUDE SIGNAL ANALYSIS ───────────────────────────────────────
+def ask_claude(symbol, mint, coin_data, social_context=""):
+    try:
+        if not CLAUDE_KEY or CLAUDE_KEY in ["none", ""]:
+            return True, "strong", "Local filter"
+
+        prompt = f"""You are a pump.fun meme coin sniper analyzing a trade opportunity.
+
+Coin: {symbol}
+Market Cap: ${coin_data.get('mcap', 0):,.0f}
+Liquidity: ${coin_data.get('liq', 0):,.0f}
+5min Volume: ${coin_data.get('vol5m', 0):,.0f}
+5min Price Change: {coin_data.get('change5m', 0):+.1f}%
+5min Buy Transactions: {coin_data.get('txns5m_buy', 0)}
+1h Change: {coin_data.get('change1h', 0):+.1f}%
+Social Context: {social_context or 'Trending on DexScreener'}
+
+Trade Parameters:
+- Fixed trade size: ${TRADE_AMOUNT}
+- Take Profit: {TP_LOW}-{TP_HIGH}% (${TRADE_AMOUNT * TP_LOW/100:.2f}-${TRADE_AMOUNT * TP_HIGH/100:.2f} profit)
+- Stop Loss: {SL_PCT}% (${TRADE_AMOUNT * SL_PCT/100:.2f} max loss)
+- Max hold: {MAX_HOLD_MINS} minutes then force exit
+
+APPROVE or REJECT + one reason.
+If APPROVE, also rate signal strength: STRONG, MEDIUM, or WEAK."""
+
+        res = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            json={
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 80,
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            headers={
+                "x-api-key": CLAUDE_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            },
+            timeout=10
+        )
+        text = res.json()["content"][0]["text"].upper()
+        log("ai", text[:80], symbol)
+
+        if "REJECT" in text:
+            return False, "none", text
+        strength = "strong" if "STRONG" in text else "medium" if "MEDIUM" in text else "weak"
+        return True, strength, text
+
+    except Exception as e:
+        log("warn", f"Claude error: {e}")
+        return True, "medium", "Local filter"
+
+# ── EXECUTE SWAP ─────────────────────────────────────────────────
+def execute_swap(mint, symbol):
+    """Execute $5 buy on pump.fun via PumpPortal."""
     if PAPER_MODE:
-        log("ok", f"[PAPER] Buy ${amount_usdc:.4f} USDC -> {symbol}", symbol)
+        log("ok", f"[PAPER] Buy ${TRADE_AMOUNT} -> {symbol}", symbol)
         return "PAPER_TX"
     try:
         from solders.keypair import Keypair
@@ -163,8 +340,8 @@ def execute_swap(amount_usdc, output_mint, symbol):
             log("err", "No SOL price", symbol)
             return None
 
-        sol_amount = round(amount_usdc / sol_price, 6)
-        log("info", f"${amount_usdc:.4f} USDC = {sol_amount} SOL -> {symbol}", symbol)
+        sol_amount = round(TRADE_AMOUNT / sol_price, 6)
+        log("info", f"${TRADE_AMOUNT} USDC = {sol_amount} SOL -> {symbol}", symbol)
 
         response = requests.post(
             PUMPPORTAL,
@@ -172,12 +349,12 @@ def execute_swap(amount_usdc, output_mint, symbol):
             json={
                 "publicKey":        WALLET,
                 "action":           "buy",
-                "mint":             output_mint,
+                "mint":             mint,
                 "denominatedInSol": "true",
                 "amount":           sol_amount,
-                "slippage":         15,
+                "slippage":         20,
                 "priorityFee":      0.001,
-                "pool":             "raydium"
+                "pool":             "pump"
             },
             timeout=15
         )
@@ -197,187 +374,325 @@ def execute_swap(amount_usdc, output_mint, symbol):
         tx_sig = str(result.value)
 
         if tx_sig and len(tx_sig) > 10:
-            log("ok", f"Swap confirmed! Tx: {tx_sig[:20]}...", symbol)
+            log("ok", f"Bought {symbol}! Tx: {tx_sig[:20]}...", symbol)
             log("ok", f"Solscan: https://solscan.io/tx/{tx_sig}", symbol)
-            log("ok", "Check Phantom — balance updated!", symbol)
             return tx_sig
         return None
     except Exception as e:
         log("err", f"Swap error: {e}", symbol)
         return None
 
+def execute_sell(tokens, mint, symbol):
+    """Sell tokens back via PumpPortal."""
+    if PAPER_MODE:
+        log("ok", f"[PAPER] Sell {tokens:.6f} {symbol}", symbol)
+        return "PAPER_TX"
+    try:
+        from solders.keypair import Keypair
+        from solders.transaction import VersionedTransaction
+        from solana.rpc.api import Client
+        from solana.rpc.types import TxOpts
+        from solana.rpc.commitment import Confirmed
+
+        response = requests.post(
+            PUMPPORTAL,
+            headers={"Content-Type": "application/json"},
+            json={
+                "publicKey":        WALLET,
+                "action":           "sell",
+                "mint":             mint,
+                "denominatedInSol": "false",
+                "amount":           tokens,
+                "slippage":         20,
+                "priorityFee":      0.001,
+                "pool":             "pump"
+            },
+            timeout=15
+        )
+        if response.status_code != 200:
+            return None
+
+        keypair = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+        tx = VersionedTransaction(
+            VersionedTransaction.from_bytes(response.content).message,
+            [keypair]
+        )
+        client = Client(SOL_RPC)
+        opts = TxOpts(skip_preflight=True, preflight_commitment=Confirmed)
+        result = client.send_raw_transaction(bytes(tx), opts=opts)
+        tx_sig = str(result.value)
+        if tx_sig and len(tx_sig) > 10:
+            log("ok", f"Sold {symbol}! Tx: {tx_sig[:20]}...", symbol)
+            return tx_sig
+        return None
+    except Exception as e:
+        log("err", f"Sell error: {e}", symbol)
+        return None
+
 # ── ENTER TRADE ──────────────────────────────────────────────────
-def enter_trade(signal):
+def enter_trade(mint, symbol, coin_data, signal_strength, social_context):
     global capital
-    with capital_lock:
-        risk_amt = capital * (RISK_PCT / 100)
 
-    symbol = signal["symbol"]
-    price  = signal["price"]
-    mint   = signal["mint"]
+    if coin_trade_count[mint] >= MAX_PER_COIN:
+        return False
+    with trades_lock:
+        if mint in open_trades or len(open_trades) >= MAX_OPEN:
+            return False
 
-    tx_sig = execute_swap(risk_amt, mint, symbol)
+    if capital < TRADE_AMOUNT:
+        log("warn", f"Insufficient capital ${capital:.2f} for ${TRADE_AMOUNT} trade")
+        return False
+
+    price = coin_data["price"]
+    if price <= 0:
+        return False
+
+    tp_price, tp_pct, expected_profit = calc_tp(price, signal_strength)
+    sl_price = price * (1 - SL_PCT / 100)
+
+    log("ok", f"[{signal_strength.upper()}] Entry ${TRADE_AMOUNT} | TP:+{tp_pct}% (${expected_profit:.2f} profit) | SL:-{SL_PCT}%", symbol)
+
+    tx_sig = execute_swap(mint, symbol)
     if not tx_sig:
         return False
 
+    tokens = TRADE_AMOUNT / price
+
     with trades_lock:
-        open_trades[symbol] = {
+        open_trades[mint] = {
             "symbol":    symbol,
             "mint":      mint,
             "entry":     price,
-            "tp":        signal["tp"],
-            "sl":        signal["sl"],
-            "risk_amt":  risk_amt,
-            "opened_at": time.strftime("%H:%M:%S"),
+            "tp":        tp_price,
+            "tp_pct":    tp_pct,
+            "sl":        sl_price,
+            "sl_pct":    SL_PCT,
+            "amount":    TRADE_AMOUNT,
+            "tokens":    tokens,
+            "exp_profit": expected_profit,
+            "strength":  signal_strength,
+            "context":   social_context[:80],
+            "opened_at": time.time(),
+            "time_str":  time.strftime("%H:%M:%S"),
             "live":      not PAPER_MODE,
         }
 
-    log("ok", f"Trade open | Entry:${price:.4f} TP:${signal['tp']:.4f} SL:${signal['sl']:.4f}", symbol)
+    coin_trade_count[mint] += 1
+    with capital_lock:
+        capital -= TRADE_AMOUNT  # reserve capital
+
     return True
 
 # ── EXIT TRADE ───────────────────────────────────────────────────
-def exit_trade(symbol, current_price, reason):
+def exit_trade(mint, current_price, reason):
     global capital
-    with trades_lock:
-        if symbol not in open_trades:
-            return
-        trade = open_trades.pop(symbol)
 
-    risk_amt = trade["risk_amt"]
-    pnl      = risk_amt * (TP_PCT / SL_PCT) if reason == "TP" else -risk_amt
+    with trades_lock:
+        if mint not in open_trades:
+            return
+        trade = open_trades.pop(mint)
+
+    symbol    = trade["symbol"]
+    entry     = trade["entry"]
+    amount    = trade["amount"]
+    tokens    = trade["tokens"]
+    tp_pct    = trade["tp_pct"]
+    hold_m    = (time.time() - trade["opened_at"]) / 60
+
+    if reason == "TP":
+        pnl = amount * (tp_pct / 100)
+    elif reason == "SL":
+        pnl = -(amount * SL_PCT / 100)
+    else:  # TIME exit
+        pnl = ((current_price - entry) / entry) * amount if entry > 0 else 0
 
     with capital_lock:
-        capital += pnl
+        capital += amount + pnl  # return capital + profit/loss
 
-    log("ok" if pnl > 0 else "err",
-        f"{'TP HIT' if reason=='TP' else 'SL HIT'} @ ${current_price:.4f} | {'+' if pnl>0 else ''}${pnl:.4f} | Capital: ${capital:.2f}", symbol)
+    emoji = "✅" if pnl >= 0 else "❌"
+    log("ok" if pnl >= 0 else "err",
+        f"{emoji} {reason} | Entry:${entry:.8f} Exit:${current_price:.8f} | PnL:{'+' if pnl>=0 else ''}${pnl:.4f} | Held:{hold_m:.1f}m | Capital:${capital:.2f}", symbol)
+
+    execute_sell(tokens, mint, symbol)
 
     completed_trades.append({
-        "symbol": symbol,
-        "entry":  trade["entry"],
-        "exit":   current_price,
-        "result": reason,
-        "pnl":    round(pnl, 4),
-        "time":   time.strftime("%H:%M:%S"),
+        "symbol":   symbol,
+        "entry":    entry,
+        "exit":     current_price,
+        "result":   reason,
+        "pnl":      round(pnl, 4),
+        "hold_m":   round(hold_m, 1),
+        "strength": trade["strength"],
+        "context":  trade["context"],
+        "time":     time.strftime("%H:%M:%S"),
     })
 
     if capital >= 100:
-        log("ok", "GOAL REACHED — $54.86 to $100!")
-    if capital < 3:
+        log("ok", "GOAL REACHED — $100!")
+    if capital < 1:
         global scan_active
         scan_active = False
-        log("err", "Capital critical — stopping")
 
-# ── MONITOR ──────────────────────────────────────────────────────
+# ── MONITOR LOOP ─────────────────────────────────────────────────
 def monitor_loop():
     while True:
-        time.sleep(MONITOR_INTERVAL)
+        time.sleep(10)
         with trades_lock:
-            symbols = list(open_trades.keys())
-        if not symbols:
-            continue
-        data = get_all_prices()
-        for symbol in symbols:
+            mints = list(open_trades.keys())
+        for mint in mints:
             with trades_lock:
-                if symbol not in open_trades:
+                if mint not in open_trades:
                     continue
-                trade = open_trades[symbol]
-            token_data = data.get(symbol)
-            if not token_data:
-                continue
-            price = token_data["price"]
-            move  = ((price - trade["entry"]) / trade["entry"]) * 100
-            log("info", f"${price:.4f} | Move:{move:+.2f}% | TP:${trade['tp']:.4f} | SL:${trade['sl']:.4f}", symbol)
-            if price >= trade["tp"]:
-                exit_trade(symbol, price, "TP")
-            elif price <= trade["sl"]:
-                exit_trade(symbol, price, "SL")
+                trade = open_trades[mint]
+            hold_m = (time.time() - trade["opened_at"]) / 60
 
-# ── SCANNER ──────────────────────────────────────────────────────
+            if hold_m >= MAX_HOLD_MINS:
+                data = get_coin_data(mint)
+                price = data["price"] if data and data["price"] > 0 else trade["entry"]
+                log("warn", f"TIME EXIT after {hold_m:.1f}m", trade["symbol"])
+                exit_trade(mint, price, f"TIME")
+                continue
+
+            data = get_coin_data(mint)
+            if not data or data["price"] <= 0:
+                continue
+
+            price = data["price"]
+            move  = ((price - trade["entry"]) / trade["entry"]) * 100
+            log("info", f"${price:.8f} | Move:{move:+.2f}% | TP:{trade['tp_pct']}% SL:{SL_PCT}% | {hold_m:.1f}/{MAX_HOLD_MINS}m", trade["symbol"])
+
+            if price >= trade["tp"]:
+                exit_trade(mint, price, "TP")
+            elif price <= trade["sl"]:
+                exit_trade(mint, price, "SL")
+
+# ── SOCIAL SCANNER THREAD ────────────────────────────────────────
+def social_scanner_loop():
+    """Runs every 5 minutes to refresh social signals."""
+    while scan_active:
+        try:
+            log("info", "--- Social scan (Reddit + CoinGecko + DexScreener) ---")
+            scan_social_signals()
+        except Exception as e:
+            log("err", f"Social scanner error: {e}")
+        time.sleep(300)  # every 5 minutes
+
+# ── MAIN SCANNER ─────────────────────────────────────────────────
 def scanner_loop():
     global scan_active
-    log("ok", f"Bot starting | {', '.join(TOKENS.keys())}")
-    log("ok", f"Mode: {'PAPER' if PAPER_MODE else 'LIVE'} | Risk:{RISK_PCT}% | TP:{TP_PCT}% | SL:{SL_PCT}%")
-    log("ok", "Signal: EMA crossover + positive 1h momentum")
-    log("info", "Collecting 10 price samples (1 min)...")
+    log("ok", "=" * 55)
+    log("ok", "PumpFun KOL Sniper — starting")
+    log("ok", f"Trade size: ${TRADE_AMOUNT} fixed | TP: {TP_LOW}-{TP_HIGH}% | SL: {SL_PCT}%")
+    log("ok", f"Profit targets: ${MIN_PROFIT_USD:.0f} min — ${MAX_PROFIT_USD:.0f} max (2x)")
+    log("ok", f"Max hold: {MAX_HOLD_MINS} mins | Mode: {'PAPER' if PAPER_MODE else 'LIVE'}")
+    log("ok", "Social sources: Reddit + CoinGecko Trending + DexScreener")
+    log("ok", "=" * 55)
 
-    # Warm up with 10 samples — 6 seconds apart
-    for i in range(10):
-        data = get_all_prices()
-        for sym, d in data.items():
-            price_history[sym].append(d["price"])
-        log("info", f"Warm-up {i+1}/10 | Got {len(data)} prices")
-        time.sleep(6)
-
-    log("ok", "Ready — scanning every 60s")
+    # Initial social scan
+    scan_social_signals()
 
     while scan_active:
         try:
             with trades_lock:
                 num_open = len(open_trades)
 
-            if num_open >= MAX_OPEN_TRADES:
-                log("info", f"Trade open ({num_open}/{MAX_OPEN_TRADES}) — monitoring")
+            if num_open >= MAX_OPEN:
+                log("info", f"Max trades open ({num_open}/{MAX_OPEN})")
                 time.sleep(SCAN_INTERVAL)
                 continue
 
-            log("info", "--- Scan ---")
-            all_data = get_all_prices()
+            log("info", f"--- Scanning | Open:{num_open}/{MAX_OPEN} ---")
 
-            if not all_data:
-                log("warn", "No data — retrying")
-                time.sleep(15)
-                continue
+            # Get trending coins
+            trending = get_trending_coins()
+            log("info", f"Found {len(trending)} trending pump.fun coins")
 
-            signals = []
-            for symbol, data in all_data.items():
+            # Get current social signals
+            with kol_lock:
+                current_signals = list(kol_signals)
+
+            # Score each trending coin
+            candidates = []
+
+            for coin in trending[:40]:
+                mint   = coin["mint"]
+                if not mint:
+                    continue
+                if coin_trade_count[mint] >= MAX_PER_COIN:
+                    continue
                 with trades_lock:
-                    if symbol in open_trades:
+                    if mint in open_trades:
                         continue
-                signal = check_signal(symbol, data)
-                if signal:
-                    log("ok", f"SIGNAL! 1h:{data['change1h']:+.2f}%", symbol)
-                    signals.append(signal)
 
-            # Take strongest signal (highest 1h gain)
-            signals.sort(key=lambda s: s["change1h"], reverse=True)
+                data = get_coin_data(mint)
+                if not data or data["price"] <= 0:
+                    continue
 
-            for signal in signals:
+                symbol = data["symbol"] or data["name"] or mint[:8]
+
+                # Base filters
+                if data["mcap"] < 5000 or data["mcap"] > 500000:
+                    continue
+                if data["liq"] < 1000:
+                    continue
+                if data["change5m"] < 3:
+                    continue
+                if data["txns5m_buy"] < 5:
+                    continue
+
+                # Score the coin
+                score = 0
+                social_context = ""
+
+                # Check if mentioned in social signals
+                for sig in current_signals:
+                    ticker = sig.get("ticker", "").upper()
+                    if ticker and (ticker in symbol.upper() or symbol.upper() in ticker):
+                        score += 50 if sig.get("kol") else 20
+                        social_context = sig.get("context", sig.get("source", ""))
+                        log("ok", f"SOCIAL MATCH: {symbol} in {sig['source']} score+{score}", symbol)
+
+                # Momentum score
+                score += min(data["change5m"] * 2, 30)    # up to 30 pts for momentum
+                score += min(data["txns5m_buy"], 20)       # up to 20 pts for buys
+                score += min(data["liq"] / 1000, 10)       # up to 10 pts for liquidity
+
+                if score >= 10:
+                    candidates.append({
+                        "mint":    mint,
+                        "symbol":  symbol,
+                        "data":    data,
+                        "score":   score,
+                        "context": social_context or f"+{data['change5m']:.1f}% on pump.fun",
+                    })
+
+            # Sort by score
+            candidates.sort(key=lambda c: c["score"], reverse=True)
+            log("info", f"Candidates: {len(candidates)} | Top score: {candidates[0]['score'] if candidates else 0}")
+
+            for c in candidates[:3]:
                 with trades_lock:
-                    if len(open_trades) >= MAX_OPEN_TRADES:
+                    if len(open_trades) >= MAX_OPEN:
                         break
-                    if signal["symbol"] in open_trades:
+                    if c["mint"] in open_trades:
                         continue
 
-                # Claude check
-                if CLAUDE_KEY and CLAUDE_KEY not in ["none", ""]:
-                    try:
-                        prompt = f"""Quick trade filter.
-{signal['symbol']}: ${signal['price']:.4f}
-EMA5 > EMA10: YES
-1h change: {signal['change1h']:+.2f}%
-6h change: {signal['change6h']:+.2f}%
-TP: +{TP_PCT}% | SL: -{SL_PCT}%
-APPROVE or REJECT + one reason."""
-                        res = requests.post(
-                            "https://api.anthropic.com/v1/messages",
-                            json={"model": "claude-sonnet-4-20250514", "max_tokens": 50,
-                                  "messages": [{"role": "user", "content": prompt}]},
-                            headers={"x-api-key": CLAUDE_KEY, "anthropic-version": "2023-06-01",
-                                     "content-type": "application/json"},
-                            timeout=8
-                        )
-                        text = res.json()["content"][0]["text"]
-                        log("ai", text, signal["symbol"])
-                        if "REJECT" in text.upper():
-                            continue
-                    except:
-                        pass
+                symbol = c["symbol"]
+                score  = c["score"]
+                signal_strength = "strong" if score >= 60 else "medium" if score >= 30 else "weak"
 
-                enter_trade(signal)
+                log("ok", f"Candidate: {symbol} score:{score} strength:{signal_strength} | {c['context'][:50]}", symbol)
 
-            if not signals:
-                log("info", "No momentum signals — market flat")
+                # Claude filter
+                approved, strength, reason = ask_claude(symbol, c["mint"], c["data"], c["context"])
+                if not approved:
+                    log("ai", f"Rejected: {reason[:50]}", symbol)
+                    continue
+
+                enter_trade(c["mint"], symbol, c["data"], strength, c["context"])
+
+            if not candidates:
+                log("info", "No qualifying candidates this scan")
 
         except Exception as e:
             log("err", f"Scanner error: {e}")
@@ -389,29 +704,47 @@ APPROVE or REJECT + one reason."""
 def home():
     with trades_lock:
         n = len(open_trades)
-    return f"JupiterBot | Capital: ${capital:.2f} | Trades: {n} | {'PAPER' if PAPER_MODE else 'LIVE'}", 200
+    return f"KOL Sniper | Capital: ${capital:.2f} | Open: {n}/{MAX_OPEN} | {'PAPER' if PAPER_MODE else 'LIVE'}", 200
 
 @app.route("/status", methods=["GET"])
 def status():
-    wins   = len([t for t in completed_trades if t["result"] == "TP"])
-    losses = len([t for t in completed_trades if t["result"] == "SL"])
-    wr     = round(wins / (wins + losses) * 100, 1) if (wins + losses) > 0 else 0
+    wins      = len([t for t in completed_trades if t["result"] == "TP"])
+    losses    = len([t for t in completed_trades if t["result"] == "SL"])
+    time_exits = len([t for t in completed_trades if t["result"] == "TIME"])
+    total_pnl = sum(t["pnl"] for t in completed_trades)
+    wr        = round(wins / max(wins + losses, 1) * 100, 1)
     return jsonify({
-        "capital":      round(capital, 2),
-        "goal":         100,
-        "paper_mode":   PAPER_MODE,
-        "open_trades":  open_trades,
-        "wins":         wins,
-        "losses":       losses,
-        "win_rate":     wr,
-        "total_trades": len(completed_trades),
-        "watching":     list(TOKENS.keys()),
-        "signal_type":  "EMA crossover + positive 1h momentum",
+        "capital":       round(capital, 2),
+        "goal":          100,
+        "paper_mode":    PAPER_MODE,
+        "open_trades":   len(open_trades),
+        "wins":          wins,
+        "losses":        losses,
+        "time_exits":    time_exits,
+        "win_rate":      wr,
+        "total_pnl":     round(total_pnl, 4),
+        "total_trades":  len(completed_trades),
+        "social_signals": len(kol_signals),
+        "settings": {
+            "trade_amount":  TRADE_AMOUNT,
+            "tp_range":      f"{TP_LOW}-{TP_HIGH}%",
+            "sl_pct":        SL_PCT,
+            "max_hold_mins": MAX_HOLD_MINS,
+            "profit_range":  f"${MIN_PROFIT_USD}-${MAX_PROFIT_USD}",
+        }
     })
 
 @app.route("/trades", methods=["GET"])
 def trades():
-    return jsonify({"completed": completed_trades[-50:], "open": open_trades})
+    return jsonify({
+        "open":      [{k: v for k, v in t.items() if k != "opened_at"} for t in open_trades.values()],
+        "completed": completed_trades[-50:]
+    })
+
+@app.route("/signals", methods=["GET"])
+def signals():
+    with kol_lock:
+        return jsonify({"social_signals": kol_signals})
 
 @app.route("/log", methods=["GET"])
 def get_log():
@@ -419,9 +752,10 @@ def get_log():
 
 # ── START ─────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    threading.Thread(target=monitor_loop,  daemon=True).start()
-    threading.Thread(target=scanner_loop,  daemon=True).start()
+    threading.Thread(target=monitor_loop,       daemon=True).start()
+    threading.Thread(target=social_scanner_loop, daemon=True).start()
+    threading.Thread(target=scanner_loop,        daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
-    log("ok", f"JupiterBot starting | Wallet: {WALLET[:8]}...{WALLET[-4:] if WALLET else 'NOT SET'}")
-    log("ok", f"Swap: {'PumpPortal -> Phantom' if not PAPER_MODE else 'PAPER MODE'}")
+    log("ok", f"KOL Sniper | Wallet: {WALLET[:8]}...{WALLET[-4:] if WALLET else 'NOT SET'}")
+    log("ok", f"{'PAPER MODE' if PAPER_MODE else 'LIVE -> Phantom'}")
     app.run(host="0.0.0.0", port=port, use_reloader=False)
