@@ -759,3 +759,4 @@ if __name__ == "__main__":
     log("ok", f"KOL Sniper | Wallet: {WALLET[:8]}...{WALLET[-4:] if WALLET else 'NOT SET'}")
     log("ok", f"{'PAPER MODE' if PAPER_MODE else 'LIVE -> Phantom'}")
     app.run(host="0.0.0.0", port=port, use_reloader=False)
+
