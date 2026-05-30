@@ -2,6 +2,15 @@ import os, time, threading, requests, re
 from flask import Flask, jsonify
 from collections import defaultdict
 
+try:
+    from solders.keypair import Keypair
+    from solders.transaction import VersionedTransaction
+    from solana.rpc.api import Client
+    from solana.rpc.types import TxOpts
+    _SOLANA_AVAILABLE = True
+except ImportError:
+    _SOLANA_AVAILABLE = False
+
 app = Flask(__name__)
 
 # ── CONFIG ──────────────────────────────────────────────────────
@@ -27,8 +36,8 @@ MAX_TOP10_PCT      = float(os.environ.get("MAX_TOP10_PCT", "20"))
 MIN_CHANGE_5M      = float(os.environ.get("MIN_CHANGE_5M", "2"))
 MIN_BUYS_5M        = int(os.environ.get("MIN_BUYS_5M", "10"))
 
-SOL_RPC    = "https://api.mainnet-beta.solana.com"
-PUMPPORTAL = "https://pumpportal.fun/api/trade-local"
+SOL_RPC    = "<https://api.mainnet-beta.solana.com>"
+PUMPPORTAL = "<https://pumpportal.fun/api/trade-local>"
 
 KOLS = ["elonmusk","elon","ansem","murad","cobie","hsaka",
         "gainzy","kaleo","pentoshi","blknoiz06","lookonchain",
@@ -70,9 +79,9 @@ def get_pumpfun_coins():
 
     # Primary: pump.fun frontend API v3
     endpoints = [
-        "https://frontend-api-v3.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false",
-        "https://frontend-api-v3.pump.fun/coins/currently-live?offset=0&limit=50&includeNsfw=false&order=DESC",
-        "https://frontend-api-v2.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false",
+        "<https://frontend-api-v3.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false>",
+        "<https://frontend-api-v3.pump.fun/coins/currently-live?offset=0&limit=50&includeNsfw=false&order=DESC>",
+        "<https://frontend-api-v2.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false>",
     ]
 
     for url in endpoints:
@@ -82,8 +91,8 @@ def get_pumpfun_coins():
                 headers={
                     "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
                     "Accept": "application/json",
-                    "Referer": "https://pump.fun/",
-                    "Origin": "https://pump.fun",
+                    "Referer": "<https://pump.fun/>",
+                    "Origin": "<https://pump.fun>",
                 },
                 timeout=10
             )
@@ -123,7 +132,7 @@ def get_pumpfun_coins():
     log("warn", "pump.fun API unavailable — using DexScreener fallback")
     try:
         res = requests.get(
-            "https://api.dexscreener.com/token-boosts/latest/v1",
+            "<https://api.dexscreener.com/token-boosts/latest/v1>",
             timeout=10
         )
         data = res.json()
@@ -138,8 +147,8 @@ def get_pumpfun_coins():
                             "symbol":   t.get("description", mint[:8])[:12],
                             "mcap":     0,
                             "bond_pct": 0,
-                            "twitter":  any("twitter" in str(l).lower() or "x.com" in str(l).lower() for l in links),
-                            "telegram": any("telegram" in str(l).lower() or "t.me" in str(l).lower() for l in links),
+                            "twitter":  any("twitter" in str(l).lower() or "<x.com>" in str(l).lower() for l in links),
+                            "telegram": any("telegram" in str(l).lower() or "<t.me>" in str(l).lower() for l in links),
                             "website":  any("http" in str(l).lower() for l in links),
                             "dev":      "",
                             "replies":  0,
@@ -157,10 +166,10 @@ def get_bonding_details(mint):
     """Get bonding curve % from pump.fun coin detail endpoint."""
     try:
         res = requests.get(
-            f"https://frontend-api-v3.pump.fun/coins/{mint}",
+            f"<https://frontend-api-v3.pump.fun/coins/{mint}>",
             headers={
                 "User-Agent": "Mozilla/5.0",
-                "Referer": "https://pump.fun/",
+                "Referer": "<https://pump.fun/>",
             },
             timeout=8
         )
@@ -186,7 +195,7 @@ def get_bonding_details(mint):
 def get_market_data(mint):
     try:
         res = requests.get(
-            f"https://api.dexscreener.com/latest/dex/tokens/{mint}",
+            f"<https://api.dexscreener.com/latest/dex/tokens/{mint}>",
             timeout=8
         )
         pairs = res.json().get("pairs", [])
@@ -210,12 +219,24 @@ def get_market_data(mint):
 def get_sol_price():
     try:
         res = requests.get(
-            "https://api.dexscreener.com/latest/dex/pairs/solana/8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj",
+            "<https://api.dexscreener.com/latest/dex/pairs/solana/8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj>",
             timeout=8
         )
         pairs = res.json().get("pairs", [])
         if pairs:
-            return float(pairs[0].get("priceUsd", 0))
+            price = float(pairs[0].get("priceUsd", 0))
+            if price > 0:
+                return price
+    except:
+        pass
+    try:
+        res = requests.get(
+            "<https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd>",
+            timeout=8
+        )
+        price = float(res.json()["solana"]["usd"])
+        if price > 0:
+            return price
     except:
         pass
     return None
@@ -224,7 +245,7 @@ def get_sol_price():
 def run_rugcheck(mint):
     try:
         res = requests.get(
-            f"https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary",
+            f"<https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary>",
             timeout=10
         )
         data = res.json()
@@ -394,7 +415,7 @@ def scan_social():
     signals = []
     try:
         res = requests.get(
-            "https://www.reddit.com/r/cryptomoonshots/new.json?limit=25",
+            "<https://www.reddit.com/r/cryptomoonshots/new.json?limit=25>",
             headers={"User-Agent": "Mozilla/5.0"},
             timeout=10
         )
@@ -415,7 +436,7 @@ def scan_social():
         log("warn", f"Reddit: {e}")
 
     try:
-        res = requests.get("https://api.coingecko.com/api/v3/search/trending", timeout=8)
+        res = requests.get("<https://api.coingecko.com/api/v3/search/trending>", timeout=8)
         meme_words = ["DOGE","PEPE","SHIB","MEME","INU","FLOKI","WIF",
                       "BONK","CAT","FROG","MOON","PUMP","APE","BABY"]
         for c in res.json().get("coins", [])[:10]:
@@ -458,7 +479,7 @@ Trade: ${TRADE_AMOUNT} | TP:{TP_LOW}-{TP_HIGH}% | SL:{SL_PCT}% | Max:{MAX_HOLD_M
 
 APPROVE or REJECT + reason. If APPROVE: STRONG, MEDIUM, or WEAK."""
         res = requests.post(
-            "https://api.anthropic.com/v1/messages",
+            "<https://api.anthropic.com/v1/messages>",
             json={"model": "claude-sonnet-4-20250514", "max_tokens": 80,
                   "messages": [{"role": "user", "content": prompt}]},
             headers={"x-api-key": CLAUDE_KEY, "anthropic-version": "2023-06-01",
@@ -482,14 +503,9 @@ def execute_buy(mint, symbol):
         log("ok", f"[PAPER] Buy ${TRADE_AMOUNT} -> {symbol}", symbol)
         return "PAPER_TX"
     try:
-        from solders.keypair import Keypair
-        from solders.transaction import VersionedTransaction
-        from solana.rpc.api import Client
-        from solana.rpc.types import TxOpts
-        from solana.rpc.commitment import Confirmed
-
         sol_price = get_sol_price()
         if not sol_price:
+            log("err", "Cannot get SOL price — buy aborted", symbol)
             return None
         sol_amount = round(TRADE_AMOUNT / sol_price, 6)
 
@@ -508,11 +524,11 @@ def execute_buy(mint, symbol):
         keypair = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
         tx = VersionedTransaction(VersionedTransaction.from_bytes(res.content).message, [keypair])
         client = Client(SOL_RPC)
-        result = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True, preflight_commitment=Confirmed))
+        result = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True, preflight_commitment="confirmed"))
         sig = str(result.value)
         if sig and len(sig) > 10:
             log("ok", f"Bought! {sig[:20]}...", symbol)
-            log("ok", f"https://solscan.io/tx/{sig}", symbol)
+            log("ok", f"<https://solscan.io/tx/{sig}>", symbol)
             return sig
         return None
     except Exception as e:
@@ -524,12 +540,6 @@ def execute_sell(tokens, mint, symbol):
         log("ok", f"[PAPER] Sell {symbol}", symbol)
         return "PAPER_TX"
     try:
-        from solders.keypair import Keypair
-        from solders.transaction import VersionedTransaction
-        from solana.rpc.api import Client
-        from solana.rpc.types import TxOpts
-        from solana.rpc.commitment import Confirmed
-
         res = requests.post(
             PUMPPORTAL,
             headers={"Content-Type": "application/json"},
@@ -539,11 +549,12 @@ def execute_sell(tokens, mint, symbol):
             timeout=15
         )
         if res.status_code != 200:
+            log("err", f"PumpPortal sell {res.status_code}: {res.text[:80]}", symbol)
             return None
         keypair = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
         tx = VersionedTransaction(VersionedTransaction.from_bytes(res.content).message, [keypair])
         client = Client(SOL_RPC)
-        result = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True, preflight_commitment=Confirmed))
+        result = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True, preflight_commitment="confirmed"))
         sig = str(result.value)
         if sig and len(sig) > 10:
             log("ok", f"Sold! {sig[:20]}...", symbol)
@@ -824,6 +835,13 @@ def blacklist(mint):
     return jsonify({"blacklisted": mint})
 
 if __name__ == "__main__":
+    if not PAPER_MODE:
+        if not WALLET or not WALLET_PRIVATE_KEY:
+            print("[FATAL] LIVE mode requires WALLET and WALLET_PRIVATE_KEY env vars to be set. Exiting.")
+            raise SystemExit(1)
+        if not _SOLANA_AVAILABLE:
+            print("[FATAL] LIVE mode requires solders and solana packages. Run: pip install solders solana. Exiting.")
+            raise SystemExit(1)
     threading.Thread(target=monitor_loop, daemon=True).start()
     threading.Thread(target=social_loop,  daemon=True).start()
     threading.Thread(target=scanner_loop, daemon=True).start()
