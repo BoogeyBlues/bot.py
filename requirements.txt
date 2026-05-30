@@ -1,4 +1,6 @@
-flask
-requests
-solders
-solana
+flask>=2.3.0
+requests>=2.31.0
+urllib3>=2.0.0
+certifi>=2024.1.1
+solders>=0.21.0
+solana>=0.34.0
