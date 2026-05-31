@@ -1,5 +1,5 @@
-import os, time, threading, requests, json, re
-from flask import Flask, jsonify
+import os, time, threading, requests, json, re, csv, io
+from flask import Flask, jsonify, Response
 from collections import defaultdict
 
 try:
@@ -827,6 +827,55 @@ def learn():
 def blacklist_route(mint):
     blacklisted_mints.add(mint)
     return jsonify({"blacklisted": mint})
+
+@app.route("/export/wins", methods=["GET"])
+def export_wins():
+    wins = [t for t in completed_trades if t.get("pnl", 0) > 0]
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Date/Time", "Symbol", "Strategy", "Entry Price", "Exit Price",
+                     "Profit ($)", "Hold (min)", "Bond Entry %", "Replies", "Exit Reason"])
+    for t in wins:
+        writer.writerow([
+            t.get("time", ""),
+            t.get("symbol", ""),
+            t.get("strategy", "").upper(),
+            round(t.get("entry", 0), 8),
+            round(t.get("exit", 0), 8),
+            round(t.get("pnl", 0), 4),
+            round(t.get("hold_m", 0), 1),
+            round(t.get("bond_entry", 0), 1),
+            t.get("replies", 0),
+            t.get("result", ""),
+        ])
+    buf.seek(0)
+    filename = f"winning_trades_{time.strftime('%Y%m%d')}.csv"
+    return Response(buf.getvalue(), mimetype="text/csv",
+                    headers={"Content-Disposition": f"attachment; filename={filename}"})
+
+@app.route("/export/all", methods=["GET"])
+def export_all():
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Date/Time", "Symbol", "Strategy", "Entry Price", "Exit Price",
+                     "PnL ($)", "Result", "Hold (min)", "Bond Entry %", "Replies"])
+    for t in completed_trades:
+        writer.writerow([
+            t.get("time", ""),
+            t.get("symbol", ""),
+            t.get("strategy", "").upper(),
+            round(t.get("entry", 0), 8),
+            round(t.get("exit", 0), 8),
+            round(t.get("pnl", 0), 4),
+            t.get("result", ""),
+            round(t.get("hold_m", 0), 1),
+            round(t.get("bond_entry", 0), 1),
+            t.get("replies", 0),
+        ])
+    buf.seek(0)
+    filename = f"all_trades_{time.strftime('%Y%m%d')}.csv"
+    return Response(buf.getvalue(), mimetype="text/csv",
+                    headers={"Content-Disposition": f"attachment; filename={filename}"})
 
 if __name__ == "__main__":
     if not PAPER_MODE:
