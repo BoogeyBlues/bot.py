@@ -58,6 +58,11 @@ WSOL_MINT = "So11111111111111111111111111111111111111112"
 JUPITER_QUOTE = "https://quote-api.jup.ag/v6/quote"
 JUPITER_SWAP  = "https://quote-api.jup.ag/v6/swap"
 
+# Notifications
+TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+NTFY_TOPIC       = os.environ.get("NTFY_TOPIC", "")  # e.g. "my-sniper-bot-abc123"
+
 # Social / quality gates
 MIN_REPLIES  = int(os.environ.get("MIN_REPLIES",  "10"))
 MIN_LIQ      = float(os.environ.get("MIN_LIQ",    "500"))
@@ -98,6 +103,34 @@ def log(tag, msg, symbol=""):
         if len(trade_log) > 300:
             trade_log.pop(0)
 
+# ── NOTIFICATIONS ────────────────────────────────────────────────
+def notify(title, body):
+    """Send push notification via Telegram and/or ntfy — runs in background thread."""
+    def _send():
+        # Telegram
+        if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+            try:
+                _session.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                    json={"chat_id": TELEGRAM_CHAT_ID, "text": f"*{title}*\n{body}",
+                          "parse_mode": "Markdown"},
+                    timeout=8
+                )
+            except Exception as e:
+                log("warn", f"Telegram notify failed: {e}")
+        # ntfy.sh (free, no account needed)
+        if NTFY_TOPIC:
+            try:
+                _session.post(
+                    f"https://ntfy.sh/{NTFY_TOPIC}",
+                    data=body.encode("utf-8"),
+                    headers={"Title": title, "Priority": "high", "Tags": "chart_increasing"},
+                    timeout=8
+                )
+            except Exception as e:
+                log("warn", f"ntfy notify failed: {e}")
+    threading.Thread(target=_send, daemon=True).start()
+
 # ── PROGRESSIVE SIZING ───────────────────────────────────────────
 def trade_size():
     with capital_lock:
@@ -115,6 +148,8 @@ def check_milestones():
                 _milestones_hit.add(m)
                 ts = trade_size()
                 log("ok", f"MILESTONE ${m:,} REACHED! New trade size: ${ts:.2f}", "GOAL")
+                notify(f"🏆 MILESTONE ${m:,} REACHED!",
+                       f"Capital: ${cap:.2f}\nNew trade size: ${ts:.2f}\nKeep going!")
 
 # ── ADAPTIVE LEARNING ────────────────────────────────────────────
 def record_trade(trade_data):
@@ -474,6 +509,8 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
         }
 
     log("ok", f"ENTER [{strategy.upper()}] ${amount:.2f} | bond={bond_entry:.1f}%", symbol)
+    notify(f"🟢 BUY {symbol}",
+           f"Strategy: {strategy.upper()}\nAmount: ${amount:.2f}\nBond: {bond_entry:.1f}%\nReplies: {replies}")
     return True
 
 def exit_trade(mint, price, reason, bond=0):
@@ -495,6 +532,9 @@ def exit_trade(mint, price, reason, bond=0):
     log("ok" if pnl >= 0 else "err",
         f"{'WIN' if pnl>=0 else 'LOSS'} {reason} | {sign}${pnl:.4f} | {hold_m:.1f}m | cap=${capital:.2f}",
         trade["symbol"])
+    emoji = "✅" if pnl >= 0 else "❌"
+    notify(f"{emoji} {'WIN' if pnl>=0 else 'LOSS'} {trade['symbol']}",
+           f"Reason: {reason}\nPnL: {sign}${pnl:.4f}\nHeld: {hold_m:.1f} min\nCapital: ${capital:.2f}")
 
     execute_sell(trade["tokens"], mint, trade["symbol"])
 
