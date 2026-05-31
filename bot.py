@@ -73,7 +73,8 @@ LEARN_FILE = "/tmp/bot_learn.json"
 MILESTONES = [100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000]
 
 # ── STATE ────────────────────────────────────────────────────────
-capital           = float(os.environ.get("STARTING_CAPITAL", "54.86"))
+capital           = float(os.environ.get("STARTING_CAPITAL", "39.67"))
+SOL_ALLOCATED     = float(os.environ.get("SOL_ALLOCATED",     "19.67"))  # SOL wallet funded for trading
 capital_lock      = threading.Lock()
 open_trades       = {}
 trades_lock       = threading.Lock()
@@ -753,6 +754,7 @@ def status():
         cap = capital
     return jsonify({
         "capital":        round(cap, 2),
+        "sol_allocated":  SOL_ALLOCATED,
         "trade_size":     trade_size(),
         "paper_mode":     PAPER_MODE,
         "open_trades":    len(open_trades),
@@ -817,5 +819,12 @@ if __name__ == "__main__":
     threading.Thread(target=monitor_loop, daemon=True).start()
     threading.Thread(target=scanner_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
-    log("ok", f"Sniper | {'PAPER' if PAPER_MODE else 'LIVE'} | Wallet:{WALLET[:8] if WALLET else 'NOT SET'}... | Cap:${capital:.2f}")
+    log("ok", "=" * 55)
+    log("ok", f"Mode      : {'PAPER' if PAPER_MODE else 'LIVE'}")
+    log("ok", f"Wallet    : {WALLET[:8] if WALLET else 'NOT SET'}...")
+    log("ok", f"Capital   : ${capital:.2f} USDC (trading budget)")
+    log("ok", f"SOL wallet: ${SOL_ALLOCATED:.2f} funded for on-chain execution")
+    log("ok", f"Trade size: ${trade_size():.2f} ({TRADE_PCT}% of capital)")
+    log("ok", f"USDC lock : activates at ${USDC_LOCK_THRESHOLD:.0f} capital")
+    log("ok", "=" * 55)
     app.run(host="0.0.0.0", port=port, use_reloader=False)
