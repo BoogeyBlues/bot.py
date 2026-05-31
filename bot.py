@@ -11,13 +11,18 @@ try:
 except ImportError:
     _SOLANA_AVAILABLE = False
 
+# Bypass any Railway-injected proxy env vars that break HTTPS connections
+_session = requests.Session()
+_session.trust_env = False
+
 app = Flask(__name__)
 
 # ── CONFIG ──────────────────────────────────────────────────────
 CLAUDE_KEY         = os.environ.get("CLAUDE_KEY", "")
 WALLET             = os.environ.get("WALLET", "")
 WALLET_PRIVATE_KEY = os.environ.get("WALLET_PRIVATE_KEY", "")
-PAPER_MODE         = os.environ.get("PAPER_MODE", "true").lower() == "true"
+_PAPER_ENV         = os.environ.get("PAPER_MODE", "true").lower()
+PAPER_MODE         = _PAPER_ENV == "true" or not WALLET or not WALLET_PRIVATE_KEY
 TRADE_AMOUNT       = float(os.environ.get("TRADE_AMOUNT", "5"))
 TP_LOW             = float(os.environ.get("TP_LOW", "10"))
 TP_HIGH            = float(os.environ.get("TP_HIGH", "20"))
@@ -71,22 +76,15 @@ def log(tag, msg, symbol=""):
 
 # ── FETCH PUMP.FUN COINS ─────────────────────────────────────────
 def get_pumpfun_coins():
-    """
-    Fetch live pump.fun coins using the correct v3 API.
-    Falls back to DexScreener if pump.fun API is unavailable.
-    """
     coins = []
-
-    # Primary: pump.fun frontend API v3
     endpoints = [
         "<https://frontend-api-v3.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false>",
         "<https://frontend-api-v3.pump.fun/coins/currently-live?offset=0&limit=50&includeNsfw=false&order=DESC>",
         "<https://frontend-api-v2.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false>",
     ]
-
     for url in endpoints:
         try:
-            res = requests.get(
+            res = _session.get(
                 url,
                 headers={
                     "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
@@ -101,40 +99,35 @@ def get_pumpfun_coins():
                 items = data if isinstance(data, list) else data.get("coins", [])
                 if items:
                     for coin in items[:50]:
-                        mint  = coin.get("mint", "")
-                        sym   = coin.get("symbol", mint[:8])
-                        mcap  = float(coin.get("usd_market_cap", 0) or 0)
-                        # Calculate bonding %
-                        vsol  = float(coin.get("virtual_sol_reserves", 0) or 0)
-                        bond  = min((vsol / 85_000_000_000) * 100, 99.9) if vsol > 0 else 0
+                        mint     = coin.get("mint", "")
+                        sym      = coin.get("symbol", mint[:8])
+                        mcap     = float(coin.get("usd_market_cap", 0) or 0)
+                        vsol     = float(coin.get("virtual_sol_reserves", 0) or 0)
+                        bond     = min((vsol / 85_000_000_000) * 100, 99.9) if vsol > 0 else 0
                         complete = coin.get("complete", False)
                         if mint and not complete:
                             coins.append({
-                                "mint":      mint,
-                                "symbol":    sym,
-                                "mcap":      mcap,
-                                "bond_pct":  round(bond, 1),
-                                "twitter":   bool(coin.get("twitter")),
-                                "telegram":  bool(coin.get("telegram")),
-                                "website":   bool(coin.get("website")),
-                                "dev":       coin.get("creator", ""),
-                                "replies":   int(coin.get("reply_count", 0) or 0),
-                                "desc":      coin.get("description", ""),
-                                "complete":  complete,
+                                "mint":     mint,
+                                "symbol":   sym,
+                                "mcap":     mcap,
+                                "bond_pct": round(bond, 1),
+                                "twitter":  bool(coin.get("twitter")),
+                                "telegram": bool(coin.get("telegram")),
+                                "website":  bool(coin.get("website")),
+                                "dev":      coin.get("creator", ""),
+                                "replies":  int(coin.get("reply_count", 0) or 0),
+                                "desc":     coin.get("description", ""),
+                                "complete": complete,
                             })
-                    log("info", f"pump.fun API: {len(coins)} live coins from {url.split('/')[4]}")
+                    log("info", f"pump.fun API: {len(coins)} live coins")
                     return coins
         except Exception as e:
-            log("warn", f"Endpoint failed {url[:50]}: {e}")
+            log("warn", f"Endpoint failed: {e}")
             continue
 
-    # Fallback: DexScreener token boosts (these are pump.fun coins)
     log("warn", "pump.fun API unavailable — using DexScreener fallback")
     try:
-        res = requests.get(
-            "<https://api.dexscreener.com/token-boosts/latest/v1>",
-            timeout=10
-        )
+        res = _session.get("<https://api.dexscreener.com/token-boosts/latest/v1>", timeout=10)
         data = res.json()
         if isinstance(data, list):
             for t in data[:30]:
@@ -158,34 +151,29 @@ def get_pumpfun_coins():
         log("info", f"DexScreener fallback: {len(coins)} coins")
     except Exception as e:
         log("warn", f"DexScreener fallback failed: {e}")
-
     return coins
 
 # ── BONDING CURVE DETAILS ────────────────────────────────────────
 def get_bonding_details(mint):
-    """Get bonding curve % from pump.fun coin detail endpoint."""
     try:
-        res = requests.get(
+        res = _session.get(
             f"<https://frontend-api-v3.pump.fun/coins/{mint}>",
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Referer": "<https://pump.fun/>",
-            },
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "<https://pump.fun/>"},
             timeout=8
         )
         if res.status_code == 200:
-            data = res.json()
+            data     = res.json()
             vsol     = float(data.get("virtual_sol_reserves", 0) or 0)
             bond_pct = min((vsol / 85_000_000_000) * 100, 99.9)
             return {
-                "bond_pct":  round(bond_pct, 1),
-                "complete":  data.get("complete", False),
-                "dev":       data.get("creator", ""),
-                "replies":   int(data.get("reply_count", 0) or 0),
-                "twitter":   data.get("twitter", ""),
-                "telegram":  data.get("telegram", ""),
-                "website":   data.get("website", ""),
-                "desc":      data.get("description", ""),
+                "bond_pct": round(bond_pct, 1),
+                "complete": data.get("complete", False),
+                "dev":      data.get("creator", ""),
+                "replies":  int(data.get("reply_count", 0) or 0),
+                "twitter":  data.get("twitter", ""),
+                "telegram": data.get("telegram", ""),
+                "website":  data.get("website", ""),
+                "desc":     data.get("description", ""),
             }
     except:
         pass
@@ -194,11 +182,8 @@ def get_bonding_details(mint):
 # ── MARKET DATA ──────────────────────────────────────────────────
 def get_market_data(mint):
     try:
-        res = requests.get(
-            f"<https://api.dexscreener.com/latest/dex/tokens/{mint}>",
-            timeout=8
-        )
-        pairs = res.json().get("pairs", [])
+        res       = _session.get(f"<https://api.dexscreener.com/latest/dex/tokens/{mint}>", timeout=8)
+        pairs     = res.json().get("pairs", [])
         sol_pairs = [p for p in pairs if p.get("chainId") == "solana"]
         if not sol_pairs:
             return None
@@ -218,7 +203,7 @@ def get_market_data(mint):
 
 def get_sol_price():
     try:
-        res = requests.get(
+        res   = _session.get(
             "<https://api.dexscreener.com/latest/dex/pairs/solana/8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj>",
             timeout=8
         )
@@ -230,7 +215,7 @@ def get_sol_price():
     except:
         pass
     try:
-        res = requests.get(
+        res   = _session.get(
             "<https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd>",
             timeout=8
         )
@@ -244,24 +229,21 @@ def get_sol_price():
 # ── HOLDER / RUG CHECK ───────────────────────────────────────────
 def run_rugcheck(mint):
     try:
-        res = requests.get(
-            f"<https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary>",
-            timeout=10
-        )
+        res  = _session.get(f"<https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary>", timeout=10)
         data = res.json()
-        risks      = data.get("risks", [])
-        risk_names = [r.get("name", "").lower() for r in risks]
-        top_holders = data.get("topHolders", [])
-        top10_pct   = sum(float(h.get("pct", 0) or 0) for h in top_holders[:10])
+        risks         = data.get("risks", [])
+        risk_names    = [r.get("name", "").lower() for r in risks]
+        top_holders   = data.get("topHolders", [])
+        top10_pct     = sum(float(h.get("pct", 0) or 0) for h in top_holders[:10])
         total_holders = data.get("totalHolders", 0)
         return {
-            "score":          data.get("score", 0),
-            "total_holders":  total_holders,
-            "top10_pct":      round(top10_pct, 2),
-            "has_mint_auth":  any("mint" in r for r in risk_names),
+            "score":           data.get("score", 0),
+            "total_holders":   total_holders,
+            "top10_pct":       round(top10_pct, 2),
+            "has_mint_auth":   any("mint" in r for r in risk_names),
             "has_freeze_auth": any("freeze" in r for r in risk_names),
-            "has_insider":    any("insider" in r or "bundle" in r for r in risk_names),
-            "risks":          risk_names[:5],
+            "has_insider":     any("insider" in r or "bundle" in r for r in risk_names),
+            "risks":           risk_names[:5],
         }
     except:
         return None
@@ -271,7 +253,7 @@ def check_dev_sold(dev_wallet, mint):
     if not dev_wallet or dev_wallet in blacklisted_devs:
         return False, "Blacklisted dev" if dev_wallet in blacklisted_devs else "No dev wallet"
     try:
-        res = requests.post(
+        res = _session.post(
             SOL_RPC,
             json={
                 "jsonrpc": "2.0", "id": 1,
@@ -295,15 +277,13 @@ def check_dev_sold(dev_wallet, mint):
 
 # ── GREENLIGHT CHECK ─────────────────────────────────────────────
 def greenlight(mint, symbol, coin_info, market):
-    cache_key = mint
-    cached = check_cache.get(cache_key)
+    cached = check_cache.get(mint)
     if cached and time.time() - cached["ts"] < 600:
         return cached["ok"], cached["msg"], cached["score"]
 
     fails = []
     score = 0
 
-    # 1. Market filters
     mcap = market["mcap"] or coin_info.get("mcap", 0)
     if mcap < MIN_MCAP:         fails.append(f"MCap low ${mcap:,.0f}")
     elif mcap > MAX_MCAP:       fails.append(f"MCap high ${mcap:,.0f}")
@@ -319,17 +299,13 @@ def greenlight(mint, symbol, coin_info, market):
     else:                               score += min(market["buys5m"], 15)
 
     if fails:
-        result = {"ok": False, "msg": fails[0], "score": 0, "ts": time.time()}
-        check_cache[cache_key] = result
+        check_cache[mint] = {"ok": False, "msg": fails[0], "score": 0, "ts": time.time()}
         return False, fails[0], 0
 
-    # 2. Blacklist
     if mint in blacklisted_mints:
-        result = {"ok": False, "msg": "Blacklisted", "score": 0, "ts": time.time()}
-        check_cache[cache_key] = result
+        check_cache[mint] = {"ok": False, "msg": "Blacklisted", "score": 0, "ts": time.time()}
         return False, "Blacklisted", 0
 
-    # 3. Bonding curve
     bond_pct = coin_info.get("bond_pct", 0)
     if bond_pct == 0:
         details = get_bonding_details(mint)
@@ -339,89 +315,72 @@ def greenlight(mint, symbol, coin_info, market):
 
     if bond_pct < MIN_BOND_PCT:
         msg = f"Bond {bond_pct:.1f}% < {MIN_BOND_PCT}% needed"
-        result = {"ok": False, "msg": msg, "score": 0, "ts": time.time()}
-        check_cache[cache_key] = result
+        check_cache[mint] = {"ok": False, "msg": msg, "score": 0, "ts": time.time()}
         return False, msg, 0
     elif coin_info.get("complete", False):
-        result = {"ok": False, "msg": "Already graduated", "score": 0, "ts": time.time()}
-        check_cache[cache_key] = result
+        check_cache[mint] = {"ok": False, "msg": "Already graduated", "score": 0, "ts": time.time()}
         return False, "Already graduated", 0
     else:
         score += 20
 
-    # 4. Whitepaper / scam language
-    desc = (coin_info.get("desc", "") or "").lower()
+    desc     = (coin_info.get("desc", "") or "").lower()
     wp_words = ["whitepaper","white paper","roadmap","tokenomics","invest",
                 "guaranteed","presale","ico","private sale","vesting","team tokens"]
     if any(w in desc for w in wp_words):
-        result = {"ok": False, "msg": "Whitepaper/invest language", "score": 0, "ts": time.time()}
-        check_cache[cache_key] = result
+        check_cache[mint] = {"ok": False, "msg": "Whitepaper/invest language", "score": 0, "ts": time.time()}
         return False, "Whitepaper/invest language detected", 0
 
-    # 5. Social presence
-    has_twitter  = bool(coin_info.get("twitter"))
-    has_telegram = bool(coin_info.get("telegram"))
-    replies      = int(coin_info.get("replies", 0) or 0)
-    if has_twitter:  score += 15
-    if has_telegram: score += 10
+    if bool(coin_info.get("twitter")):  score += 15
+    if bool(coin_info.get("telegram")): score += 10
+    replies = int(coin_info.get("replies", 0) or 0)
     if replies > 5:  score += 10
     elif replies < 2: fails.append("Low engagement")
 
-    # 6. RugCheck
     rug = run_rugcheck(mint)
     if rug:
         if rug["has_mint_auth"]:
-            result = {"ok": False, "msg": "Mint authority — dev can print tokens", "score": 0, "ts": time.time()}
-            check_cache[cache_key] = result
+            check_cache[mint] = {"ok": False, "msg": "Mint authority", "score": 0, "ts": time.time()}
             return False, "Mint authority enabled", 0
         if rug["has_freeze_auth"]:
-            result = {"ok": False, "msg": "Freeze authority", "score": 0, "ts": time.time()}
-            check_cache[cache_key] = result
+            check_cache[mint] = {"ok": False, "msg": "Freeze authority", "score": 0, "ts": time.time()}
             return False, "Freeze authority enabled", 0
         if rug["total_holders"] < MIN_REAL_BUYERS:
             msg = f"Only {rug['total_holders']} holders < {MIN_REAL_BUYERS} needed"
-            result = {"ok": False, "msg": msg, "score": 0, "ts": time.time()}
-            check_cache[cache_key] = result
+            check_cache[mint] = {"ok": False, "msg": msg, "score": 0, "ts": time.time()}
             return False, msg, 0
         if rug["top10_pct"] > MAX_TOP10_PCT:
             msg = f"Top10 hold {rug['top10_pct']:.1f}% > {MAX_TOP10_PCT}% limit"
-            result = {"ok": False, "msg": msg, "score": 0, "ts": time.time()}
-            check_cache[cache_key] = result
+            check_cache[mint] = {"ok": False, "msg": msg, "score": 0, "ts": time.time()}
             return False, msg, 0
         if rug["has_insider"]:
-            result = {"ok": False, "msg": "Insider/bundle activity detected", "score": 0, "ts": time.time()}
-            check_cache[cache_key] = result
+            check_cache[mint] = {"ok": False, "msg": "Insider/bundle activity", "score": 0, "ts": time.time()}
             return False, "Bundle/insider wallets detected", 0
         score += 20
 
-    # 7. Dev sold check
     dev = coin_info.get("dev", "")
     dev_sold, dev_msg = check_dev_sold(dev, mint)
     if not dev_sold:
-        result = {"ok": False, "msg": f"Dev not sold: {dev_msg}", "score": 0, "ts": time.time()}
-        check_cache[cache_key] = result
+        check_cache[mint] = {"ok": False, "msg": f"Dev not sold: {dev_msg}", "score": 0, "ts": time.time()}
         return False, f"Dev not sold: {dev_msg}", 0
     score += 15
 
-    # ALL PASSED
     msg = f"Bond:{bond_pct:.0f}% Holders:{rug['total_holders'] if rug else '?'} Score:{score}"
-    result = {"ok": True, "msg": msg, "score": score, "ts": time.time()}
-    check_cache[cache_key] = result
-    log("ok", f"GREENLIGHT ✓ {msg}", symbol)
+    check_cache[mint] = {"ok": True, "msg": msg, "score": score, "ts": time.time()}
+    log("ok", f"GREENLIGHT {msg}", symbol)
     return True, msg, score
 
 # ── SOCIAL SCAN ──────────────────────────────────────────────────
 def scan_social():
     signals = []
     try:
-        res = requests.get(
+        res   = _session.get(
             "<https://www.reddit.com/r/cryptomoonshots/new.json?limit=25>",
             headers={"User-Agent": "Mozilla/5.0"},
             timeout=10
         )
         posts = res.json().get("data", {}).get("children", [])
         for post in posts:
-            p = post["data"]
+            p        = post["data"]
             combined = (p.get("title","") + " " + p.get("selftext","")).upper()
             kol_hit  = any(k.upper() in combined for k in KOLS)
             is_sol   = any(w in combined for w in ["SOLANA","SOL","PUMP.FUN","PUMPFUN"])
@@ -436,7 +395,7 @@ def scan_social():
         log("warn", f"Reddit: {e}")
 
     try:
-        res = requests.get("<https://api.coingecko.com/api/v3/search/trending>", timeout=8)
+        res        = _session.get("<https://api.coingecko.com/api/v3/search/trending>", timeout=8)
         meme_words = ["DOGE","PEPE","SHIB","MEME","INU","FLOKI","WIF",
                       "BONK","CAT","FROG","MOON","PUMP","APE","BABY"]
         for c in res.json().get("coins", [])[:10]:
@@ -444,7 +403,7 @@ def scan_social():
             sym  = item.get("symbol","").upper()
             if any(w in sym or w in item.get("name","").upper() for w in meme_words):
                 signals.append({"ticker": sym, "source": "coingecko", "kol": False,
-                                 "score": 80, "context": f"Trending CoinGecko"})
+                                 "score": 80, "context": "Trending CoinGecko"})
     except Exception as e:
         log("warn", f"CoinGecko: {e}")
 
@@ -478,7 +437,7 @@ Signal: {context or 'Trending pump.fun'}
 Trade: ${TRADE_AMOUNT} | TP:{TP_LOW}-{TP_HIGH}% | SL:{SL_PCT}% | Max:{MAX_HOLD_MINS}m
 
 APPROVE or REJECT + reason. If APPROVE: STRONG, MEDIUM, or WEAK."""
-        res = requests.post(
+        res  = _session.post(
             "<https://api.anthropic.com/v1/messages>",
             json={"model": "claude-sonnet-4-20250514", "max_tokens": 80,
                   "messages": [{"role": "user", "content": prompt}]},
@@ -509,7 +468,7 @@ def execute_buy(mint, symbol):
             return None
         sol_amount = round(TRADE_AMOUNT / sol_price, 6)
 
-        res = requests.post(
+        res = _session.post(
             PUMPPORTAL,
             headers={"Content-Type": "application/json"},
             json={"publicKey": WALLET, "action": "buy", "mint": mint,
@@ -522,10 +481,10 @@ def execute_buy(mint, symbol):
             return None
 
         keypair = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
-        tx = VersionedTransaction(VersionedTransaction.from_bytes(res.content).message, [keypair])
-        client = Client(SOL_RPC)
-        result = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True, preflight_commitment="confirmed"))
-        sig = str(result.value)
+        tx      = VersionedTransaction(VersionedTransaction.from_bytes(res.content).message, [keypair])
+        client  = Client(SOL_RPC)
+        result  = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True, preflight_commitment="confirmed"))
+        sig     = str(result.value)
         if sig and len(sig) > 10:
             log("ok", f"Bought! {sig[:20]}...", symbol)
             log("ok", f"<https://solscan.io/tx/{sig}>", symbol)
@@ -540,7 +499,7 @@ def execute_sell(tokens, mint, symbol):
         log("ok", f"[PAPER] Sell {symbol}", symbol)
         return "PAPER_TX"
     try:
-        res = requests.post(
+        res = _session.post(
             PUMPPORTAL,
             headers={"Content-Type": "application/json"},
             json={"publicKey": WALLET, "action": "sell", "mint": mint,
@@ -552,10 +511,10 @@ def execute_sell(tokens, mint, symbol):
             log("err", f"PumpPortal sell {res.status_code}: {res.text[:80]}", symbol)
             return None
         keypair = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
-        tx = VersionedTransaction(VersionedTransaction.from_bytes(res.content).message, [keypair])
-        client = Client(SOL_RPC)
-        result = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True, preflight_commitment="confirmed"))
-        sig = str(result.value)
+        tx      = VersionedTransaction(VersionedTransaction.from_bytes(res.content).message, [keypair])
+        client  = Client(SOL_RPC)
+        result  = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True, preflight_commitment="confirmed"))
+        sig     = str(result.value)
         if sig and len(sig) > 10:
             log("ok", f"Sold! {sig[:20]}...", symbol)
             return sig
@@ -650,7 +609,7 @@ def monitor_loop():
                 trade = open_trades[mint]
             hold_m = (time.time() - trade["opened_at"]) / 60
             if hold_m >= MAX_HOLD_MINS:
-                data = get_market_data(mint)
+                data  = get_market_data(mint)
                 price = data["price"] if data and data["price"] > 0 else trade["entry"]
                 exit_trade(mint, price, "TIME")
                 continue
@@ -718,35 +677,30 @@ def scanner_loop():
                     if mint in open_trades:
                         continue
 
-                # Quick pre-filter
                 mcap = coin.get("mcap", 0)
                 if mcap > 0 and (mcap < MIN_MCAP or mcap > MAX_MCAP):
                     continue
                 if coin.get("complete", False):
                     continue
 
-                # Bond % pre-filter
                 bond_pct = coin.get("bond_pct", 0)
                 if bond_pct > 0 and bond_pct < MIN_BOND_PCT:
                     continue
 
-                # Get market data
                 market = get_market_data(mint)
                 if not market or market["price"] <= 0:
                     continue
 
-                # Run full greenlight
                 passed, msg, score = greenlight(mint, symbol, coin, market)
                 if not passed:
                     continue
 
-                # Social boost
                 context = ""
                 with social_lock:
                     for sig in social_signals:
                         t = sig.get("ticker", "").upper()
                         if t and t in symbol.upper():
-                            score += 50 if sig.get("kol") else 20
+                            score  += 50 if sig.get("kol") else 20
                             context = sig.get("context", "")
                             log("ok", f"Social match +boost", symbol)
                             break
@@ -755,7 +709,6 @@ def scanner_loop():
                     "mint": mint, "symbol": symbol,
                     "market": market, "score": score, "context": context,
                 })
-
                 time.sleep(0.5)
 
             candidates.sort(key=lambda c: c["score"], reverse=True)
@@ -835,13 +788,11 @@ def blacklist(mint):
     return jsonify({"blacklisted": mint})
 
 if __name__ == "__main__":
-    if not PAPER_MODE:
-        if not WALLET or not WALLET_PRIVATE_KEY:
-            print("[FATAL] LIVE mode requires WALLET and WALLET_PRIVATE_KEY env vars to be set. Exiting.")
-            raise SystemExit(1)
-        if not _SOLANA_AVAILABLE:
-            print("[FATAL] LIVE mode requires solders and solana packages. Run: pip install solders solana. Exiting.")
-            raise SystemExit(1)
+    if not PAPER_MODE and not _SOLANA_AVAILABLE:
+        log("warn", "solders/solana packages not installed — falling back to PAPER mode")
+        PAPER_MODE = True
+    if PAPER_MODE and _PAPER_ENV != "true" and (not WALLET or not WALLET_PRIVATE_KEY):
+        log("warn", "WALLET or WALLET_PRIVATE_KEY not set — running in PAPER mode")
     threading.Thread(target=monitor_loop, daemon=True).start()
     threading.Thread(target=social_loop,  daemon=True).start()
     threading.Thread(target=scanner_loop, daemon=True).start()
