@@ -639,6 +639,9 @@ def scanner_loop():
                 time.sleep(30)
                 continue
 
+            # Scan summary counters for diagnostics
+            n_social = n_replies = n_bond_range = n_spike_range = 0
+
             for coin in coins:
                 with trades_lock:
                     if len(open_trades) >= MAX_OPEN:
@@ -652,15 +655,26 @@ def scanner_loop():
                     if mint in open_trades:
                         continue
 
-                # Require BOTH Twitter AND Telegram
-                if not coin.get("twitter") or not coin.get("telegram"):
+                # Require Twitter AND Telegram
+                has_twitter  = coin.get("twitter")
+                has_telegram = coin.get("telegram")
+                if not has_twitter or not has_telegram:
                     continue
+                n_social += 1
 
                 replies = coin.get("replies", 0)
                 if replies < MIN_REPLIES:
                     continue
+                n_replies += 1
 
                 bond = coin.get("bond_pct", 0)
+                if BOND_ENTRY_MIN <= bond <= BOND_ENTRY_MAX:
+                    n_bond_range += 1
+
+                created_at = coin.get("created_at", 0)
+                age_h = (time.time() - created_at / 1000) / 3600 if created_at > 0 else 0
+                if age_h >= SPIKE_MIN_AGE_H:
+                    n_spike_range += 1
 
                 # ── Bundle ride ────────────────────────────────────────
                 if BUNDLE_MODE == "ride" and 0 < bond < 75:
@@ -726,6 +740,15 @@ def scanner_loop():
                         time.sleep(0.5)
 
                 time.sleep(0.2)
+
+            log("info",
+                f"Filter summary: {len(coins)} coins | "
+                f"{n_social} both-socials | {n_replies} 10+replies | "
+                f"{n_bond_range} in bond range | {n_spike_range} dormant")
+            if n_social == 0:
+                log("warn", "0 coins have both Twitter+Telegram — market may be slow")
+            elif n_replies == 0:
+                log("warn", f"{n_social} coins have socials but none have {MIN_REPLIES}+ replies")
 
         except Exception as e:
             log("err", f"Scanner: {e}")
