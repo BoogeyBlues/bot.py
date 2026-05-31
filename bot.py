@@ -51,6 +51,13 @@ SHARP_DROP_PCT = float(os.environ.get("SHARP_DROP_PCT", "4"))
 BUNDLE_MODE    = os.environ.get("BUNDLE_MODE", "avoid").lower()
 BUNDLE_RIDE_TP = float(os.environ.get("BUNDLE_RIDE_TP", "88"))
 
+# USDC profit lock: once capital hits this threshold, lock each win's profit into USDC
+USDC_LOCK_THRESHOLD = float(os.environ.get("USDC_LOCK_THRESHOLD", "80"))
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+WSOL_MINT = "So11111111111111111111111111111111111111112"
+JUPITER_QUOTE = "https://quote-api.jup.ag/v6/quote"
+JUPITER_SWAP  = "https://quote-api.jup.ag/v6/swap"
+
 # Social / quality gates
 MIN_REPLIES  = int(os.environ.get("MIN_REPLIES",  "10"))
 MIN_LIQ      = float(os.environ.get("MIN_LIQ",    "500"))
@@ -77,6 +84,8 @@ log_lock          = threading.Lock()
 scan_active       = True
 _milestones_hit   = set()
 _milestone_lock   = threading.Lock()
+usdc_locked       = 0.0   # total USD value locked into USDC
+usdc_lock         = threading.Lock()
 
 # ── LOGGING ─────────────────────────────────────────────────────
 def log(tag, msg, symbol=""):
@@ -293,6 +302,76 @@ def run_rugcheck(mint):
     except Exception:
         return None
 
+# ── USDC PROFIT LOCK ─────────────────────────────────────────────
+def lock_profit_to_usdc(profit_usd):
+    """Swap profit_usd worth of SOL into USDC via Jupiter after winning trade."""
+    global usdc_locked
+    if profit_usd <= 0:
+        return
+    if PAPER_MODE:
+        with usdc_lock:
+            usdc_locked += profit_usd
+        log("ok", f"[PAPER] Locked ${profit_usd:.4f} profit -> USDC | Total locked: ${usdc_locked:.2f}", "USDC")
+        return
+    try:
+        sol_price = get_sol_price()
+        if not sol_price:
+            log("warn", "Cannot get SOL price — skipping USDC lock", "USDC")
+            return
+        # Convert profit USD to lamports (1 SOL = 1e9 lamports)
+        sol_amount  = profit_usd / sol_price
+        lamports    = int(sol_amount * 1_000_000_000)
+        if lamports < 5_000:  # ignore dust (<0.000005 SOL)
+            return
+
+        # Get Jupiter quote: SOL -> USDC
+        res = _session.get(
+            JUPITER_QUOTE,
+            params={
+                "inputMint":   WSOL_MINT,
+                "outputMint":  USDC_MINT,
+                "amount":      lamports,
+                "slippageBps": 50,  # 0.5% slippage
+            },
+            timeout=10
+        )
+        if res.status_code != 200:
+            log("warn", f"Jupiter quote failed {res.status_code}", "USDC")
+            return
+        quote = res.json()
+
+        # Get swap transaction
+        swap_res = _session.post(
+            JUPITER_SWAP,
+            json={
+                "quoteResponse":    quote,
+                "userPublicKey":    WALLET,
+                "wrapAndUnwrapSol": True,
+                "prioritizationFeeLamports": 1000,
+            },
+            headers={"Content-Type": "application/json"},
+            timeout=15
+        )
+        if swap_res.status_code != 200:
+            log("warn", f"Jupiter swap tx failed {swap_res.status_code}", "USDC")
+            return
+
+        import base64
+        raw_tx   = base64.b64decode(swap_res.json()["swapTransaction"])
+        keypair  = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+        tx       = VersionedTransaction(VersionedTransaction.from_bytes(raw_tx).message, [keypair])
+        client   = Client(SOL_RPC)
+        result   = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True, preflight_commitment="confirmed"))
+        sig      = str(result.value)
+
+        usdc_out = float(quote.get("outAmount", 0)) / 1_000_000  # USDC has 6 decimals
+        with usdc_lock:
+            usdc_locked += usdc_out
+        log("ok", f"Locked ${usdc_out:.4f} USDC | Total: ${usdc_locked:.4f} | sig={sig[:20]}...", "USDC")
+        log("ok", f"https://solscan.io/tx/{sig}", "USDC")
+    except Exception as e:
+        log("warn", f"USDC lock error: {e}", "USDC")
+
 # ── TRADE EXECUTION ──────────────────────────────────────────────
 def execute_buy(mint, symbol, amount):
     if PAPER_MODE:
@@ -434,6 +513,13 @@ def exit_trade(mint, price, reason, bond=0):
     completed_trades.append(rec)
     record_trade(rec)
     check_milestones()
+
+    # Lock profits into USDC once capital >= threshold
+    if pnl > 0:
+        with capital_lock:
+            cap_now = capital
+        if cap_now >= USDC_LOCK_THRESHOLD:
+            threading.Thread(target=lock_profit_to_usdc, args=(pnl,), daemon=True).start()
 
     if capital < 2:
         global scan_active
@@ -652,9 +738,11 @@ def home():
         cap = capital
     with trades_lock:
         n = len(open_trades)
+    with usdc_lock:
+        locked = usdc_locked
     return (f"PumpFun Sniper | Capital:${cap:.2f} | "
-            f"Trade:${trade_size():.2f} | Open:{n}/{MAX_OPEN} | "
-            f"{'PAPER' if PAPER_MODE else 'LIVE'}"), 200
+            f"USDC locked:${locked:.2f} | Trade:${trade_size():.2f} | "
+            f"Open:{n}/{MAX_OPEN} | {'PAPER' if PAPER_MODE else 'LIVE'}"), 200
 
 @app.route("/status", methods=["GET"])
 def status():
@@ -673,6 +761,8 @@ def status():
         "losses":         total - len(wins),
         "win_rate":       round(len(wins) / max(total, 1) * 100, 1),
         "total_pnl":      round(pnl, 4),
+        "usdc_locked":    round(usdc_locked, 4),
+        "usdc_threshold": USDC_LOCK_THRESHOLD,
         "milestones_hit": sorted(_milestones_hit),
         "next_milestone": next((m for m in MILESTONES if m > cap), None),
         "settings": {
