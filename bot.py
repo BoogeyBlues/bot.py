@@ -17,7 +17,7 @@ _session.trust_env = False
 
 app = Flask(__name__)
 
-# ── CONFIG ──────────────────────────────────────────────────────
+# ── CONFIG ──────────────────────────────────────────────────
 CLAUDE_KEY         = os.environ.get("CLAUDE_KEY", "")
 WALLET             = os.environ.get("WALLET", "")
 WALLET_PRIVATE_KEY = os.environ.get("WALLET_PRIVATE_KEY", "")
@@ -41,14 +41,14 @@ MAX_TOP10_PCT      = float(os.environ.get("MAX_TOP10_PCT", "20"))
 MIN_CHANGE_5M      = float(os.environ.get("MIN_CHANGE_5M", "2"))
 MIN_BUYS_5M        = int(os.environ.get("MIN_BUYS_5M", "10"))
 
-SOL_RPC    = "<https://api.mainnet-beta.solana.com>"
-PUMPPORTAL = "<https://pumpportal.fun/api/trade-local>"
+SOL_RPC    = "https://api.mainnet-beta.solana.com"
+PUMPPORTAL = "https://pumpportal.fun/api/trade-local"
 
 KOLS = ["elonmusk","elon","ansem","murad","cobie","hsaka",
         "gainzy","kaleo","pentoshi","blknoiz06","lookonchain",
         "notthreadguy","inversebrah","wublockchain","degen"]
 
-# ── STATE ────────────────────────────────────────────────────────
+# ── STATE ──────────────────────────────────────────────────
 capital           = float(os.environ.get("STARTING_CAPITAL", "54.86"))
 capital_lock      = threading.Lock()
 open_trades       = {}
@@ -64,7 +64,7 @@ social_signals    = []
 social_lock       = threading.Lock()
 check_cache       = {}
 
-# ── LOGGING ─────────────────────────────────────────────────────
+# ── LOGGING ─────────────────────────────────────────────────
 def log(tag, msg, symbol=""):
     prefix = f"[{symbol}] " if symbol else ""
     entry  = f"[{time.strftime('%H:%M:%S')}] [{tag.upper()}] {prefix}{msg}"
@@ -74,13 +74,13 @@ def log(tag, msg, symbol=""):
         if len(trade_log) > 300:
             trade_log.pop(0)
 
-# ── FETCH PUMP.FUN COINS ─────────────────────────────────────────
+# ── FETCH PUMP.FUN COINS ───────────────────────────────────────────────
 def get_pumpfun_coins():
     coins = []
     endpoints = [
-        "<https://frontend-api-v3.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false>",
-        "<https://frontend-api-v3.pump.fun/coins/currently-live?offset=0&limit=50&includeNsfw=false&order=DESC>",
-        "<https://frontend-api-v2.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false>",
+        "https://frontend-api-v3.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false",
+        "https://frontend-api-v3.pump.fun/coins/currently-live?offset=0&limit=50&includeNsfw=false&order=DESC",
+        "https://frontend-api-v2.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false",
     ]
     for url in endpoints:
         try:
@@ -89,8 +89,8 @@ def get_pumpfun_coins():
                 headers={
                     "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
                     "Accept": "application/json",
-                    "Referer": "<https://pump.fun/>",
-                    "Origin": "<https://pump.fun>",
+                    "Referer": "https://pump.fun/",
+                    "Origin": "https://pump.fun",
                 },
                 timeout=10
             )
@@ -127,7 +127,7 @@ def get_pumpfun_coins():
 
     log("warn", "pump.fun API unavailable — using DexScreener fallback")
     try:
-        res = _session.get("<https://api.dexscreener.com/token-boosts/latest/v1>", timeout=10)
+        res = _session.get("https://api.dexscreener.com/token-boosts/latest/v1", timeout=10)
         data = res.json()
         if isinstance(data, list):
             for t in data[:30]:
@@ -140,8 +140,8 @@ def get_pumpfun_coins():
                             "symbol":   t.get("description", mint[:8])[:12],
                             "mcap":     0,
                             "bond_pct": 0,
-                            "twitter":  any("twitter" in str(l).lower() or "<x.com>" in str(l).lower() for l in links),
-                            "telegram": any("telegram" in str(l).lower() or "<t.me>" in str(l).lower() for l in links),
+                            "twitter":  any("twitter" in str(l).lower() or "x.com" in str(l).lower() for l in links),
+                            "telegram": any("telegram" in str(l).lower() or "t.me" in str(l).lower() for l in links),
                             "website":  any("http" in str(l).lower() for l in links),
                             "dev":      "",
                             "replies":  0,
@@ -153,12 +153,12 @@ def get_pumpfun_coins():
         log("warn", f"DexScreener fallback failed: {e}")
     return coins
 
-# ── BONDING CURVE DETAILS ────────────────────────────────────────
+# ── BONDING CURVE DETAILS ────────────────────────────────────────────────
 def get_bonding_details(mint):
     try:
         res = _session.get(
-            f"<https://frontend-api-v3.pump.fun/coins/{mint}>",
-            headers={"User-Agent": "Mozilla/5.0", "Referer": "<https://pump.fun/>"},
+            f"https://frontend-api-v3.pump.fun/coins/{mint}",
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://pump.fun/"},
             timeout=8
         )
         if res.status_code == 200:
@@ -179,11 +179,11 @@ def get_bonding_details(mint):
         pass
     return None
 
-# ── MARKET DATA ──────────────────────────────────────────────────
+# ── MARKET DATA ─────────────────────────────────────────────────────────────
 def get_market_data(mint):
     try:
-        res       = _session.get(f"<https://api.dexscreener.com/latest/dex/tokens/{mint}>", timeout=8)
-        pairs     = res.json().get("pairs", [])
+        res      = _session.get(f"https://api.dexscreener.com/latest/dex/tokens/{mint}", timeout=8)
+        pairs    = res.json().get("pairs", [])
         sol_pairs = [p for p in pairs if p.get("chainId") == "solana"]
         if not sol_pairs:
             return None
@@ -204,7 +204,7 @@ def get_market_data(mint):
 def get_sol_price():
     try:
         res   = _session.get(
-            "<https://api.dexscreener.com/latest/dex/pairs/solana/8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj>",
+            "https://api.dexscreener.com/latest/dex/pairs/solana/8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj",
             timeout=8
         )
         pairs = res.json().get("pairs", [])
@@ -216,7 +216,7 @@ def get_sol_price():
         pass
     try:
         res   = _session.get(
-            "<https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd>",
+            "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd",
             timeout=8
         )
         price = float(res.json()["solana"]["usd"])
@@ -226,15 +226,15 @@ def get_sol_price():
         pass
     return None
 
-# ── HOLDER / RUG CHECK ───────────────────────────────────────────
+# ── HOLDER / RUG CHECK ───────────────────────────────────────────────────
 def run_rugcheck(mint):
     try:
-        res  = _session.get(f"<https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary>", timeout=10)
+        res  = _session.get(f"https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary", timeout=10)
         data = res.json()
-        risks         = data.get("risks", [])
-        risk_names    = [r.get("name", "").lower() for r in risks]
-        top_holders   = data.get("topHolders", [])
-        top10_pct     = sum(float(h.get("pct", 0) or 0) for h in top_holders[:10])
+        risks        = data.get("risks", [])
+        risk_names   = [r.get("name", "").lower() for r in risks]
+        top_holders  = data.get("topHolders", [])
+        top10_pct    = sum(float(h.get("pct", 0) or 0) for h in top_holders[:10])
         total_holders = data.get("totalHolders", 0)
         return {
             "score":           data.get("score", 0),
@@ -248,7 +248,7 @@ def run_rugcheck(mint):
     except:
         return None
 
-# ── DEV WALLET CHECK ─────────────────────────────────────────────
+# ── DEV WALLET CHECK ────────────────────────────────────────────────────────
 def check_dev_sold(dev_wallet, mint):
     if not dev_wallet or dev_wallet in blacklisted_devs:
         return False, "Blacklisted dev" if dev_wallet in blacklisted_devs else "No dev wallet"
@@ -275,7 +275,7 @@ def check_dev_sold(dev_wallet, mint):
     except:
         return True, "Check skipped"
 
-# ── GREENLIGHT CHECK ─────────────────────────────────────────────
+# ── GREENLIGHT CHECK ──────────────────────────────────────────────────────────
 def greenlight(mint, symbol, coin_info, market):
     cached = check_cache.get(mint)
     if cached and time.time() - cached["ts"] < 600:
@@ -369,12 +369,12 @@ def greenlight(mint, symbol, coin_info, market):
     log("ok", f"GREENLIGHT {msg}", symbol)
     return True, msg, score
 
-# ── SOCIAL SCAN ──────────────────────────────────────────────────
+# ── SOCIAL SCAN ─────────────────────────────────────────────────────────────
 def scan_social():
     signals = []
     try:
         res   = _session.get(
-            "<https://www.reddit.com/r/cryptomoonshots/new.json?limit=25>",
+            "https://www.reddit.com/r/cryptomoonshots/new.json?limit=25",
             headers={"User-Agent": "Mozilla/5.0"},
             timeout=10
         )
@@ -395,7 +395,7 @@ def scan_social():
         log("warn", f"Reddit: {e}")
 
     try:
-        res        = _session.get("<https://api.coingecko.com/api/v3/search/trending>", timeout=8)
+        res       = _session.get("https://api.coingecko.com/api/v3/search/trending", timeout=8)
         meme_words = ["DOGE","PEPE","SHIB","MEME","INU","FLOKI","WIF",
                       "BONK","CAT","FROG","MOON","PUMP","APE","BABY"]
         for c in res.json().get("coins", [])[:10]:
@@ -412,7 +412,7 @@ def scan_social():
         social_signals.extend(signals)
     log("info", f"Social: {len(signals)} signals")
 
-# ── CLAUDE ───────────────────────────────────────────────────────
+# ── CLAUDE ───────────────────────────────────────────────────────────────────
 def ask_claude(symbol, market, score, context):
     try:
         if not CLAUDE_KEY or CLAUDE_KEY in ["none", ""]:
@@ -438,7 +438,7 @@ Trade: ${TRADE_AMOUNT} | TP:{TP_LOW}-{TP_HIGH}% | SL:{SL_PCT}% | Max:{MAX_HOLD_M
 
 APPROVE or REJECT + reason. If APPROVE: STRONG, MEDIUM, or WEAK."""
         res  = _session.post(
-            "<https://api.anthropic.com/v1/messages>",
+            "https://api.anthropic.com/v1/messages",
             json={"model": "claude-sonnet-4-20250514", "max_tokens": 80,
                   "messages": [{"role": "user", "content": prompt}]},
             headers={"x-api-key": CLAUDE_KEY, "anthropic-version": "2023-06-01",
@@ -456,7 +456,7 @@ APPROVE or REJECT + reason. If APPROVE: STRONG, MEDIUM, or WEAK."""
         strength = "strong" if score >= 70 else "medium" if score >= 40 else "weak"
         return True, strength, "Local filter"
 
-# ── TRADE EXECUTION ──────────────────────────────────────────────
+# ── TRADE EXECUTION ───────────────────────────────────────────────────────────
 def execute_buy(mint, symbol):
     if PAPER_MODE:
         log("ok", f"[PAPER] Buy ${TRADE_AMOUNT} -> {symbol}", symbol)
@@ -487,7 +487,7 @@ def execute_buy(mint, symbol):
         sig     = str(result.value)
         if sig and len(sig) > 10:
             log("ok", f"Bought! {sig[:20]}...", symbol)
-            log("ok", f"<https://solscan.io/tx/{sig}>", symbol)
+            log("ok", f"https://solscan.io/tx/{sig}", symbol)
             return sig
         return None
     except Exception as e:
@@ -596,7 +596,7 @@ def exit_trade(mint, price, reason):
         global scan_active
         scan_active = False
 
-# ── LOOPS ────────────────────────────────────────────────────────
+# ── LOOPS ────────────────────────────────────────────────────────────────────
 def monitor_loop():
     while True:
         time.sleep(10)
@@ -732,7 +732,7 @@ def scanner_loop():
 
         time.sleep(SCAN_INTERVAL)
 
-# ── FLASK ─────────────────────────────────────────────────────────
+# ── FLASK ─────────────────────────────────────────────────────────────────────────
 @app.route("/", methods=["GET"])
 def home():
     with trades_lock:
