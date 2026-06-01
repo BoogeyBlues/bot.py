@@ -1076,6 +1076,60 @@ def blacklist_route(mint):
     blacklisted_mints.add(mint)
     return jsonify({"blacklisted": mint})
 
+@app.route("/telegram_setup", methods=["GET"])
+def telegram_setup():
+    result = {
+        "token_set":   bool(TELEGRAM_TOKEN),
+        "chat_id_set": bool(TELEGRAM_CHAT_ID),
+        "token_preview": (TELEGRAM_TOKEN[:10] + "...") if TELEGRAM_TOKEN else "NOT SET",
+        "chat_id": TELEGRAM_CHAT_ID or "NOT SET",
+    }
+    if not TELEGRAM_TOKEN:
+        result["step"] = "Set TELEGRAM_TOKEN in Railway env vars. Get it from @BotFather → /mybots → your bot → API Token"
+        return jsonify(result)
+    # Test 1: verify token with getMe
+    try:
+        r = _session.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getMe", timeout=8)
+        data = r.json()
+        if not data.get("ok"):
+            result["token_valid"] = False
+            result["telegram_error"] = data.get("description", "unknown")
+            result["step"] = "Token is INVALID. Go to @BotFather → /mybots → your bot → API Token and get a fresh token"
+            return jsonify(result)
+        result["token_valid"] = True
+        result["bot_username"] = data["result"]["username"]
+    except Exception as e:
+        result["token_valid"] = False
+        result["error"] = str(e)
+        return jsonify(result)
+    if not TELEGRAM_CHAT_ID:
+        result["step"] = (
+            f"Token is VALID! Bot username: @{result['bot_username']}. "
+            "Now get your chat ID: open Telegram, send your bot any message (like 'hi'), "
+            f"then visit: https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates "
+            "and look for 'chat':{{'id': 123456789}} — set that number as TELEGRAM_CHAT_ID in Railway"
+        )
+        return jsonify(result)
+    # Test 2: send a real test message
+    try:
+        r = _session.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": "✅ Bot notifications are working!", "parse_mode": "Markdown"},
+            timeout=8
+        )
+        data = r.json()
+        if data.get("ok"):
+            result["message_sent"] = True
+            result["step"] = "SUCCESS! Check your Telegram — you should have a test message."
+        else:
+            result["message_sent"] = False
+            result["telegram_error"] = data.get("description", "unknown")
+            result["step"] = "Token valid but message failed. Chat ID is probably wrong — send your bot a message first, then re-check getUpdates for the correct chat id number."
+    except Exception as e:
+        result["message_sent"] = False
+        result["error"] = str(e)
+    return jsonify(result)
+
 @app.route("/export/wins", methods=["GET"])
 def export_wins():
     wins = [t for t in completed_trades if t.get("pnl", 0) > 0]
