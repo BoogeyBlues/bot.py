@@ -695,10 +695,10 @@ def scanner_loop():
                     if mint in open_trades:
                         continue
 
-                # Require Twitter AND Telegram
+                # Require Twitter OR Telegram (at least one)
                 has_twitter  = coin.get("twitter")
                 has_telegram = coin.get("telegram")
-                if not has_twitter or not has_telegram:
+                if not has_twitter and not has_telegram:
                     continue
                 n_social += 1
 
