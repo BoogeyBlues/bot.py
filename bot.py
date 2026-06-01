@@ -58,16 +58,29 @@ SHARP_DROP_PCT = float(os.environ.get("SHARP_DROP_PCT", "4"))
 BUNDLE_MODE    = os.environ.get("BUNDLE_MODE", "avoid").lower()
 BUNDLE_RIDE_TP = float(os.environ.get("BUNDLE_RIDE_TP", "88"))
 
-# USDC profit lock: once capital hits this threshold, lock each win's profit into USDC
+# USDC profit lock
 USDC_LOCK_THRESHOLD = float(os.environ.get("USDC_LOCK_THRESHOLD", "80"))
 USDC_MINT  = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 WSOL_MINT  = "So11111111111111111111111111111111111111112"
 GMGN_ROUTE = "https://gmgn.ai/defi/router/v1/sol/tx/get_swap_route"
 
+# Copy trading via GMGN smart wallets
+COPY_TRADE        = os.environ.get("COPY_TRADE", "true").lower() == "true"
+COPY_WINRATE_MIN  = float(os.environ.get("COPY_WINRATE_MIN",  "60"))
+COPY_WINRATE_MAX  = float(os.environ.get("COPY_WINRATE_MAX",  "99"))
+COPY_MAX_WALLETS  = int(os.environ.get("COPY_MAX_WALLETS",    "5"))
+COPY_MAX_AGE_SECS = int(os.environ.get("COPY_MAX_AGE_SECS",  "60"))   # ignore trades older than 60s
+COPY_REFRESH_MINS = int(os.environ.get("COPY_REFRESH_MINS",  "60"))   # refresh wallet list hourly
+COPY_TP_PCT       = float(os.environ.get("COPY_TP_PCT",       "40"))
+COPY_SL_PCT       = float(os.environ.get("COPY_SL_PCT",       "15"))
+COPY_MAX_SECS     = int(os.environ.get("COPY_MAX_SECS",       "180"))
+GMGN_RANK         = "https://gmgn.ai/defi/quotation/v1/rank/sol/wallets/7d"
+GMGN_ACTIVITY     = "https://gmgn.ai/defi/quotation/v1/wallet_activity/sol"
+
 # Notifications
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-NTFY_TOPIC       = os.environ.get("NTFY_TOPIC", "")  # e.g. "my-sniper-bot-abc123"
+NTFY_TOPIC       = os.environ.get("NTFY_TOPIC", "")
 
 # Social / quality gates
 MIN_REPLIES  = int(os.environ.get("MIN_REPLIES",  "10"))
@@ -103,6 +116,10 @@ _daily_date       = ""
 _daily_trades     = 0
 _daily_wins       = 0
 _daily_lock       = threading.Lock()
+_copy_wallets     = []   # [{address, winrate}]
+_copy_wallet_time = 0.0
+_copied_mints     = {}   # mint -> timestamp, to avoid double-copy
+_copy_lock        = threading.Lock()
 
 # ── LOGGING ─────────────────────────────────────────────────────
 def log(tag, msg, symbol=""):
@@ -694,8 +711,127 @@ def monitor_loop():
                     exit_trade(mint, price, "SPIKE_TIME", bond)
                     continue
 
+            # Copy trade exits (price-based, same params as spike)
+            if strategy == "copy":
+                move = ((price - trade["entry"]) / trade["entry"]) * 100
+                if move >= COPY_TP_PCT:
+                    exit_trade(mint, price, "COPY_TP", bond)
+                    continue
+                if move <= -COPY_SL_PCT:
+                    exit_trade(mint, price, "COPY_SL", bond)
+                    continue
+                if elapsed >= COPY_MAX_SECS:
+                    exit_trade(mint, price, "COPY_TIME", bond)
+                    continue
+
             pct = ((price - trade["entry"]) / trade["entry"]) * 100
             log("info", f"[{strategy}] bond={bond:.1f}% price={pct:+.1f}% {elapsed/60:.1f}m", symbol)
+
+# ── COPY TRADING ─────────────────────────────────────────────────
+def fetch_smart_wallets():
+    global _copy_wallets, _copy_wallet_time
+    try:
+        res = _session.get(
+            GMGN_RANK,
+            params={"orderby": "winrate", "direction": "desc", "limit": 100},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=12
+        )
+        if res.status_code != 200:
+            log("warn", f"GMGN rank {res.status_code}", "COPY")
+            return
+        rank_list = res.json().get("data", {}).get("rank", [])
+        qualified = []
+        for w in rank_list:
+            wr_raw = float(w.get("winrate", 0) or 0)
+            wr     = wr_raw * 100 if wr_raw <= 1 else wr_raw  # handle 0-1 or 0-100 format
+            addr   = w.get("address", "")
+            if addr and COPY_WINRATE_MIN <= wr < COPY_WINRATE_MAX:
+                qualified.append({"address": addr, "winrate": round(wr, 1)})
+        qualified = sorted(qualified, key=lambda x: x["winrate"], reverse=True)[:COPY_MAX_WALLETS]
+        with _copy_lock:
+            _copy_wallets     = qualified
+            _copy_wallet_time = time.time()
+        log("ok", f"Tracking {len(qualified)} wallets | WR {COPY_WINRATE_MIN}-{COPY_WINRATE_MAX}%", "COPY")
+        for w in qualified:
+            log("info", f"  {w['address'][:8]}... WR:{w['winrate']}%", "COPY")
+    except Exception as e:
+        log("warn", f"fetch_smart_wallets: {e}", "COPY")
+
+def copy_trade_loop():
+    time.sleep(15)
+    fetch_smart_wallets()
+    while scan_active:
+        try:
+            # Refresh wallet list every hour
+            with _copy_lock:
+                stale = time.time() - _copy_wallet_time > COPY_REFRESH_MINS * 60
+            if stale:
+                fetch_smart_wallets()
+
+            with _copy_lock:
+                wallets = list(_copy_wallets)
+                # Expire copied mints older than 10 minutes
+                now = time.time()
+                expired = [m for m, t in _copied_mints.items() if now - t > 600]
+                for m in expired:
+                    _copied_mints.pop(m, None)
+
+            for w in wallets:
+                if daily_limit_reached():
+                    break
+                addr = w["address"]
+                try:
+                    res = _session.get(
+                        GMGN_ACTIVITY,
+                        params={"address": addr, "type": "buy", "limit": 5},
+                        headers={"User-Agent": "Mozilla/5.0"},
+                        timeout=8
+                    )
+                    if res.status_code != 200:
+                        continue
+                    acts = res.json().get("data", {}).get("activities", [])
+                    for act in acts:
+                        mint   = act.get("token_address", "")
+                        symbol = act.get("token_symbol", mint[:8] if mint else "?")
+                        if not mint:
+                            continue
+                        # Only mirror very recent trades
+                        ts       = int(act.get("timestamp", 0) or 0)
+                        age_secs = time.time() - ts if ts > 0 else 9999
+                        if age_secs > COPY_MAX_AGE_SECS:
+                            continue
+                        with _copy_lock:
+                            if mint in _copied_mints:
+                                continue
+                        with trades_lock:
+                            if mint in open_trades:
+                                continue
+                        if mint in blacklisted_mints:
+                            continue
+                        # Safety check
+                        rug = run_rugcheck(mint)
+                        if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
+                            blacklisted_mints.add(mint)
+                            continue
+                        if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
+                            continue
+                        market = get_market_data(mint)
+                        if not market or market["price"] <= 0 or market["liq"] < MIN_LIQ:
+                            continue
+                        with _copy_lock:
+                            _copied_mints[mint] = time.time()
+                        amt = trade_size()
+                        log("ok", f"COPY {addr[:8]}... WR:{w['winrate']}% | ${amt:.2f}", symbol)
+                        notify(f"📋 COPY {symbol}",
+                               f"Wallet: {addr[:8]}...\nWin rate: {w['winrate']}%\nAmount: ${amt:.2f}")
+                        enter_trade(mint, symbol, market["price"], amt, "copy", 0, 0)
+                    time.sleep(0.5)
+                except Exception as e:
+                    log("warn", f"Wallet {addr[:8]} activity: {e}", "COPY")
+        except Exception as e:
+            log("err", f"Copy loop: {e}", "COPY")
+        time.sleep(15)
 
 # ── SCANNER LOOP ─────────────────────────────────────────────────
 def scanner_loop():
@@ -869,6 +1005,7 @@ def status():
         "losses":         total - len(wins),
         "win_rate":       round(len(wins) / max(total, 1) * 100, 1),
         "total_pnl":      round(pnl, 4),
+        "copy_wallets":   [{"addr": w["address"][:8]+"...", "winrate": w["winrate"]} for w in _copy_wallets],
         "usdc_locked":    round(usdc_locked, 4),
         "usdc_threshold": USDC_LOCK_THRESHOLD,
         "milestones_hit": sorted(_milestones_hit),
@@ -979,15 +1116,19 @@ if __name__ == "__main__":
     elif _PAPER_ENV != "true" and (not WALLET or not WALLET_PRIVATE_KEY):
         log("warn", "WALLET/WALLET_PRIVATE_KEY not set — PAPER mode")
 
-    threading.Thread(target=monitor_loop, daemon=True).start()
-    threading.Thread(target=scanner_loop, daemon=True).start()
+    threading.Thread(target=monitor_loop,   daemon=True).start()
+    threading.Thread(target=scanner_loop,   daemon=True).start()
+    if COPY_TRADE:
+        threading.Thread(target=copy_trade_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
     log("ok", "=" * 55)
     log("ok", f"Mode      : {'PAPER' if PAPER_MODE else 'LIVE'}")
     log("ok", f"Wallet    : {WALLET[:8] if WALLET else 'NOT SET'}...")
     log("ok", f"Capital   : ${capital:.2f} USDC (trading budget)")
     log("ok", f"SOL wallet: ${SOL_ALLOCATED:.2f} funded for on-chain execution")
-    log("ok", f"Trade size: ${trade_size():.2f} ({TRADE_PCT}% of capital)")
+    log("ok", f"Trade size: ${trade_size():.2f} fixed")
+    log("ok", f"Daily limit: {DAILY_MAX} trades (+{DAILY_WIN_BONUS} bonus if {DAILY_WIN_NEEDED}+ wins)")
+    log("ok", f"Copy trade: {'ON' if COPY_TRADE else 'OFF'} | WR {COPY_WINRATE_MIN}-{COPY_WINRATE_MAX}% | top {COPY_MAX_WALLETS} wallets")
     log("ok", f"USDC lock : activates at ${USDC_LOCK_THRESHOLD:.0f} capital")
     log("ok", "=" * 55)
     app.run(host="0.0.0.0", port=port, use_reloader=False)
