@@ -54,10 +54,9 @@ BUNDLE_RIDE_TP = float(os.environ.get("BUNDLE_RIDE_TP", "88"))
 
 # USDC profit lock: once capital hits this threshold, lock each win's profit into USDC
 USDC_LOCK_THRESHOLD = float(os.environ.get("USDC_LOCK_THRESHOLD", "80"))
-USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-WSOL_MINT = "So11111111111111111111111111111111111111112"
-JUPITER_QUOTE = "https://quote-api.jup.ag/v6/quote"
-JUPITER_SWAP  = "https://quote-api.jup.ag/v6/swap"
+USDC_MINT  = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+WSOL_MINT  = "So11111111111111111111111111111111111111112"
+GMGN_ROUTE = "https://gmgn.ai/defi/router/v1/sol/tx/get_swap_route"
 
 # Notifications
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
@@ -335,70 +334,61 @@ def run_rugcheck(mint):
 
 # ── USDC PROFIT LOCK ─────────────────────────────────────────────
 def lock_profit_to_usdc(profit_usd):
-    """Swap profit_usd worth of SOL into USDC via Jupiter after winning trade."""
+    """Swap profit_usd worth of SOL into USDC via GMGN after winning trade."""
     global usdc_locked
     if profit_usd <= 0:
         return
     if PAPER_MODE:
         with usdc_lock:
             usdc_locked += profit_usd
-        log("ok", f"[PAPER] Locked ${profit_usd:.4f} profit -> USDC | Total locked: ${usdc_locked:.2f}", "USDC")
+        log("ok", f"[PAPER] Locked ${profit_usd:.4f} profit -> USDC | Total: ${usdc_locked:.2f}", "USDC")
         return
     try:
         sol_price = get_sol_price()
         if not sol_price:
             log("warn", "Cannot get SOL price — skipping USDC lock", "USDC")
             return
-        # Convert profit USD to lamports (1 SOL = 1e9 lamports)
-        sol_amount  = profit_usd / sol_price
-        lamports    = int(sol_amount * 1_000_000_000)
-        if lamports < 5_000:  # ignore dust (<0.000005 SOL)
+        sol_amount = profit_usd / sol_price
+        lamports   = int(sol_amount * 1_000_000_000)
+        if lamports < 5_000:
             return
 
-        # Get Jupiter quote: SOL -> USDC
+        # Get swap route from GMGN
         res = _session.get(
-            JUPITER_QUOTE,
+            GMGN_ROUTE,
             params={
-                "inputMint":   WSOL_MINT,
-                "outputMint":  USDC_MINT,
-                "amount":      lamports,
-                "slippageBps": 50,  # 0.5% slippage
+                "token_in_address":  WSOL_MINT,
+                "token_out_address": USDC_MINT,
+                "in_amount":         lamports,
+                "from_address":      WALLET,
+                "slippage":          0.5,
             },
+            headers={"User-Agent": "Mozilla/5.0"},
             timeout=10
         )
         if res.status_code != 200:
-            log("warn", f"Jupiter quote failed {res.status_code}", "USDC")
+            log("warn", f"GMGN route failed {res.status_code}: {res.text[:80]}", "USDC")
             return
-        quote = res.json()
 
-        # Get swap transaction
-        swap_res = _session.post(
-            JUPITER_SWAP,
-            json={
-                "quoteResponse":    quote,
-                "userPublicKey":    WALLET,
-                "wrapAndUnwrapSol": True,
-                "prioritizationFeeLamports": 1000,
-            },
-            headers={"Content-Type": "application/json"},
-            timeout=15
-        )
-        if swap_res.status_code != 200:
-            log("warn", f"Jupiter swap tx failed {swap_res.status_code}", "USDC")
+        data    = res.json()
+        raw_tx  = data.get("data", {}).get("raw_tx", {}).get("swapTransaction", "")
+        out_amt = data.get("data", {}).get("quote", {}).get("outputAmount", 0)
+        if not raw_tx:
+            log("warn", f"GMGN returned no transaction: {str(data)[:120]}", "USDC")
             return
 
         import base64
-        raw_tx   = base64.b64decode(swap_res.json()["swapTransaction"])
+        tx_bytes = base64.b64decode(raw_tx)
         keypair  = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
-        tx       = VersionedTransaction(VersionedTransaction.from_bytes(raw_tx).message, [keypair])
+        tx       = VersionedTransaction(VersionedTransaction.from_bytes(tx_bytes).message, [keypair])
         client   = Client(SOL_RPC)
         result   = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True, preflight_commitment="confirmed"))
         sig      = str(result.value)
 
-        usdc_out = float(quote.get("outAmount", 0)) / 1_000_000  # USDC has 6 decimals
+        usdc_out = float(out_amt) / 1_000_000  # USDC has 6 decimals
         with usdc_lock:
             usdc_locked += usdc_out
-        log("ok", f"Locked ${usdc_out:.4f} USDC | Total: ${usdc_locked:.4f} | sig={sig[:20]}...", "USDC")
+        log("ok", f"GMGN locked ${usdc_out:.4f} USDC | Total: ${usdc_locked:.4f} | sig={sig[:20]}...", "USDC")
         log("ok", f"https://solscan.io/tx/{sig}", "USDC")
     except Exception as e:
         log("warn", f"USDC lock error: {e}", "USDC")
