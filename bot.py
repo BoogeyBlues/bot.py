@@ -120,6 +120,7 @@ _copy_wallets     = []   # [{address, winrate}]
 _copy_wallet_time = 0.0
 _copied_mints     = {}   # mint -> timestamp, to avoid double-copy
 _copy_lock        = threading.Lock()
+_gmgn_backoff     = 0    # seconds to wait before retrying GMGN rank
 
 # ── LOGGING ─────────────────────────────────────────────────────
 def log(tag, msg, symbol=""):
@@ -729,14 +730,29 @@ def monitor_loop():
 
 # ── COPY TRADING ─────────────────────────────────────────────────
 def fetch_smart_wallets():
-    global _copy_wallets, _copy_wallet_time
+    global _copy_wallets, _copy_wallet_time, _gmgn_backoff
+    if _gmgn_backoff > 0:
+        if time.time() < _gmgn_backoff:
+            return
+        _gmgn_backoff = 0
+    headers = {
+        "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Accept":          "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer":         "https://gmgn.ai/",
+        "Origin":          "https://gmgn.ai",
+    }
     try:
         res = _session.get(
             GMGN_RANK,
             params={"orderby": "winrate", "direction": "desc", "limit": 100},
-            headers={"User-Agent": "Mozilla/5.0"},
+            headers=headers,
             timeout=12
         )
+        if res.status_code == 403:
+            _gmgn_backoff = time.time() + 3600  # back off 1 hour on 403
+            log("warn", "GMGN rank blocked (403) — copy trading paused 1h", "COPY")
+            return
         if res.status_code != 200:
             log("warn", f"GMGN rank {res.status_code}", "COPY")
             return
@@ -763,10 +779,10 @@ def copy_trade_loop():
     fetch_smart_wallets()
     while scan_active:
         try:
-            # Refresh wallet list every hour
+            # Refresh wallet list every hour (or retry after backoff expires)
             with _copy_lock:
                 stale = time.time() - _copy_wallet_time > COPY_REFRESH_MINS * 60
-            if stale:
+            if stale or (_gmgn_backoff > 0 and time.time() >= _gmgn_backoff):
                 fetch_smart_wallets()
 
             with _copy_lock:
@@ -776,6 +792,10 @@ def copy_trade_loop():
                 expired = [m for m, t in _copied_mints.items() if now - t > 600]
                 for m in expired:
                     _copied_mints.pop(m, None)
+
+            if not wallets:
+                time.sleep(60)
+                continue
 
             for w in wallets:
                 if daily_limit_reached():
@@ -903,7 +923,7 @@ def scanner_loop():
                         if market and market["price"] > 0 and market["liq"] >= MIN_LIQ:
                             amt = trade_size()
                             log("ok", f"BUNDLE RIDE | bond={bond:.1f}%", symbol)
-                            enter_trade(mint, symbol, market["price"], amt, "bundle", bond, replies)
+                            enter_trade(mint, symbol, market["price"], amt, "bundle", bond, 0)
                             time.sleep(0.5)
                             continue
 
@@ -931,8 +951,8 @@ def scanner_loop():
                         continue
 
                     amt = trade_size()
-                    log("ok", f"BOND RUNNER | bond={bond:.1f}% replies={replies}", symbol)
-                    enter_trade(mint, symbol, market["price"], amt, "bond", bond, replies)
+                    log("ok", f"BOND RUNNER | bond={bond:.1f}%", symbol)
+                    enter_trade(mint, symbol, market["price"], amt, "bond", bond, 0)
                     time.sleep(0.5)
                     continue
 
@@ -955,7 +975,7 @@ def scanner_loop():
                             continue
                         amt = trade_size()
                         log("ok", f"DORMANT SPIKE | age={age_h:.1f}h 1h={market['change1h']:+.0f}%", symbol)
-                        enter_trade(mint, symbol, market["price"], amt, "spike", bond, replies)
+                        enter_trade(mint, symbol, market["price"], amt, "spike", bond, 0)
                         time.sleep(0.5)
 
                 time.sleep(0.2)
