@@ -950,14 +950,12 @@ def scanner_loop():
 
                     market = get_market_data(mint)
                     if not market:
-                        log("info", f"BOND SKIP: no market data", symbol)
+                        log("info", f"BOND SKIP: no market data (DexScreener not indexed yet)", symbol)
                         continue
                     if market["price"] <= 0:
                         log("info", f"BOND SKIP: price=0", symbol)
                         continue
-                    if market["liq"] < MIN_LIQ:
-                        log("info", f"BOND SKIP: liq=${market['liq']:.0f} < ${MIN_LIQ}", symbol)
-                        continue
+                    # Skip liquidity check for bond runner — bonding curve IS the liquidity
 
                     amt = trade_size()
                     log("ok", f"BOND RUNNER | bond={bond:.1f}%", symbol)
