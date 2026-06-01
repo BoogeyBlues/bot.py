@@ -189,12 +189,6 @@ def auto_tune(history):
         if spike_wr > bond_wr + 0.2 and SPIKE_TP_PCT < 80:
             SPIKE_TP_PCT = round(SPIKE_TP_PCT * 1.1, 1)
 
-        if wins:
-            avg_win_replies  = sum(t.get("replies", MIN_REPLIES) for t in wins)  / len(wins)
-            avg_loss_replies = sum(t.get("replies", MIN_REPLIES) for t in losses) / max(len(losses), 1)
-            if avg_win_replies > avg_loss_replies + 5:
-                MIN_REPLIES = min(int(avg_win_replies * 0.8), 30)
-
         stats = {
             "tuned_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "trades_analyzed": len(recent),
@@ -203,9 +197,8 @@ def auto_tune(history):
             "spike_win_rate": round(spike_wr * 100, 1),
             "new_bond_entry": f"{BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%",
             "new_spike_tp": SPIKE_TP_PCT,
-            "new_min_replies": MIN_REPLIES,
         }
-        log("ok", f"Auto-tuned: bond={BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% spike_tp={SPIKE_TP_PCT}% replies={MIN_REPLIES}")
+        log("ok", f"Auto-tuned: bond={BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% spike_tp={SPIKE_TP_PCT}%")
         try:
             with open(LEARN_FILE.replace(".json", "_stats.json"), "w") as f:
                 json.dump(stats, f, indent=2)
@@ -250,8 +243,9 @@ def get_pumpfun_coins():
                         "telegram":   bool(coin.get("telegram")),
                         "dev":        coin.get("creator", ""),
                         "replies":    int(coin.get("reply_count", 0) or 0),
-                        "created_at": int(coin.get("created_timestamp", 0) or 0),
-                        "complete":   False,
+                        "created_at":   int(coin.get("created_timestamp", 0) or 0),
+                        "last_trade":   int(coin.get("last_trade_timestamp", 0) or 0),
+                        "complete":     False,
                     })
             log("info", f"pump.fun API: {len(coins)} live coins")
             return coins
@@ -696,16 +690,16 @@ def scanner_loop():
                         continue
 
                 # Require Twitter OR Telegram (at least one)
-                has_twitter  = coin.get("twitter")
-                has_telegram = coin.get("telegram")
-                if not has_twitter and not has_telegram:
+                if not coin.get("twitter") and not coin.get("telegram"):
                     continue
                 n_social += 1
 
-                replies = coin.get("replies", 0)
-                if replies < MIN_REPLIES:
+                # Active trading: last trade within 5 minutes
+                last_trade = coin.get("last_trade", 0)
+                secs_since = (time.time() - last_trade / 1000) if last_trade > 0 else 9999
+                if secs_since > 300:
                     continue
-                n_replies += 1
+                n_replies += 1  # reuse counter — now means "recently active"
 
                 bond = coin.get("bond_pct", 0)
                 if BOND_ENTRY_MIN <= bond <= BOND_ENTRY_MAX:
@@ -783,12 +777,12 @@ def scanner_loop():
 
             log("info",
                 f"Filter summary: {len(coins)} coins | "
-                f"{n_social} both-socials | {n_replies} 10+replies | "
+                f"{n_social} have-social | {n_replies} active<5m | "
                 f"{n_bond_range} in bond range | {n_spike_range} dormant")
             if n_social == 0:
-                log("warn", "0 coins have both Twitter+Telegram — market may be slow")
+                log("warn", "0 coins have Twitter or Telegram — market may be slow")
             elif n_replies == 0:
-                log("warn", f"{n_social} coins have socials but none have {MIN_REPLIES}+ replies")
+                log("warn", f"{n_social} coins have socials but none traded in last 5 min")
 
         except Exception as e:
             log("err", f"Scanner: {e}")
