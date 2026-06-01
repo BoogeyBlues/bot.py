@@ -32,14 +32,15 @@ BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "58"))
 BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "63"))
 BOND_TP         = float(os.environ.get("BOND_TP",        "67"))
 BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "10"))
-BOND_MAX_SECS   = int(os.environ.get("BOND_MAX_SECS",    "600"))
+BOND_MAX_SECS   = int(os.environ.get("BOND_MAX_SECS",    "240"))   # 4 min hard cap
+BOND_STALE_SECS = int(os.environ.get("BOND_STALE_SECS",  "120"))   # exit if bond hasn't moved in 2 min
 
 # Dormant Spike strategy
 SPIKE_MIN_AGE_H = float(os.environ.get("SPIKE_MIN_AGE_H", "12"))
 SPIKE_MIN_1H    = float(os.environ.get("SPIKE_MIN_1H",    "100"))
 SPIKE_TP_PCT    = float(os.environ.get("SPIKE_TP_PCT",    "40"))
 SPIKE_SL_PCT    = float(os.environ.get("SPIKE_SL_PCT",    "15"))
-SPIKE_MAX_SECS  = int(os.environ.get("SPIKE_MAX_SECS",    "300"))
+SPIKE_MAX_SECS  = int(os.environ.get("SPIKE_MAX_SECS",    "180"))   # 3 min hard cap
 
 # Exit protection
 SLIP_TRIGGER   = float(os.environ.get("SLIP_TRIGGER",  "90"))
@@ -488,18 +489,19 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
 
     with trades_lock:
         open_trades[mint] = {
-            "symbol":          symbol,
-            "mint":            mint,
-            "strategy":        strategy,
-            "entry":           entry_price,
-            "amount":          amount,
-            "tokens":          amount / max(entry_price, 1e-12),
-            "opened_at":       time.time(),
-            "bond_entry":      bond_entry,
-            "bond_high":       bond_entry,
-            "bond_prev":       bond_entry,
-            "bond_slip_start": None,
-            "replies":         replies,
+            "symbol":            symbol,
+            "mint":              mint,
+            "strategy":          strategy,
+            "entry":             entry_price,
+            "amount":            amount,
+            "tokens":            amount / max(entry_price, 1e-12),
+            "opened_at":         time.time(),
+            "bond_entry":        bond_entry,
+            "bond_high":         bond_entry,
+            "bond_prev":         bond_entry,
+            "bond_last_moved":   time.time(),  # tracks last time bond increased
+            "bond_slip_start":   None,
+            "replies":           replies,
         }
 
     log("ok", f"ENTER [{strategy.upper()}] ${amount:.2f} | bond={bond_entry:.1f}%", symbol)
@@ -585,10 +587,12 @@ def monitor_loop():
                 if mint not in open_trades:
                     continue
                 if bond > open_trades[mint]["bond_high"]:
-                    open_trades[mint]["bond_high"] = bond
-                bond_high  = open_trades[mint]["bond_high"]
-                bond_prev  = open_trades[mint]["bond_prev"]
-                slip_start = open_trades[mint]["bond_slip_start"]
+                    open_trades[mint]["bond_high"]       = bond
+                    open_trades[mint]["bond_last_moved"]  = time.time()
+                bond_high       = open_trades[mint]["bond_high"]
+                bond_prev       = open_trades[mint]["bond_prev"]
+                bond_last_moved = open_trades[mint].get("bond_last_moved", time.time())
+                slip_start      = open_trades[mint]["bond_slip_start"]
                 open_trades[mint]["bond_prev"] = bond
 
             bond_drop = bond - bond_prev
@@ -618,6 +622,13 @@ def monitor_loop():
             # Bundle ride exit
             if strategy == "bundle" and bond >= BUNDLE_RIDE_TP:
                 exit_trade(mint, price, "BUNDLE_TP", bond)
+                continue
+
+            # Stale exit: bond hasn't moved in BOND_STALE_SECS — momentum dead
+            stale_secs = time.time() - bond_last_moved
+            if strategy in ("bond", "bundle") and elapsed > 30 and stale_secs >= BOND_STALE_SECS:
+                log("warn", f"Bond stale {stale_secs:.0f}s — exiting", symbol)
+                exit_trade(mint, price, "STALE", bond)
                 continue
 
             # Bond Runner exits
