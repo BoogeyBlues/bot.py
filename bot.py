@@ -23,9 +23,15 @@ _PAPER_ENV         = os.environ.get("PAPER_MODE", "true").lower()
 PAPER_MODE         = _PAPER_ENV == "true" or not WALLET or not WALLET_PRIVATE_KEY
 
 # Progressive sizing: 18% of capital, clamped
-TRADE_PCT    = float(os.environ.get("TRADE_PCT",  "18"))
-MIN_TRADE    = float(os.environ.get("MIN_TRADE",  "5"))
-MAX_TRADE    = float(os.environ.get("MAX_TRADE",  "500"))
+TRADE_PCT         = float(os.environ.get("TRADE_PCT",   "18"))
+MIN_TRADE         = float(os.environ.get("MIN_TRADE",   "5"))
+MAX_TRADE         = float(os.environ.get("MAX_TRADE",   "500"))
+FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "5"))  # 0 = use progressive %
+
+# Daily limits
+DAILY_MAX         = int(os.environ.get("DAILY_MAX",          "3"))   # base trades per day
+DAILY_WIN_BONUS   = int(os.environ.get("DAILY_WIN_BONUS",    "2"))   # extra trades if enough wins
+DAILY_WIN_NEEDED  = int(os.environ.get("DAILY_WIN_NEEDED",   "2"))   # wins required for bonus
 
 # Bond Runner strategy
 BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "58"))
@@ -90,8 +96,13 @@ log_lock          = threading.Lock()
 scan_active       = True
 _milestones_hit   = set()
 _milestone_lock   = threading.Lock()
-usdc_locked       = 0.0   # total USD value locked into USDC
+usdc_locked       = 0.0
 usdc_lock         = threading.Lock()
+# Daily tracking — resets at midnight
+_daily_date       = ""
+_daily_trades     = 0
+_daily_wins       = 0
+_daily_lock       = threading.Lock()
 
 # ── LOGGING ─────────────────────────────────────────────────────
 def log(tag, msg, symbol=""):
@@ -133,10 +144,44 @@ def notify(title, body):
 
 # ── PROGRESSIVE SIZING ───────────────────────────────────────────
 def trade_size():
+    if FIXED_TRADE_SIZE > 0:
+        return FIXED_TRADE_SIZE
     with capital_lock:
         cap = capital
     raw = cap * TRADE_PCT / 100
     return round(max(MIN_TRADE, min(MAX_TRADE, raw)), 2)
+
+# ── DAILY LIMITS ─────────────────────────────────────────────────
+def _reset_daily_if_needed():
+    global _daily_date, _daily_trades, _daily_wins
+    today = time.strftime("%Y-%m-%d")
+    with _daily_lock:
+        if _daily_date != today:
+            _daily_date   = today
+            _daily_trades = 0
+            _daily_wins   = 0
+            log("ok", f"New day {today} — daily limits reset (0/{DAILY_MAX} trades)")
+
+def daily_limit_reached():
+    _reset_daily_if_needed()
+    with _daily_lock:
+        limit = DAILY_MAX + (DAILY_WIN_BONUS if _daily_wins >= DAILY_WIN_NEEDED else 0)
+        if _daily_trades >= limit:
+            bonus_note = f" (+{DAILY_WIN_BONUS} bonus)" if _daily_wins >= DAILY_WIN_NEEDED else ""
+            log("info", f"Daily limit: {_daily_trades}/{limit}{bonus_note} trades — resuming tomorrow")
+            return True
+        return False
+
+def record_daily_trade(won):
+    global _daily_trades, _daily_wins
+    with _daily_lock:
+        _daily_trades += 1
+        if won:
+            _daily_wins += 1
+        limit   = DAILY_MAX + (DAILY_WIN_BONUS if _daily_wins >= DAILY_WIN_NEEDED else 0)
+        log("ok" if won else "info",
+            f"Daily: {_daily_trades}/{limit} trades | {_daily_wins} wins today"
+            + (f" — bonus unlocked! +{DAILY_WIN_BONUS} extra trades" if _daily_wins == DAILY_WIN_NEEDED else ""))
 
 # ── MILESTONES ───────────────────────────────────────────────────
 def check_milestones():
@@ -463,6 +508,8 @@ def execute_sell(tokens, mint, symbol):
 # ── ENTER / EXIT ─────────────────────────────────────────────────
 def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, replies=0):
     global capital
+    if daily_limit_reached():
+        return False
     with trades_lock:
         if mint in open_trades or len(open_trades) >= MAX_OPEN:
             return False
@@ -523,6 +570,7 @@ def exit_trade(mint, price, reason, bond=0):
            f"Reason: {reason}\nPnL: {sign}${pnl:.4f}\nHeld: {hold_m:.1f} min\nCapital: ${capital:.2f}")
 
     execute_sell(trade["tokens"], mint, trade["symbol"])
+    record_daily_trade(won=(pnl > 0))
 
     rec = {
         "symbol":     trade["symbol"],
@@ -825,13 +873,21 @@ def status():
         "usdc_threshold": USDC_LOCK_THRESHOLD,
         "milestones_hit": sorted(_milestones_hit),
         "next_milestone": next((m for m in MILESTONES if m > cap), None),
+        "today": {
+            "trades":       _daily_trades,
+            "wins":         _daily_wins,
+            "limit":        DAILY_MAX + (DAILY_WIN_BONUS if _daily_wins >= DAILY_WIN_NEEDED else 0),
+            "bonus_active": _daily_wins >= DAILY_WIN_NEEDED,
+            "date":         _daily_date,
+        },
         "settings": {
+            "trade_size":    f"${FIXED_TRADE_SIZE:.0f} fixed" if FIXED_TRADE_SIZE > 0 else f"{TRADE_PCT}% of capital",
+            "daily_max":     f"{DAILY_MAX} trades (+{DAILY_WIN_BONUS} if {DAILY_WIN_NEEDED}+ wins)",
             "bond_entry":    f"{BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%",
             "bond_tp":       f"{BOND_TP}%",
             "spike_min_age": f"{SPIKE_MIN_AGE_H}h",
             "spike_min_1h":  f"{SPIKE_MIN_1H}%",
             "bundle_mode":   BUNDLE_MODE,
-            "min_replies":   MIN_REPLIES,
         }
     })
 
