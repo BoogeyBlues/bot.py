@@ -933,21 +933,30 @@ def scanner_loop():
                     if details:
                         bond = details["bond_pct"]
                         if details.get("complete"):
+                            log("info", f"BOND SKIP: already graduated bond={bond:.1f}%", symbol)
                             continue
                     if not (BOND_ENTRY_MIN <= bond <= BOND_ENTRY_MAX):
+                        log("info", f"BOND SKIP: bond moved to {bond:.1f}% (range {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%)", symbol)
                         continue
 
                     rug = run_rugcheck(mint)
                     if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
-                        log("warn", "Mint/freeze auth — skip", symbol)
+                        log("warn", f"BOND SKIP: mint/freeze auth rug={rug}", symbol)
                         blacklisted_mints.add(mint)
                         continue
                     if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
-                        log("warn", "Bundle detected — skip", symbol)
+                        log("warn", f"BOND SKIP: bundled", symbol)
                         continue
 
                     market = get_market_data(mint)
-                    if not market or market["price"] <= 0 or market["liq"] < MIN_LIQ:
+                    if not market:
+                        log("info", f"BOND SKIP: no market data", symbol)
+                        continue
+                    if market["price"] <= 0:
+                        log("info", f"BOND SKIP: price=0", symbol)
+                        continue
+                    if market["liq"] < MIN_LIQ:
+                        log("info", f"BOND SKIP: liq=${market['liq']:.0f} < ${MIN_LIQ}", symbol)
                         continue
 
                     amt = trade_size()
