@@ -135,32 +135,47 @@ def log(tag, msg, symbol=""):
             trade_log.pop(0)
 
 # ── NOTIFICATIONS ────────────────────────────────────────────────
+_notify_queue = []
+_notify_q_lock = threading.Lock()
+
 def notify(title, body):
-    """Send push notification via Telegram and/or ntfy — runs in background thread."""
-    def _send():
-        # Telegram
-        if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-            try:
-                _session.post(
-                    f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                    json={"chat_id": TELEGRAM_CHAT_ID, "text": f"*{title}*\n{body}",
-                          "parse_mode": "Markdown"},
-                    timeout=8
-                )
-            except Exception as e:
-                log("warn", f"Telegram notify failed: {e}")
-        # ntfy.sh (free, no account needed)
-        if NTFY_TOPIC:
-            try:
-                _session.post(
-                    f"https://ntfy.sh/{NTFY_TOPIC}",
-                    data=body.encode("utf-8"),
-                    headers={"Title": title, "Priority": "high", "Tags": "chart_increasing"},
-                    timeout=8
-                )
-            except Exception as e:
-                log("warn", f"ntfy notify failed: {e}")
-    threading.Thread(target=_send, daemon=True).start()
+    """Queue a notification — sent by dedicated thread to avoid Telegram rate limits."""
+    with _notify_q_lock:
+        _notify_queue.append((title, body))
+
+def _notify_worker():
+    """Single thread sends queued notifications 1/sec so nothing gets dropped."""
+    while True:
+        item = None
+        with _notify_q_lock:
+            if _notify_queue:
+                item = _notify_queue.pop(0)
+        if item:
+            title, body = item
+            if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+                try:
+                    _session.post(
+                        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                        json={"chat_id": TELEGRAM_CHAT_ID,
+                              "text": f"*{title}*\n{body}",
+                              "parse_mode": "Markdown"},
+                        timeout=8
+                    )
+                except Exception as e:
+                    log("warn", f"Telegram notify failed: {e}")
+            if NTFY_TOPIC:
+                try:
+                    _session.post(
+                        f"https://ntfy.sh/{NTFY_TOPIC}",
+                        data=body.encode("utf-8"),
+                        headers={"Title": title, "Priority": "high", "Tags": "chart_increasing"},
+                        timeout=8
+                    )
+                except Exception as e:
+                    log("warn", f"ntfy notify failed: {e}")
+            time.sleep(1)  # 1 message/sec — well within Telegram's 30/sec limit
+        else:
+            time.sleep(0.2)
 
 # ── PROGRESSIVE SIZING ───────────────────────────────────────────
 def trade_size():
@@ -1273,8 +1288,9 @@ if __name__ == "__main__":
     elif _PAPER_ENV != "true" and (not WALLET or not WALLET_PRIVATE_KEY):
         log("warn", "WALLET/WALLET_PRIVATE_KEY not set — PAPER mode")
 
-    threading.Thread(target=monitor_loop,   daemon=True).start()
-    threading.Thread(target=scanner_loop,   daemon=True).start()
+    threading.Thread(target=_notify_worker,  daemon=True).start()
+    threading.Thread(target=monitor_loop,    daemon=True).start()
+    threading.Thread(target=scanner_loop,    daemon=True).start()
     if COPY_TRADE:
         threading.Thread(target=copy_trade_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
