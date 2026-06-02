@@ -121,6 +121,7 @@ _copy_wallet_time = 0.0
 _copied_mints     = {}   # mint -> timestamp, to avoid double-copy
 _copy_lock        = threading.Lock()
 _gmgn_backoff     = 0    # seconds to wait before retrying GMGN rank
+_sold_mints       = {}   # mint -> timestamp, cooldown after selling to prevent re-buy
 
 # ── LOGGING ─────────────────────────────────────────────────────
 def log(tag, msg, symbol=""):
@@ -191,9 +192,8 @@ def daily_limit_reached():
         return False
 
 def record_daily_trade(won):
-    global _daily_trades, _daily_wins
+    global _daily_wins
     with _daily_lock:
-        _daily_trades += 1
         if won:
             _daily_wins += 1
         limit   = DAILY_MAX + (DAILY_WIN_BONUS if _daily_wins >= DAILY_WIN_NEEDED else 0)
@@ -525,11 +525,16 @@ def execute_sell(tokens, mint, symbol):
 
 # ── ENTER / EXIT ─────────────────────────────────────────────────
 def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, replies=0):
-    global capital
+    global capital, _daily_trades
     if daily_limit_reached():
         return False
     with trades_lock:
         if mint in open_trades or len(open_trades) >= MAX_OPEN:
+            return False
+    # Skip recently sold coins (30 min cooldown)
+    with _copy_lock:
+        sold_at = _sold_mints.get(mint, 0)
+        if sold_at and time.time() - sold_at < 1800:
             return False
     with capital_lock:
         if capital < amount:
@@ -538,6 +543,9 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
     tx = execute_buy(mint, symbol, amount)
     if not tx:
         return False
+
+    with _daily_lock:
+        _daily_trades += 1
 
     with capital_lock:
         capital -= amount
@@ -588,6 +596,8 @@ def exit_trade(mint, price, reason, bond=0):
            f"Reason: {reason}\nPnL: {sign}${pnl:.4f}\nHeld: {hold_m:.1f} min\nCapital: ${capital:.2f}")
 
     execute_sell(trade["tokens"], mint, trade["symbol"])
+    with _copy_lock:
+        _sold_mints[mint] = time.time()  # 30 min cooldown before re-buying
     record_daily_trade(won=(pnl > 0))
 
     rec = {
