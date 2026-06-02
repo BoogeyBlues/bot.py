@@ -29,9 +29,8 @@ MAX_TRADE         = float(os.environ.get("MAX_TRADE",   "500"))
 FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "5"))  # 0 = use progressive %
 
 # Daily limits
-DAILY_MAX         = int(os.environ.get("DAILY_MAX",          "3"))   # base trades per day
-DAILY_WIN_BONUS   = int(os.environ.get("DAILY_WIN_BONUS",    "2"))   # extra trades if enough wins
-DAILY_WIN_NEEDED  = int(os.environ.get("DAILY_WIN_NEEDED",   "2"))   # wins required for bonus
+DAILY_MAX         = int(os.environ.get("DAILY_MAX",       "10"))  # max trades per day
+DAILY_LOSS_MAX    = int(os.environ.get("DAILY_LOSS_MAX",  "3"))   # pause day after this many losses
 
 # Bond Runner strategy
 BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "58"))
@@ -115,6 +114,8 @@ usdc_lock         = threading.Lock()
 _daily_date       = ""
 _daily_trades     = 0
 _daily_wins       = 0
+_daily_losses     = 0
+_daily_paused     = False   # True after 3 losses — resumes next day
 _daily_lock       = threading.Lock()
 _copy_wallets     = []   # [{address, winrate}]
 _copy_wallet_time = 0.0
@@ -172,34 +173,63 @@ def trade_size():
 
 # ── DAILY LIMITS ─────────────────────────────────────────────────
 def _reset_daily_if_needed():
-    global _daily_date, _daily_trades, _daily_wins
+    global _daily_date, _daily_trades, _daily_wins, _daily_losses, _daily_paused
     today = time.strftime("%Y-%m-%d")
     with _daily_lock:
         if _daily_date != today:
-            _daily_date   = today
-            _daily_trades = 0
-            _daily_wins   = 0
-            log("ok", f"New day {today} — daily limits reset (0/{DAILY_MAX} trades)")
+            _daily_date    = today
+            _daily_trades  = 0
+            _daily_wins    = 0
+            _daily_losses  = 0
+            _daily_paused  = False
+            log("ok", f"New day {today} — reset (0/{DAILY_MAX} trades, loss limit {DAILY_LOSS_MAX})")
 
 def daily_limit_reached():
     _reset_daily_if_needed()
     with _daily_lock:
-        limit = DAILY_MAX + (DAILY_WIN_BONUS if _daily_wins >= DAILY_WIN_NEEDED else 0)
-        if _daily_trades >= limit:
-            bonus_note = f" (+{DAILY_WIN_BONUS} bonus)" if _daily_wins >= DAILY_WIN_NEEDED else ""
-            log("info", f"Daily limit: {_daily_trades}/{limit}{bonus_note} trades — resuming tomorrow")
+        if _daily_paused:
+            log("info", f"Paused: {_daily_losses} losses today — strategy retuning overnight")
+            return True
+        if _daily_trades >= DAILY_MAX:
+            log("info", f"Daily limit: {_daily_trades}/{DAILY_MAX} trades — resuming tomorrow")
             return True
         return False
 
 def record_daily_trade(won):
-    global _daily_wins
+    global _daily_wins, _daily_losses, _daily_paused
     with _daily_lock:
         if won:
             _daily_wins += 1
-        limit   = DAILY_MAX + (DAILY_WIN_BONUS if _daily_wins >= DAILY_WIN_NEEDED else 0)
+        else:
+            _daily_losses += 1
         log("ok" if won else "info",
-            f"Daily: {_daily_trades}/{limit} trades | {_daily_wins} wins today"
-            + (f" — bonus unlocked! +{DAILY_WIN_BONUS} extra trades" if _daily_wins == DAILY_WIN_NEEDED else ""))
+            f"Daily: {_daily_trades} trades | {_daily_wins}W {_daily_losses}L")
+        if not won and _daily_losses >= DAILY_LOSS_MAX and not _daily_paused:
+            _daily_paused = True
+            log("warn", f"3 losses today — pausing. Auto-tuning strategies for tomorrow...")
+            notify("🔧 Loss Limit Hit",
+                   f"3 losses today. Trading paused.\nAuto-tuning strategies overnight.\nResumes tomorrow.")
+            threading.Thread(target=_retune_strategies, daemon=True).start()
+
+def _retune_strategies():
+    """Run after hitting daily loss limit — analyze history and adjust params."""
+    time.sleep(3)
+    try:
+        history = []
+        if os.path.exists(LEARN_FILE):
+            with open(LEARN_FILE) as f:
+                history = json.load(f)
+        if len(history) >= 5:
+            auto_tune(history)
+            notify("✅ Strategy Retuned",
+                   f"New bond entry: {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%\n"
+                   f"Stale exit: {BOND_STALE_SECS}s\n"
+                   f"Spike TP: {SPIKE_TP_PCT}%\n"
+                   f"Trading resumes tomorrow.")
+        else:
+            log("info", "Not enough history yet to retune — will use defaults tomorrow", "TUNE")
+    except Exception as e:
+        log("warn", f"Retune error: {e}", "TUNE")
 
 # ── MILESTONES ───────────────────────────────────────────────────
 def check_milestones():
@@ -230,38 +260,67 @@ def record_trade(trade_data):
         log("warn", f"Learning record: {e}")
 
 def auto_tune(history):
-    global BOND_ENTRY_MIN, BOND_ENTRY_MAX, MIN_REPLIES, SPIKE_TP_PCT
+    global BOND_ENTRY_MIN, BOND_ENTRY_MAX, SPIKE_TP_PCT, BOND_STALE_SECS, BOND_SL_PCT, BOND_MAX_SECS
     try:
-        recent = history[-40:]
+        recent = history[-60:]
         wins   = [t for t in recent if t.get("pnl", 0) > 0]
         losses = [t for t in recent if t.get("pnl", 0) <= 0]
 
-        bond_wins  = [t for t in wins   if t.get("strategy") == "bond"]
-        spike_wins = [t for t in wins   if t.get("strategy") == "spike"]
-        bond_all   = [t for t in recent if t.get("strategy") == "bond"]
-        spike_all  = [t for t in recent if t.get("strategy") == "spike"]
+        bond_wins   = [t for t in wins   if t.get("strategy") == "bond"]
+        spike_wins  = [t for t in wins   if t.get("strategy") == "spike"]
+        bond_all    = [t for t in recent if t.get("strategy") == "bond"]
+        spike_all   = [t for t in recent if t.get("strategy") == "spike"]
+        bond_losses = [t for t in losses if t.get("strategy") == "bond"]
 
         bond_wr  = len(bond_wins)  / max(len(bond_all),  1)
         spike_wr = len(spike_wins) / max(len(spike_all), 1)
 
+        # Tune bond entry range toward what's winning
         if bond_wins:
             avg_win_entry = sum(t.get("bond_entry", BOND_ENTRY_MIN) for t in bond_wins) / len(bond_wins)
-            BOND_ENTRY_MIN = round(min(max(avg_win_entry - 3, 50), 70), 1)
-            BOND_ENTRY_MAX = round(min(BOND_ENTRY_MIN + 8, 78), 1)
+            BOND_ENTRY_MIN = round(min(max(avg_win_entry - 2, 50), 72), 1)
+            BOND_ENTRY_MAX = round(min(BOND_ENTRY_MIN + 6, 78), 1)
+        elif bond_wr < 0.35 and len(bond_all) >= 5:
+            # Poor win rate — tighten entry, look for higher momentum
+            BOND_ENTRY_MIN = round(min(BOND_ENTRY_MIN + 1.5, 68), 1)
+            BOND_ENTRY_MAX = round(min(BOND_ENTRY_MAX + 1.5, 74), 1)
 
+        # Tune stale exit based on how long winners actually held
+        if bond_wins:
+            avg_win_hold_secs = (sum(t.get("hold_m", 2) for t in bond_wins) / len(bond_wins)) * 60
+            BOND_STALE_SECS = max(90, min(300, int(avg_win_hold_secs * 0.7)))
+
+        # Tune hard timeout — give it at least as long as average winner
+        if bond_wins:
+            avg_win_hold_secs = (sum(t.get("hold_m", 2) for t in bond_wins) / len(bond_wins)) * 60
+            BOND_MAX_SECS = max(180, min(480, int(avg_win_hold_secs * 1.5)))
+
+        # Loosen SL if losses are all from price drop (not stale/timeout)
+        sl_losses = [t for t in bond_losses if t.get("result") == "BOND_SL"]
+        if len(sl_losses) > len(bond_losses) * 0.6 and BOND_SL_PCT > 6:
+            BOND_SL_PCT = round(BOND_SL_PCT - 1, 1)  # tighten SL to cut losses faster
+
+        # Spike tuning
         if spike_wr > bond_wr + 0.2 and SPIKE_TP_PCT < 80:
             SPIKE_TP_PCT = round(SPIKE_TP_PCT * 1.1, 1)
+        elif spike_wr < 0.3 and SPIKE_TP_PCT > 25:
+            SPIKE_TP_PCT = round(SPIKE_TP_PCT * 0.9, 1)
 
+        overall_wr = round(len(wins) / max(len(recent), 1) * 100, 1)
         stats = {
-            "tuned_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "tuned_at":        time.strftime("%Y-%m-%d %H:%M:%S"),
             "trades_analyzed": len(recent),
-            "win_rate": round(len(wins) / max(len(recent), 1) * 100, 1),
-            "bond_win_rate": round(bond_wr * 100, 1),
-            "spike_win_rate": round(spike_wr * 100, 1),
-            "new_bond_entry": f"{BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%",
-            "new_spike_tp": SPIKE_TP_PCT,
+            "overall_wr":      f"{overall_wr}%",
+            "bond_wr":         f"{round(bond_wr*100,1)}%",
+            "spike_wr":        f"{round(spike_wr*100,1)}%",
+            "bond_entry":      f"{BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%",
+            "bond_stale_secs": BOND_STALE_SECS,
+            "bond_max_secs":   BOND_MAX_SECS,
+            "bond_sl_pct":     BOND_SL_PCT,
+            "spike_tp_pct":    SPIKE_TP_PCT,
         }
-        log("ok", f"Auto-tuned: bond={BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% spike_tp={SPIKE_TP_PCT}%")
+        log("ok", f"Auto-tuned: bond={BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% "
+                  f"stale={BOND_STALE_SECS}s sl={BOND_SL_PCT}% wr={overall_wr}%", "TUNE")
         try:
             with open(LEARN_FILE.replace(".json", "_stats.json"), "w") as f:
                 json.dump(stats, f, indent=2)
@@ -1050,13 +1109,15 @@ def status():
         "today": {
             "trades":       _daily_trades,
             "wins":         _daily_wins,
-            "limit":        DAILY_MAX + (DAILY_WIN_BONUS if _daily_wins >= DAILY_WIN_NEEDED else 0),
-            "bonus_active": _daily_wins >= DAILY_WIN_NEEDED,
+            "losses":       _daily_losses,
+            "limit":        DAILY_MAX,
+            "loss_limit":   DAILY_LOSS_MAX,
+            "paused":       _daily_paused,
             "date":         _daily_date,
         },
         "settings": {
             "trade_size":    f"${FIXED_TRADE_SIZE:.0f} fixed" if FIXED_TRADE_SIZE > 0 else f"{TRADE_PCT}% of capital",
-            "daily_max":     f"{DAILY_MAX} trades (+{DAILY_WIN_BONUS} if {DAILY_WIN_NEEDED}+ wins)",
+            "daily_max":     f"{DAILY_MAX} trades, stop at {DAILY_LOSS_MAX} losses",
             "bond_entry":    f"{BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%",
             "bond_tp":       f"{BOND_TP}%",
             "spike_min_age": f"{SPIKE_MIN_AGE_H}h",
@@ -1218,7 +1279,7 @@ if __name__ == "__main__":
     log("ok", f"Capital   : ${capital:.2f} USDC (trading budget)")
     log("ok", f"SOL wallet: ${SOL_ALLOCATED:.2f} funded for on-chain execution")
     log("ok", f"Trade size: ${trade_size():.2f} fixed")
-    log("ok", f"Daily limit: {DAILY_MAX} trades (+{DAILY_WIN_BONUS} bonus if {DAILY_WIN_NEEDED}+ wins)")
+    log("ok", f"Daily limit: {DAILY_MAX} trades | Stop at {DAILY_LOSS_MAX} losses | Auto-retune overnight")
     log("ok", f"Copy trade: {'ON' if COPY_TRADE else 'OFF'} | WR {COPY_WINRATE_MIN}-{COPY_WINRATE_MAX}% | top {COPY_MAX_WALLETS} wallets")
     log("ok", f"USDC lock : activates at ${USDC_LOCK_THRESHOLD:.0f} capital")
     log("ok", "=" * 55)
