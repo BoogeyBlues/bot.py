@@ -89,9 +89,10 @@ MIN_LIQ      = float(os.environ.get("MIN_LIQ",    "500"))
 MAX_OPEN      = int(os.environ.get("MAX_OPEN",      "3"))
 SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "10"))
 
-SOL_RPC    = "https://api.mainnet-beta.solana.com"
-PUMPPORTAL = "https://pumpportal.fun/api/trade-local"
-LEARN_FILE = "/tmp/bot_learn.json"
+SOL_RPC     = "https://api.mainnet-beta.solana.com"
+PUMPPORTAL  = "https://pumpportal.fun/api/trade-local"
+LEARN_FILE  = "/tmp/bot_learn.json"
+STATE_FILE  = "/tmp/bot_state.json"
 
 MILESTONES = [100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000]
 
@@ -187,6 +188,39 @@ def trade_size():
     return round(max(MIN_TRADE, min(MAX_TRADE, raw)), 2)
 
 # ── DAILY LIMITS ─────────────────────────────────────────────────
+def _save_daily_state():
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump({
+                "date":    _daily_date,
+                "trades":  _daily_trades,
+                "wins":    _daily_wins,
+                "losses":  _daily_losses,
+                "paused":  _daily_paused,
+                "capital": capital,
+            }, f)
+    except Exception:
+        pass
+
+def _load_daily_state():
+    global _daily_date, _daily_trades, _daily_wins, _daily_losses, _daily_paused, capital
+    try:
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE) as f:
+                s = json.load(f)
+            today = time.strftime("%Y-%m-%d")
+            if s.get("date") == today:
+                _daily_date   = s["date"]
+                _daily_trades = s.get("trades",  0)
+                _daily_wins   = s.get("wins",    0)
+                _daily_losses = s.get("losses",  0)
+                _daily_paused = s.get("paused",  False)
+                capital       = s.get("capital", capital)
+                log("ok", f"Restored state: {_daily_trades} trades | {_daily_wins}W {_daily_losses}L "
+                          f"| paused={_daily_paused} | cap=${capital:.2f}")
+    except Exception as e:
+        log("warn", f"State load: {e}")
+
 def _reset_daily_if_needed():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses, _daily_paused
     today = time.strftime("%Y-%m-%d")
@@ -198,6 +232,7 @@ def _reset_daily_if_needed():
             _daily_losses  = 0
             _daily_paused  = False
             log("ok", f"New day {today} — reset (0/{DAILY_MAX} trades, loss limit {DAILY_LOSS_MAX})")
+            _save_daily_state()
 
 def daily_limit_reached():
     _reset_daily_if_needed()
@@ -225,6 +260,7 @@ def record_daily_trade(won):
             notify("🔧 Loss Limit Hit",
                    f"3 losses today. Trading paused.\nAuto-tuning strategies overnight.\nResumes tomorrow.")
             threading.Thread(target=_retune_strategies, daemon=True).start()
+    _save_daily_state()
 
 def _retune_strategies():
     """Run after hitting daily loss limit — analyze history and adjust params."""
@@ -690,6 +726,7 @@ def exit_trade(mint, price, reason, bond=0):
     completed_trades.append(rec)
     record_trade(rec)
     check_milestones()
+    _save_daily_state()
 
     # Lock profits into USDC once capital >= threshold
     if pnl > 0:
@@ -1287,6 +1324,8 @@ if __name__ == "__main__":
             raise SystemExit(1)
     elif _PAPER_ENV != "true" and (not WALLET or not WALLET_PRIVATE_KEY):
         log("warn", "WALLET/WALLET_PRIVATE_KEY not set — PAPER mode")
+
+    _load_daily_state()
 
     threading.Thread(target=_notify_worker,  daemon=True).start()
     threading.Thread(target=monitor_loop,    daemon=True).start()
