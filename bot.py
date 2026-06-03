@@ -28,9 +28,11 @@ MIN_TRADE         = float(os.environ.get("MIN_TRADE",   "5"))
 MAX_TRADE         = float(os.environ.get("MAX_TRADE",   "500"))
 FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "5"))  # 0 = use progressive %
 
-# Daily limits
+# Daily / weekly limits
 DAILY_MAX         = int(os.environ.get("DAILY_MAX",       "10"))  # max trades per day
-DAILY_LOSS_MAX    = int(os.environ.get("DAILY_LOSS_MAX",  "3"))   # pause day after this many losses
+DAILY_LOSS_MAX    = int(os.environ.get("DAILY_LOSS_MAX",  "3"))   # cooldown after this many losses
+LOSS_COOLDOWN_HRS = int(os.environ.get("LOSS_COOLDOWN_HRS", "4")) # hours to pause after loss limit
+WEEK_DAYS         = int(os.environ.get("WEEK_DAYS",        "7"))  # run for this many days
 
 # Bond Runner strategy
 BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "58"))
@@ -93,6 +95,7 @@ SOL_RPC     = "https://api.mainnet-beta.solana.com"
 PUMPPORTAL  = "https://pumpportal.fun/api/trade-local"
 LEARN_FILE  = "/tmp/bot_learn.json"
 STATE_FILE  = "/tmp/bot_state.json"
+WEEK_FILE   = "/tmp/bot_week.json"
 
 MILESTONES = [100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000]
 
@@ -116,8 +119,11 @@ _daily_date       = ""
 _daily_trades     = 0
 _daily_wins       = 0
 _daily_losses     = 0
-_daily_paused     = False   # True after 3 losses — resumes next day
+_pause_until      = 0.0    # Unix timestamp — bot pauses trading until this time
 _daily_lock       = threading.Lock()
+# Weekly tracking
+_week_start_date  = ""
+_week_day_logs    = []     # one entry per day: {date, trades, wins, losses, pnl, start_cap, end_cap}
 _copy_wallets     = []   # [{address, winrate}]
 _copy_wallet_time = 0.0
 _copied_mints     = {}   # mint -> timestamp, to avoid double-copy
@@ -192,18 +198,21 @@ def _save_daily_state():
     try:
         with open(STATE_FILE, "w") as f:
             json.dump({
-                "date":    _daily_date,
-                "trades":  _daily_trades,
-                "wins":    _daily_wins,
-                "losses":  _daily_losses,
-                "paused":  _daily_paused,
-                "capital": capital,
+                "date":         _daily_date,
+                "trades":       _daily_trades,
+                "wins":         _daily_wins,
+                "losses":       _daily_losses,
+                "pause_until":  _pause_until,
+                "capital":      capital,
+                "week_start":   _week_start_date,
+                "week_logs":    _week_day_logs,
             }, f)
     except Exception:
         pass
 
 def _load_daily_state():
-    global _daily_date, _daily_trades, _daily_wins, _daily_losses, _daily_paused, capital
+    global _daily_date, _daily_trades, _daily_wins, _daily_losses
+    global _pause_until, capital, _week_start_date, _week_day_logs
     try:
         if os.path.exists(STATE_FILE):
             with open(STATE_FILE) as f:
@@ -211,42 +220,57 @@ def _load_daily_state():
             today = time.strftime("%Y-%m-%d")
             if s.get("date") == today:
                 _daily_date   = s["date"]
-                _daily_trades = s.get("trades",  0)
-                _daily_wins   = s.get("wins",    0)
-                _daily_losses = s.get("losses",  0)
-                _daily_paused = s.get("paused",  False)
-                capital       = s.get("capital", capital)
-                log("ok", f"Restored state: {_daily_trades} trades | {_daily_wins}W {_daily_losses}L "
-                          f"| paused={_daily_paused} | cap=${capital:.2f}")
+                _daily_trades = s.get("trades",      0)
+                _daily_wins   = s.get("wins",        0)
+                _daily_losses = s.get("losses",      0)
+                _pause_until  = s.get("pause_until", 0.0)
+                capital       = s.get("capital",     capital)
+            _week_start_date  = s.get("week_start", "")
+            _week_day_logs    = s.get("week_logs",  [])
+            paused_msg = f" | paused until {time.strftime('%H:%M', time.localtime(_pause_until))}" if _pause_until > time.time() else ""
+            log("ok", f"Restored: {_daily_trades} trades | {_daily_wins}W {_daily_losses}L | cap=${capital:.2f}{paused_msg}")
     except Exception as e:
         log("warn", f"State load: {e}")
 
 def _reset_daily_if_needed():
-    global _daily_date, _daily_trades, _daily_wins, _daily_losses, _daily_paused
+    global _daily_date, _daily_trades, _daily_wins, _daily_losses, _pause_until
+    global _week_start_date, _week_day_logs
     today = time.strftime("%Y-%m-%d")
     with _daily_lock:
         if _daily_date != today:
+            # Log yesterday's summary into week log
+            if _daily_date:
+                _week_day_logs.append({
+                    "date":    _daily_date,
+                    "trades":  _daily_trades,
+                    "wins":    _daily_wins,
+                    "losses":  _daily_losses,
+                    "capital": capital,
+                })
+            if not _week_start_date:
+                _week_start_date = today
             _daily_date    = today
             _daily_trades  = 0
             _daily_wins    = 0
             _daily_losses  = 0
-            _daily_paused  = False
-            log("ok", f"New day {today} — reset (0/{DAILY_MAX} trades, loss limit {DAILY_LOSS_MAX})")
+            _pause_until   = 0.0
+            log("ok", f"New day {today} — reset | Week day {len(_week_day_logs)+1}/{WEEK_DAYS}")
             _save_daily_state()
 
 def daily_limit_reached():
     _reset_daily_if_needed()
     with _daily_lock:
-        if _daily_paused:
-            log("info", f"Paused: {_daily_losses} losses today — strategy retuning overnight")
+        if _pause_until > time.time():
+            resume = time.strftime("%H:%M", time.localtime(_pause_until))
+            log("info", f"Cooling down after {_daily_losses} losses — resumes {resume}")
             return True
         if _daily_trades >= DAILY_MAX:
-            log("info", f"Daily limit: {_daily_trades}/{DAILY_MAX} trades — resuming tomorrow")
+            log("info", f"Daily limit: {_daily_trades}/{DAILY_MAX} trades — resetting at midnight")
             return True
         return False
 
 def record_daily_trade(won):
-    global _daily_wins, _daily_losses, _daily_paused
+    global _daily_wins, _daily_losses, _pause_until
     with _daily_lock:
         if won:
             _daily_wins += 1
@@ -254,11 +278,13 @@ def record_daily_trade(won):
             _daily_losses += 1
         log("ok" if won else "info",
             f"Daily: {_daily_trades} trades | {_daily_wins}W {_daily_losses}L")
-        if not won and _daily_losses >= DAILY_LOSS_MAX and not _daily_paused:
-            _daily_paused = True
-            log("warn", f"3 losses today — pausing. Auto-tuning strategies for tomorrow...")
-            notify("🔧 Loss Limit Hit",
-                   f"3 losses today. Trading paused.\nAuto-tuning strategies overnight.\nResumes tomorrow.")
+        if not won and _daily_losses % DAILY_LOSS_MAX == 0:
+            resume_ts   = time.time() + LOSS_COOLDOWN_HRS * 3600
+            _pause_until = resume_ts
+            resume_str   = time.strftime("%H:%M", time.localtime(resume_ts))
+            log("warn", f"{_daily_losses} losses — cooling down {LOSS_COOLDOWN_HRS}h. Resumes {resume_str}")
+            notify("🔧 Cooling Down",
+                   f"{_daily_losses} losses hit.\nPausing {LOSS_COOLDOWN_HRS}h to retune.\nResumes: {resume_str}")
             threading.Thread(target=_retune_strategies, daemon=True).start()
     _save_daily_state()
 
@@ -278,9 +304,137 @@ def _retune_strategies():
                    f"Spike TP: {SPIKE_TP_PCT}%\n"
                    f"Trading resumes tomorrow.")
         else:
-            log("info", "Not enough history yet to retune — will use defaults tomorrow", "TUNE")
+            log("info", "Not enough history yet to retune — will use defaults", "TUNE")
     except Exception as e:
         log("warn", f"Retune error: {e}", "TUNE")
+
+def _send_daily_summary():
+    """Midnight Telegram summary for the day."""
+    try:
+        with capital_lock:
+            cap = capital
+        total_pnl = sum(t["pnl"] for t in completed_trades)
+        wr = round(_daily_wins / max(_daily_trades, 1) * 100, 1)
+        exit_counts = {}
+        for t in completed_trades:
+            r = t.get("result", "?")
+            exit_counts[r] = exit_counts.get(r, 0) + 1
+        exit_str = " | ".join(f"{k}:{v}" for k, v in sorted(exit_counts.items(), key=lambda x: -x[1])[:4])
+        msg = (f"Day {len(_week_day_logs)+1}/{WEEK_DAYS}\n"
+               f"Trades: {_daily_trades} | {_daily_wins}W {_daily_losses}L ({wr}% WR)\n"
+               f"PnL today: ${total_pnl:+.2f}\n"
+               f"Capital: ${cap:.2f}\n"
+               f"Exits: {exit_str or 'none yet'}\n"
+               f"Bond range: {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%")
+        log("ok", f"Daily summary: {_daily_wins}W/{_daily_losses}L cap=${cap:.2f}", "DAY")
+        notify(f"📊 Day {len(_week_day_logs)+1} Summary", msg)
+    except Exception as e:
+        log("warn", f"Daily summary error: {e}", "DAY")
+
+def _send_weekly_report():
+    """Deep analysis after WEEK_DAYS days — reshapes strategy for next week."""
+    try:
+        history = []
+        if os.path.exists(LEARN_FILE):
+            with open(LEARN_FILE) as f:
+                history = json.load(f)
+        if not history:
+            return
+
+        wins   = [t for t in history if t.get("pnl", 0) > 0]
+        losses = [t for t in history if t.get("pnl", 0) <= 0]
+        total  = len(history)
+        wr     = round(len(wins) / max(total, 1) * 100, 1)
+        total_pnl = sum(t["pnl"] for t in history)
+
+        # Best bond entry range (5% buckets)
+        buckets = {}
+        for t in history:
+            b = round(t.get("bond_entry", 0) / 5) * 5
+            if b not in buckets:
+                buckets[b] = {"wins": 0, "total": 0}
+            buckets[b]["total"] += 1
+            if t.get("pnl", 0) > 0:
+                buckets[b]["wins"] += 1
+        best_bucket = max(buckets.items(), key=lambda x: x[1]["wins"] / max(x[1]["total"], 1)) if buckets else None
+
+        # Best hour of day
+        hour_wins = {}
+        for t in wins:
+            h = t.get("hour", 0)
+            hour_wins[h] = hour_wins.get(h, 0) + 1
+        best_hour = max(hour_wins.items(), key=lambda x: x[1])[0] if hour_wins else None
+
+        # Most common loss reason
+        loss_reasons = {}
+        for t in losses:
+            r = t.get("result", "?")
+            loss_reasons[r] = loss_reasons.get(r, 0) + 1
+        top_loss = max(loss_reasons.items(), key=lambda x: x[1])[0] if loss_reasons else "none"
+
+        # Day-by-day capital
+        cap_progression = " → ".join(f"${d['capital']:.0f}" for d in _week_day_logs) if _week_day_logs else "N/A"
+
+        # Apply best settings for week 2
+        if best_bucket:
+            best_b = best_bucket[0]
+            BOND_ENTRY_MIN_new = max(50.0, best_b - 2)
+            BOND_ENTRY_MAX_new = min(78.0, best_b + 4)
+        else:
+            BOND_ENTRY_MIN_new = BOND_ENTRY_MIN
+            BOND_ENTRY_MAX_new = BOND_ENTRY_MAX
+
+        auto_tune(history)
+
+        report = (
+            f"Week 1 Complete!\n"
+            f"{'='*20}\n"
+            f"Trades: {total} | {len(wins)}W {len(losses)}L\n"
+            f"Win rate: {wr}%\n"
+            f"Total PnL: ${total_pnl:+.2f}\n"
+            f"Capital: ${capital:.2f}\n\n"
+            f"Best bond range: {best_bucket[0] if best_bucket else '?'}%\n"
+            f"Best hour: {best_hour}:00\n"
+            f"Top loss reason: {top_loss}\n\n"
+            f"Capital path:\n{cap_progression}\n\n"
+            f"Week 2 settings:\n"
+            f"Bond: {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%\n"
+            f"Stale: {BOND_STALE_SECS}s | SL: {BOND_SL_PCT}%"
+        )
+        log("ok", f"WEEK 1 DONE | {wr}% WR | PnL ${total_pnl:+.2f} | cap ${capital:.2f}", "WEEK")
+        notify("📈 Week 1 Complete!", report)
+
+        # Save full report
+        try:
+            with open("/tmp/bot_week_report.json", "w") as f:
+                json.dump({
+                    "week": 1, "trades": total, "wins": len(wins), "losses": len(losses),
+                    "win_rate": wr, "total_pnl": round(total_pnl, 4),
+                    "final_capital": round(capital, 2),
+                    "best_bond_bucket": best_bucket[0] if best_bucket else None,
+                    "best_hour": best_hour, "top_loss_reason": top_loss,
+                    "day_logs": _week_day_logs,
+                    "week2_settings": {
+                        "bond_entry": f"{BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%",
+                        "stale_secs": BOND_STALE_SECS, "sl_pct": BOND_SL_PCT,
+                    }
+                }, f, indent=2)
+        except Exception:
+            pass
+    except Exception as e:
+        log("warn", f"Weekly report error: {e}", "WEEK")
+
+def daily_summary_loop():
+    """Sends midnight summary and triggers weekly report after WEEK_DAYS days."""
+    while True:
+        now = time.localtime()
+        secs_to_midnight = (23 - now.tm_hour) * 3600 + (59 - now.tm_min) * 60 + (60 - now.tm_sec)
+        time.sleep(secs_to_midnight + 5)
+        _send_daily_summary()
+        # Check if week is complete
+        if len(_week_day_logs) + 1 >= WEEK_DAYS:
+            time.sleep(10)
+            _send_weekly_report()
 
 # ── MILESTONES ───────────────────────────────────────────────────
 def check_milestones():
@@ -1169,8 +1323,14 @@ def status():
             "losses":       _daily_losses,
             "limit":        DAILY_MAX,
             "loss_limit":   DAILY_LOSS_MAX,
-            "paused":       _daily_paused,
+            "paused_until": time.strftime("%H:%M", time.localtime(_pause_until)) if _pause_until > time.time() else None,
             "date":         _daily_date,
+        },
+        "week": {
+            "day":          len(_week_day_logs) + 1,
+            "of":           WEEK_DAYS,
+            "start":        _week_start_date,
+            "day_logs":     _week_day_logs[-3:],
         },
         "settings": {
             "trade_size":    f"${FIXED_TRADE_SIZE:.0f} fixed" if FIXED_TRADE_SIZE > 0 else f"{TRADE_PCT}% of capital",
@@ -1327,9 +1487,10 @@ if __name__ == "__main__":
 
     _load_daily_state()
 
-    threading.Thread(target=_notify_worker,  daemon=True).start()
-    threading.Thread(target=monitor_loop,    daemon=True).start()
-    threading.Thread(target=scanner_loop,    daemon=True).start()
+    threading.Thread(target=_notify_worker,    daemon=True).start()
+    threading.Thread(target=monitor_loop,      daemon=True).start()
+    threading.Thread(target=scanner_loop,      daemon=True).start()
+    threading.Thread(target=daily_summary_loop, daemon=True).start()
     if COPY_TRADE:
         threading.Thread(target=copy_trade_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
