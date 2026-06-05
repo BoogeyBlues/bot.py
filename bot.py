@@ -22,15 +22,24 @@ WALLET_PRIVATE_KEY = os.environ.get("WALLET_PRIVATE_KEY", "")
 _PAPER_ENV         = os.environ.get("PAPER_MODE", "true").lower()
 PAPER_MODE         = _PAPER_ENV == "true" or not WALLET or not WALLET_PRIVATE_KEY
 
-# Progressive sizing: 18% of capital, clamped
-TRADE_PCT         = float(os.environ.get("TRADE_PCT",   "18"))
-MIN_TRADE         = float(os.environ.get("MIN_TRADE",   "5"))
+# Position sizing — capital-tiered (protects small accounts)
+MIN_TRADE         = float(os.environ.get("MIN_TRADE",   "3"))
 MAX_TRADE         = float(os.environ.get("MAX_TRADE",   "500"))
-FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "5"))  # 0 = use progressive %
+FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "0"))  # 0 = use tiered %
 
-# Risk limits — no daily trade cap, only loss-based cooldowns
-DAILY_LOSS_MAX    = int(os.environ.get("DAILY_LOSS_MAX",  "3"))   # trigger cooldown after N losses
-LOSS_COOLDOWN_HRS = int(os.environ.get("LOSS_COOLDOWN_HRS", "4")) # hours to pause + retune after loss streak
+# Capital tiers: (min_capital, trade_pct, daily_max_trades)
+_CAP_TIERS = [
+    (5_000, 0.18, 20),
+    (  500, 0.15, 15),
+    (  100, 0.12, 10),
+    (    0, 0.08,  6),
+]
+
+MAX_DAILY_LOSS_PCT = float(os.environ.get("MAX_DAILY_LOSS_PCT", "20"))  # stop day if down >20% of start capital
+
+# Risk limits
+DAILY_LOSS_MAX    = int(os.environ.get("DAILY_LOSS_MAX",  "3"))   # cooldown after N consecutive losses
+LOSS_COOLDOWN_HRS = int(os.environ.get("LOSS_COOLDOWN_HRS", "4")) # hours to pause + retune
 ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "10"))  # retune after every N completed trades
 
 # Bond Runner strategy
@@ -118,6 +127,7 @@ _daily_date       = ""
 _daily_trades     = 0
 _daily_wins       = 0
 _daily_losses     = 0
+_day_start_cap    = 0.0    # capital at start of day — used for daily loss % guard
 _pause_until      = 0.0    # Unix timestamp — bot pauses trading until this time
 _daily_lock       = threading.Lock()
 # Weekly tracking
@@ -184,13 +194,27 @@ def _notify_worker():
             time.sleep(0.2)
 
 # ── PROGRESSIVE SIZING ───────────────────────────────────────────
+def _cap_tier(cap):
+    """Return (trade_pct, daily_max) for current capital level."""
+    for threshold, pct, daily_max in _CAP_TIERS:
+        if cap >= threshold:
+            return pct, daily_max
+    return _CAP_TIERS[-1][1], _CAP_TIERS[-1][2]
+
 def trade_size():
     if FIXED_TRADE_SIZE > 0:
         return FIXED_TRADE_SIZE
     with capital_lock:
         cap = capital
-    raw = cap * TRADE_PCT / 100
+    pct, _ = _cap_tier(cap)
+    raw = cap * pct
     return round(max(MIN_TRADE, min(MAX_TRADE, raw)), 2)
+
+def daily_trade_limit():
+    with capital_lock:
+        cap = capital
+    _, daily_max = _cap_tier(cap)
+    return daily_max
 
 # ── DAILY LIMITS ─────────────────────────────────────────────────
 def _save_daily_state():
@@ -233,11 +257,10 @@ def _load_daily_state():
 
 def _reset_daily_if_needed():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses, _pause_until
-    global _week_start_date, _week_day_logs
+    global _week_start_date, _week_day_logs, _day_start_cap
     today = time.strftime("%Y-%m-%d")
     with _daily_lock:
         if _daily_date != today:
-            # Log yesterday's summary into week log
             if _daily_date:
                 _week_day_logs.append({
                     "date":    _daily_date,
@@ -253,7 +276,12 @@ def _reset_daily_if_needed():
             _daily_wins    = 0
             _daily_losses  = 0
             _pause_until   = 0.0
-            log("ok", f"New day {today} — reset | Running day {len(_week_day_logs)+1} toward $100,000")
+            _day_start_cap = capital  # snapshot for daily loss % guard
+            limit = daily_trade_limit()
+            with capital_lock:
+                cap = capital
+            pct, _ = _cap_tier(cap)
+            log("ok", f"New day {today} | Day {len(_week_day_logs)+1} | cap=${cap:.2f} | trade={pct*100:.0f}% (${trade_size():.2f}) | limit={limit}/day")
             _save_daily_state()
 
 def daily_limit_reached():
@@ -263,6 +291,19 @@ def daily_limit_reached():
             resume = time.strftime("%H:%M", time.localtime(_pause_until))
             log("info", f"Cooling down after {_daily_losses} losses — resumes {resume}")
             return True
+        # Capital-tiered daily trade cap
+        limit = daily_trade_limit()
+        if _daily_trades >= limit:
+            log("info", f"Daily cap: {_daily_trades}/{limit} trades at current capital level — resumes tomorrow")
+            return True
+        # Max daily loss guard — stop if down >MAX_DAILY_LOSS_PCT% from today's open
+        if _day_start_cap > 0:
+            with capital_lock:
+                cap_now = capital
+            loss_pct = (_day_start_cap - cap_now) / _day_start_cap * 100
+            if loss_pct >= MAX_DAILY_LOSS_PCT:
+                log("warn", f"Daily loss guard: down {loss_pct:.1f}% today (${_day_start_cap - cap_now:.2f}) — stopping until tomorrow")
+                return True
         return False
 
 def record_daily_trade(won):
@@ -1318,12 +1359,15 @@ def status():
         "milestones_hit": sorted(_milestones_hit),
         "next_milestone": next((m for m in MILESTONES if m > cap), None),
         "today": {
-            "trades":       _daily_trades,
-            "wins":         _daily_wins,
-            "losses":       _daily_losses,
-            "loss_cooldown": f"pause {LOSS_COOLDOWN_HRS}h after {DAILY_LOSS_MAX} losses",
-            "paused_until": time.strftime("%H:%M", time.localtime(_pause_until)) if _pause_until > time.time() else None,
-            "date":         _daily_date,
+            "trades":        _daily_trades,
+            "cap":           daily_trade_limit(),
+            "wins":          _daily_wins,
+            "losses":        _daily_losses,
+            "day_start_cap": round(_day_start_cap, 2),
+            "daily_loss_pct": round((_day_start_cap - cap) / max(_day_start_cap, 1) * 100, 1) if _day_start_cap > 0 else 0,
+            "max_daily_loss": f"{MAX_DAILY_LOSS_PCT:.0f}%",
+            "paused_until":  time.strftime("%H:%M", time.localtime(_pause_until)) if _pause_until > time.time() else None,
+            "date":          _daily_date,
         },
         "progress": {
             "day":          len(_week_day_logs) + 1,
@@ -1332,7 +1376,9 @@ def status():
             "day_logs":     _week_day_logs[-3:],
         },
         "settings": {
-            "trade_size":    f"${FIXED_TRADE_SIZE:.0f} fixed" if FIXED_TRADE_SIZE > 0 else f"{TRADE_PCT}% of capital",
+            "trade_size":    f"${FIXED_TRADE_SIZE:.0f} fixed" if FIXED_TRADE_SIZE > 0 else f"tiered {_cap_tier(cap)[0]*100:.0f}% (${trade_size():.2f})",
+            "daily_cap":     f"{daily_trade_limit()} trades/day at current capital",
+            "max_daily_loss": f"{MAX_DAILY_LOSS_PCT:.0f}% of start capital",
             "cooldown":      f"pause {LOSS_COOLDOWN_HRS}h + retune after {DAILY_LOSS_MAX} losses",
             "bond_entry":    f"{BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%",
             "bond_tp":       f"{BOND_TP}%",
@@ -1499,7 +1545,10 @@ if __name__ == "__main__":
     log("ok", f"Capital   : ${capital:.2f} USDC (trading budget)")
     log("ok", f"SOL wallet: ${SOL_ALLOCATED:.2f} funded for on-chain execution")
     log("ok", f"Trade size: ${trade_size():.2f} fixed")
-    log("ok", f"Running 24/7 | Retune every {ANALYZE_EVERY} trades | Cooldown {LOSS_COOLDOWN_HRS}h after {DAILY_LOSS_MAX} losses | Goal: $100,000")
+    with capital_lock:
+        _cap = capital
+    _pct, _limit = _cap_tier(_cap)
+    log("ok", f"Capital: ${_cap:.2f} | Trade size: {_pct*100:.0f}% (${trade_size():.2f}) | Daily cap: {_limit} trades | Max daily loss: {MAX_DAILY_LOSS_PCT:.0f}%")
     log("ok", f"Copy trade: {'ON' if COPY_TRADE else 'OFF'} | WR {COPY_WINRATE_MIN}-{COPY_WINRATE_MAX}% | top {COPY_MAX_WALLETS} wallets")
     log("ok", f"USDC lock : activates at ${USDC_LOCK_THRESHOLD:.0f} capital")
     log("ok", "=" * 55)
