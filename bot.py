@@ -28,11 +28,10 @@ MIN_TRADE         = float(os.environ.get("MIN_TRADE",   "5"))
 MAX_TRADE         = float(os.environ.get("MAX_TRADE",   "500"))
 FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "5"))  # 0 = use progressive %
 
-# Daily / weekly limits
-DAILY_MAX         = int(os.environ.get("DAILY_MAX",       "10"))  # max trades per day
-DAILY_LOSS_MAX    = int(os.environ.get("DAILY_LOSS_MAX",  "3"))   # cooldown after this many losses
-LOSS_COOLDOWN_HRS = int(os.environ.get("LOSS_COOLDOWN_HRS", "4")) # hours to pause after loss limit
-WEEK_DAYS         = int(os.environ.get("WEEK_DAYS",        "7"))  # run for this many days
+# Risk limits — no daily trade cap, only loss-based cooldowns
+DAILY_LOSS_MAX    = int(os.environ.get("DAILY_LOSS_MAX",  "3"))   # trigger cooldown after N losses
+LOSS_COOLDOWN_HRS = int(os.environ.get("LOSS_COOLDOWN_HRS", "4")) # hours to pause + retune after loss streak
+ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "10"))  # retune after every N completed trades
 
 # Bond Runner strategy
 BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "58"))
@@ -254,7 +253,7 @@ def _reset_daily_if_needed():
             _daily_wins    = 0
             _daily_losses  = 0
             _pause_until   = 0.0
-            log("ok", f"New day {today} — reset | Week day {len(_week_day_logs)+1}/{WEEK_DAYS}")
+            log("ok", f"New day {today} — reset | Running day {len(_week_day_logs)+1} toward $100,000")
             _save_daily_state()
 
 def daily_limit_reached():
@@ -263,9 +262,6 @@ def daily_limit_reached():
         if _pause_until > time.time():
             resume = time.strftime("%H:%M", time.localtime(_pause_until))
             log("info", f"Cooling down after {_daily_losses} losses — resumes {resume}")
-            return True
-        if _daily_trades >= DAILY_MAX:
-            log("info", f"Daily limit: {_daily_trades}/{DAILY_MAX} trades — resetting at midnight")
             return True
         return False
 
@@ -298,11 +294,12 @@ def _retune_strategies():
                 history = json.load(f)
         if len(history) >= 5:
             auto_tune(history)
+            resume_str = time.strftime("%H:%M", time.localtime(_pause_until))
             notify("✅ Strategy Retuned",
                    f"New bond entry: {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%\n"
                    f"Stale exit: {BOND_STALE_SECS}s\n"
                    f"Spike TP: {SPIKE_TP_PCT}%\n"
-                   f"Trading resumes tomorrow.")
+                   f"Trading resumes at {resume_str}.")
         else:
             log("info", "Not enough history yet to retune — will use defaults", "TUNE")
     except Exception as e:
@@ -320,14 +317,15 @@ def _send_daily_summary():
             r = t.get("result", "?")
             exit_counts[r] = exit_counts.get(r, 0) + 1
         exit_str = " | ".join(f"{k}:{v}" for k, v in sorted(exit_counts.items(), key=lambda x: -x[1])[:4])
-        msg = (f"Day {len(_week_day_logs)+1}/{WEEK_DAYS}\n"
+        day_num = len(_week_day_logs) + 1
+        msg = (f"Day {day_num} running\n"
                f"Trades: {_daily_trades} | {_daily_wins}W {_daily_losses}L ({wr}% WR)\n"
                f"PnL today: ${total_pnl:+.2f}\n"
-               f"Capital: ${cap:.2f}\n"
+               f"Capital: ${cap:.2f} → goal $100,000\n"
                f"Exits: {exit_str or 'none yet'}\n"
                f"Bond range: {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%")
         log("ok", f"Daily summary: {_daily_wins}W/{_daily_losses}L cap=${cap:.2f}", "DAY")
-        notify(f"📊 Day {len(_week_day_logs)+1} Summary", msg)
+        notify(f"📊 Day {day_num} Summary", msg)
     except Exception as e:
         log("warn", f"Daily summary error: {e}", "DAY")
 
@@ -425,14 +423,14 @@ def _send_weekly_report():
         log("warn", f"Weekly report error: {e}", "WEEK")
 
 def daily_summary_loop():
-    """Sends midnight summary and triggers weekly report after WEEK_DAYS days."""
+    """Sends midnight summary every day. Sends deep weekly report every 7 days."""
     while True:
         now = time.localtime()
         secs_to_midnight = (23 - now.tm_hour) * 3600 + (59 - now.tm_min) * 60 + (60 - now.tm_sec)
         time.sleep(secs_to_midnight + 5)
         _send_daily_summary()
-        # Check if week is complete
-        if len(_week_day_logs) + 1 >= WEEK_DAYS:
+        # Weekly deep report every 7 days — then keeps running
+        if len(_week_day_logs) % 7 == 6:
             time.sleep(10)
             _send_weekly_report()
 
@@ -459,8 +457,10 @@ def record_trade(trade_data):
         history.append(trade_data)
         with open(LEARN_FILE, "w") as f:
             json.dump(history[-200:], f)
-        if len(history) % 20 == 0:
+        if len(history) % ANALYZE_EVERY == 0:
+            log("ok", f"Analyzing last {ANALYZE_EVERY} trades — retuning strategy...", "TUNE")
             auto_tune(history)
+            log("ok", f"Tuned: bond={BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% stale={BOND_STALE_SECS}s SL={BOND_SL_PCT}% spikeTP={SPIKE_TP_PCT}%", "TUNE")
     except Exception as e:
         log("warn", f"Learning record: {e}")
 
@@ -1321,20 +1321,19 @@ def status():
             "trades":       _daily_trades,
             "wins":         _daily_wins,
             "losses":       _daily_losses,
-            "limit":        DAILY_MAX,
-            "loss_limit":   DAILY_LOSS_MAX,
+            "loss_cooldown": f"pause {LOSS_COOLDOWN_HRS}h after {DAILY_LOSS_MAX} losses",
             "paused_until": time.strftime("%H:%M", time.localtime(_pause_until)) if _pause_until > time.time() else None,
             "date":         _daily_date,
         },
-        "week": {
+        "progress": {
             "day":          len(_week_day_logs) + 1,
-            "of":           WEEK_DAYS,
             "start":        _week_start_date,
+            "analyze_every": f"every {ANALYZE_EVERY} trades",
             "day_logs":     _week_day_logs[-3:],
         },
         "settings": {
             "trade_size":    f"${FIXED_TRADE_SIZE:.0f} fixed" if FIXED_TRADE_SIZE > 0 else f"{TRADE_PCT}% of capital",
-            "daily_max":     f"{DAILY_MAX} trades, stop at {DAILY_LOSS_MAX} losses",
+            "cooldown":      f"pause {LOSS_COOLDOWN_HRS}h + retune after {DAILY_LOSS_MAX} losses",
             "bond_entry":    f"{BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%",
             "bond_tp":       f"{BOND_TP}%",
             "spike_min_age": f"{SPIKE_MIN_AGE_H}h",
@@ -1500,7 +1499,7 @@ if __name__ == "__main__":
     log("ok", f"Capital   : ${capital:.2f} USDC (trading budget)")
     log("ok", f"SOL wallet: ${SOL_ALLOCATED:.2f} funded for on-chain execution")
     log("ok", f"Trade size: ${trade_size():.2f} fixed")
-    log("ok", f"Daily limit: {DAILY_MAX} trades | Stop at {DAILY_LOSS_MAX} losses | Auto-retune overnight")
+    log("ok", f"Running 24/7 | Retune every {ANALYZE_EVERY} trades | Cooldown {LOSS_COOLDOWN_HRS}h after {DAILY_LOSS_MAX} losses | Goal: $100,000")
     log("ok", f"Copy trade: {'ON' if COPY_TRADE else 'OFF'} | WR {COPY_WINRATE_MIN}-{COPY_WINRATE_MAX}% | top {COPY_MAX_WALLETS} wallets")
     log("ok", f"USDC lock : activates at ${USDC_LOCK_THRESHOLD:.0f} capital")
     log("ok", "=" * 55)
