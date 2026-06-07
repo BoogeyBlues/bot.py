@@ -1416,7 +1416,9 @@ def home():
   .wrap{{max-width:900px;margin:0 auto;padding:20px 16px;position:relative;z-index:1}}
 
   /* HEADER */
-  header{{text-align:center;padding:32px 0 24px;position:relative}}
+  header{{text-align:center;padding:16px 0 24px;position:relative}}
+  .vid-wrap{{position:relative;width:100%;max-width:520px;margin:0 auto -8px;line-height:0}}
+  .vid-wrap video{{width:100%;mix-blend-mode:screen;display:block}}
   .chest-icon{{font-size:2.8rem;display:block;margin-bottom:8px;
     filter:drop-shadow(0 0 20px #f5c54288)}}
   h1{{font-size:1.9rem;font-weight:800;letter-spacing:-.02em;
@@ -1528,7 +1530,11 @@ def home():
 <div class="wrap">
 
   <header>
-    <span class="chest-icon">🏴‍☠️</span>
+    <div class="vid-wrap">
+      <video autoplay loop muted playsinline>
+        <source src="/static/header.mov" type="video/mp4">
+      </video>
+    </div>
     <h1>Boogey's Treasure Chest</h1>
     <p class="tagline">Autonomous pump.fun sniper &nbsp;·&nbsp; goal $25,000</p>
     <div class="mode-pill"><span class="dot"></span>{mode} MODE</div>
