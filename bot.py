@@ -1532,7 +1532,7 @@ def home():
   <header>
     <div class="vid-wrap">
       <video autoplay loop muted playsinline>
-        <source src="/static/header.mov" type="video/mp4">
+        <source src="/static/header.mp4" type="video/mp4">
       </video>
     </div>
     <h1>Boogey's Treasure Chest</h1>
