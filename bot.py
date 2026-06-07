@@ -1535,7 +1535,6 @@ def home():
         <source src="/static/header.mp4" type="video/mp4">
       </video>
     </div>
-    <h1>Boogey's Treasure Chest</h1>
     <p class="tagline">Autonomous pump.fun sniper &nbsp;·&nbsp; goal $25,000</p>
     <div class="mode-pill"><span class="dot"></span>{mode} MODE</div>
   </header>
