@@ -909,17 +909,27 @@ def exit_trade(mint, price, reason, bond=0):
         _sold_mints[mint] = time.time()  # 30 min cooldown before re-buying
     record_daily_trade(won=(pnl > 0))
 
+    pnl_pct = round((price - trade["entry"]) / max(trade["entry"], 1e-12) * 100, 2)
     rec = {
+        "id":         len(completed_trades) + 1,
         "symbol":     trade["symbol"],
+        "mint":       mint,
         "strategy":   trade["strategy"],
         "entry":      trade["entry"],
         "exit":       price,
+        "peak":       round(trade.get("price_high", trade["entry"]), 8),
+        "amount":     round(trade["amount"], 2),
         "result":     reason,
         "pnl":        round(pnl, 4),
+        "pnl_pct":    pnl_pct,
         "hold_m":     round(hold_m, 1),
         "bond_entry": trade["bond_entry"],
+        "bond_high":  round(trade.get("bond_high", 0), 1),
         "replies":    trade["replies"],
         "hour":       int(time.strftime("%H")),
+        "opened_ts":  round(trade["opened_at"]),
+        "closed_ts":  round(time.time()),
+        "date":       time.strftime("%Y-%m-%d"),
         "time":       time.strftime("%H:%M:%S"),
     }
     completed_trades.append(rec)
@@ -1722,13 +1732,337 @@ def status():
         }
     })
 
-@app.route("/trades", methods=["GET"])
-def trades():
+@app.route("/trades/api", methods=["GET"])
+def trades_api():
     with trades_lock:
         open_list = [{k: v for k, v in t.items()
                       if k not in ("opened_at", "bond_slip_start")}
                      for t in open_trades.values()]
     return jsonify({"open": open_list, "completed": completed_trades[-50:]})
+
+@app.route("/trades", methods=["GET"])
+def trades():
+    with trades_lock:
+        open_list = list(open_trades.values())
+    with capital_lock:
+        cap = capital
+
+    wins   = [t for t in completed_trades if t["pnl"] > 0]
+    losses = [t for t in completed_trades if t["pnl"] <= 0]
+    total  = len(completed_trades)
+    wr     = round(len(wins) / max(total, 1) * 100, 1)
+    total_pnl = round(sum(t["pnl"] for t in completed_trades), 4)
+    avg_win   = round(sum(t["pnl"] for t in wins)   / max(len(wins),   1), 4)
+    avg_loss  = round(sum(t["pnl"] for t in losses) / max(len(losses), 1), 4)
+    best      = max(completed_trades, key=lambda t: t["pnl"], default=None)
+    worst     = min(completed_trades, key=lambda t: t["pnl"], default=None)
+
+    # Build table rows — newest first
+    rows = ""
+    for t in reversed(completed_trades):
+        won   = t["pnl"] > 0
+        color = "#4ade80" if won else "#f87171"
+        badge = f'<span class="badge {"win" if won else "loss"}">{"WIN" if won else "LOSS"}</span>'
+        sign  = "+" if t["pnl"] >= 0 else ""
+        rows += f"""<tr class="trade-row" data-id="{t['id']}" onclick="openModal({t['id']})">
+          <td class="td-num">#{t['id']}</td>
+          <td>{t['date']}<br><span class="muted">{t['time']}</span></td>
+          <td class="sym">{t['symbol']}</td>
+          <td><span class="badge strat">{t['strategy'].upper()}</span></td>
+          <td class="mono">${t['entry']:.6f}</td>
+          <td class="mono">${t['exit']:.6f}</td>
+          <td class="mono" style="color:{color}">{sign}{t['pnl_pct']:.1f}%</td>
+          <td class="mono" style="color:{color};font-weight:700">{sign}${t['pnl']:.4f}</td>
+          <td>{t['hold_m']:.1f}m</td>
+          <td><span class="badge exit">{t['result']}</span></td>
+          <td>{badge}</td>
+        </tr>"""
+
+    # Open trades rows
+    open_rows = ""
+    for t in open_list:
+        elapsed = round((time.time() - t["opened_at"]) / 60, 1)
+        cur_pct = round((t.get("price_high", t["entry"]) - t["entry"]) / max(t["entry"], 1e-12) * 100, 1)
+        open_rows += f"""<tr>
+          <td class="sym">{t['symbol']}</td>
+          <td><span class="badge strat">{t['strategy'].upper()}</span></td>
+          <td class="mono">${t['amount']:.2f}</td>
+          <td class="mono">{t.get('bond_entry',0):.1f}%</td>
+          <td class="mono {'green' if cur_pct>=0 else 'red'}">{'+' if cur_pct>=0 else ''}{cur_pct:.1f}%</td>
+          <td class="pulse">{elapsed}m</td>
+        </tr>"""
+
+    # JSON data for modals
+    trades_json = json.dumps(completed_trades)
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="30">
+<title>Trades — Boogey's Treasure Chest</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  :root{{--gold:#f5c542;--gold2:#e8a800;--bg:#080810;--surface:#10101a;
+    --surface2:#16162a;--border:#ffffff0d;--text:#e8e8f0;--muted:#5a5a7a}}
+  body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;padding:20px;min-height:100vh}}
+  .wrap{{max-width:1100px;margin:0 auto}}
+
+  /* HEADER */
+  .page-hdr{{display:flex;align-items:center;justify-content:space-between;
+    flex-wrap:wrap;gap:12px;margin-bottom:24px}}
+  .page-hdr h1{{font-size:1.4rem;font-weight:800;
+    background:linear-gradient(135deg,var(--gold),#fff);
+    -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}}
+  .back{{color:var(--muted);text-decoration:none;font-size:.82rem;
+    padding:6px 14px;border-radius:8px;border:1px solid var(--border);
+    background:var(--surface);transition:all .2s}}
+  .back:hover{{color:var(--gold);border-color:#f5c54244}}
+
+  /* STAT STRIP */
+  .stats{{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:20px}}
+  .stat{{background:var(--surface);border:1px solid var(--border);
+    border-radius:12px;padding:12px 16px;flex:1;min-width:120px}}
+  .stat .lbl{{font-size:.65rem;font-weight:700;color:var(--muted);
+    text-transform:uppercase;letter-spacing:.08em}}
+  .stat .val{{font-size:1.25rem;font-weight:800;margin-top:4px}}
+  .green{{color:#4ade80}} .red{{color:#f87171}} .gold{{color:var(--gold)}} .muted{{color:var(--muted)}}
+
+  /* OPEN TRADES */
+  .section{{background:var(--surface);border:1px solid var(--border);
+    border-radius:16px;padding:18px;margin-bottom:16px}}
+  .section h2{{font-size:.72rem;font-weight:700;color:var(--muted);
+    text-transform:uppercase;letter-spacing:.1em;margin-bottom:14px}}
+
+  /* TABLE */
+  .table-wrap{{overflow-x:auto;border-radius:12px;border:1px solid var(--border)}}
+  table{{width:100%;border-collapse:collapse;font-size:.78rem}}
+  thead{{background:var(--surface2)}}
+  th{{padding:10px 12px;color:var(--muted);font-size:.65rem;font-weight:700;
+    text-transform:uppercase;letter-spacing:.08em;text-align:left;
+    white-space:nowrap;border-bottom:1px solid var(--border)}}
+  td{{padding:10px 12px;border-bottom:1px solid #ffffff05;vertical-align:middle}}
+  .trade-row{{cursor:pointer;transition:background .15s}}
+  .trade-row:hover td{{background:#f5c54208}}
+  .trade-row:last-child td{{border-bottom:none}}
+  .td-num{{color:var(--muted);font-size:.7rem}}
+  .sym{{font-weight:700;font-size:.85rem}}
+  .mono{{font-family:'SF Mono','Fira Code',monospace;font-size:.75rem}}
+  .pulse{{animation:pulse 2s infinite;color:var(--gold)}}
+  @keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.5}}}}
+
+  /* BADGES */
+  .badge{{display:inline-block;padding:2px 8px;border-radius:5px;
+    font-size:.62rem;font-weight:700;letter-spacing:.04em;white-space:nowrap}}
+  .badge.win{{background:#4ade8020;color:#4ade80;border:1px solid #4ade8040}}
+  .badge.loss{{background:#f8717120;color:#f87171;border:1px solid #f8717140}}
+  .badge.strat{{background:#60a5fa18;color:#60a5fa;border:1px solid #60a5fa30}}
+  .badge.exit{{background:#ffffff08;color:var(--muted);border:1px solid var(--border)}}
+
+  /* MODAL */
+  .overlay{{display:none;position:fixed;inset:0;background:#000000cc;
+    z-index:100;align-items:center;justify-content:center;padding:20px}}
+  .overlay.open{{display:flex}}
+  .modal{{background:#13131f;border:1px solid #f5c54230;border-radius:20px;
+    width:100%;max-width:480px;padding:24px;position:relative;
+    box-shadow:0 0 60px #f5c54220}}
+  .modal-close{{position:absolute;top:14px;right:16px;background:none;
+    border:none;color:var(--muted);font-size:1.3rem;cursor:pointer;
+    width:28px;height:28px;display:flex;align-items:center;justify-content:center;
+    border-radius:6px;transition:all .2s}}
+  .modal-close:hover{{background:#ffffff10;color:#fff}}
+  .modal h2{{font-size:1.1rem;font-weight:800;margin-bottom:4px}}
+  .modal .sub{{font-size:.75rem;color:var(--muted);margin-bottom:20px}}
+  .timeline{{position:relative;padding-left:20px;margin:20px 0}}
+  .timeline::before{{content:'';position:absolute;left:6px;top:8px;bottom:8px;
+    width:2px;background:linear-gradient(180deg,var(--gold),#f5c54250)}}
+  .tl-item{{position:relative;margin-bottom:16px}}
+  .tl-item:last-child{{margin-bottom:0}}
+  .tl-dot{{position:absolute;left:-17px;top:4px;width:10px;height:10px;
+    border-radius:50%;border:2px solid var(--bg)}}
+  .tl-label{{font-size:.65rem;font-weight:700;color:var(--muted);
+    text-transform:uppercase;letter-spacing:.08em}}
+  .tl-val{{font-size:.9rem;font-weight:700;margin-top:2px}}
+  .tl-sub{{font-size:.72rem;color:var(--muted);margin-top:1px}}
+  .detail-grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:16px}}
+  .detail-box{{background:#ffffff06;border-radius:10px;padding:12px}}
+  .detail-box .lbl{{font-size:.62rem;color:var(--muted);text-transform:uppercase;
+    font-weight:700;letter-spacing:.06em}}
+  .detail-box .val{{font-size:.95rem;font-weight:700;margin-top:4px}}
+  .solscan-btn{{display:block;text-align:center;margin-top:16px;padding:10px;
+    border-radius:10px;background:#f5c54215;border:1px solid #f5c54230;
+    color:var(--gold);text-decoration:none;font-size:.78rem;font-weight:600;
+    transition:all .2s}}
+  .solscan-btn:hover{{background:#f5c54225}}
+  @media(max-width:600px){{.stats{{grid-template-columns:1fr 1fr}}th,td{{padding:8px 8px}}}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="page-hdr">
+    <h1>💼 Trade History</h1>
+    <a href="/" class="back">← Dashboard</a>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="lbl">Total Trades</div>
+      <div class="val gold">{total}</div></div>
+    <div class="stat"><div class="lbl">Win Rate</div>
+      <div class="val {'green' if wr>=50 else 'red'}">{wr}%</div></div>
+    <div class="stat"><div class="lbl">Total PnL</div>
+      <div class="val {'green' if total_pnl>=0 else 'red'}">{'+' if total_pnl>=0 else ''}${total_pnl}</div></div>
+    <div class="stat"><div class="lbl">Avg Win</div>
+      <div class="val green">+${avg_win}</div></div>
+    <div class="stat"><div class="lbl">Avg Loss</div>
+      <div class="val red">${avg_loss}</div></div>
+    <div class="stat"><div class="lbl">Best Trade</div>
+      <div class="val green">{f'+${best["pnl"]:.4f}' if best else 'N/A'}</div></div>
+  </div>
+
+  {"" if not open_list else f'''
+  <div class="section">
+    <h2>⚡ Currently Open ({len(open_list)})</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Symbol</th><th>Strategy</th><th>Size</th><th>Bond In</th><th>Move</th><th>Held</th></tr></thead>
+        <tbody>{open_rows}</tbody>
+      </table>
+    </div>
+  </div>'''}
+
+  <div class="section">
+    <h2>📋 All Closed Trades — click any row for full breakdown</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th><th>Date / Time</th><th>Symbol</th><th>Strategy</th>
+            <th>Entry</th><th>Exit</th><th>PnL %</th><th>PnL $</th>
+            <th>Hold</th><th>Exit Reason</th><th>Result</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows if rows else '<tr><td colspan="11" style="text-align:center;padding:32px;color:var(--muted)">No closed trades yet — bot is scanning...</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<!-- TRADE DETAIL MODAL -->
+<div class="overlay" id="overlay" onclick="closeModal(event)">
+  <div class="modal" id="modal">
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <h2 id="m-symbol"></h2>
+    <div class="sub" id="m-sub"></div>
+
+    <div class="timeline">
+      <div class="tl-item">
+        <div class="tl-dot" style="background:#60a5fa"></div>
+        <div class="tl-label">Entry</div>
+        <div class="tl-val" id="m-entry"></div>
+        <div class="tl-sub" id="m-entry-sub"></div>
+      </div>
+      <div class="tl-item">
+        <div class="tl-dot" style="background:#f5c542"></div>
+        <div class="tl-label">Peak</div>
+        <div class="tl-val" id="m-peak"></div>
+        <div class="tl-sub" id="m-peak-sub"></div>
+      </div>
+      <div class="tl-item">
+        <div class="tl-dot" id="m-exit-dot" style="background:#4ade80"></div>
+        <div class="tl-label">Exit</div>
+        <div class="tl-val" id="m-exit"></div>
+        <div class="tl-sub" id="m-exit-sub"></div>
+      </div>
+    </div>
+
+    <div class="detail-grid">
+      <div class="detail-box">
+        <div class="lbl">PnL</div>
+        <div class="val" id="m-pnl"></div>
+      </div>
+      <div class="detail-box">
+        <div class="lbl">Hold Time</div>
+        <div class="val" id="m-hold"></div>
+      </div>
+      <div class="detail-box">
+        <div class="lbl">Bond % In</div>
+        <div class="val" id="m-bond"></div>
+      </div>
+      <div class="detail-box">
+        <div class="lbl">Bond % Peak</div>
+        <div class="val" id="m-bond-high"></div>
+      </div>
+      <div class="detail-box">
+        <div class="lbl">Trade Size</div>
+        <div class="val" id="m-amount"></div>
+      </div>
+      <div class="detail-box">
+        <div class="lbl">Exit Reason</div>
+        <div class="val" id="m-reason"></div>
+      </div>
+    </div>
+
+    <a id="m-solscan" href="#" target="_blank" class="solscan-btn">
+      🔍 View on Solscan →
+    </a>
+  </div>
+</div>
+
+<script>
+const ALL = {trades_json};
+
+function openModal(id) {{
+  const t = ALL.find(x => x.id === id);
+  if (!t) return;
+  const won = t.pnl > 0;
+  const sign = t.pnl >= 0 ? '+' : '';
+  const peakPct = ((t.peak - t.entry) / Math.max(t.entry, 1e-12) * 100).toFixed(1);
+
+  document.getElementById('m-symbol').textContent = t.symbol;
+  document.getElementById('m-symbol').style.color = won ? '#4ade80' : '#f87171';
+  document.getElementById('m-sub').textContent =
+    t.strategy.toUpperCase() + ' · ' + t.date + ' at ' + t.time;
+
+  document.getElementById('m-entry').textContent = '$' + t.entry.toFixed(8);
+  document.getElementById('m-entry-sub').textContent = 'Bond: ' + t.bond_entry.toFixed(1) + '%';
+
+  document.getElementById('m-peak').textContent = '$' + t.peak.toFixed(8);
+  document.getElementById('m-peak-sub').textContent = '+' + peakPct + '% from entry · Bond high: ' + (t.bond_high||0).toFixed(1) + '%';
+
+  document.getElementById('m-exit').textContent = '$' + t.exit.toFixed(8);
+  document.getElementById('m-exit-sub').textContent = t.result + ' · ' + sign + t.pnl_pct.toFixed(1) + '% move';
+  document.getElementById('m-exit-dot').style.background = won ? '#4ade80' : '#f87171';
+
+  document.getElementById('m-pnl').textContent = sign + '$' + t.pnl.toFixed(4);
+  document.getElementById('m-pnl').style.color = won ? '#4ade80' : '#f87171';
+  document.getElementById('m-hold').textContent = t.hold_m.toFixed(1) + ' min';
+  document.getElementById('m-bond').textContent = (t.bond_entry||0).toFixed(1) + '%';
+  document.getElementById('m-bond-high').textContent = (t.bond_high||0).toFixed(1) + '%';
+  document.getElementById('m-amount').textContent = '$' + (t.amount||0).toFixed(2);
+  document.getElementById('m-reason').textContent = t.result;
+
+  document.getElementById('m-solscan').href =
+    'https://solscan.io/token/' + (t.mint || '');
+
+  document.getElementById('overlay').classList.add('open');
+}}
+
+function closeModal(e) {{
+  if (!e || e.target === document.getElementById('overlay')) {{
+    document.getElementById('overlay').classList.remove('open');
+  }}
+}}
+
+document.addEventListener('keydown', e => {{ if(e.key==='Escape') closeModal(); }});
+</script>
+</body></html>"""
+    return html, 200
 
 @app.route("/log", methods=["GET"])
 def get_log():
