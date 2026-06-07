@@ -1550,16 +1550,17 @@ def home():
   </header>
 
   <nav>
-    <a href="/status">📊 Status JSON</a>
-    <a href="/trades">📋 Trades JSON</a>
-    <a href="/learn">🧠 Strategy Data</a>
+    <a href="/live">⚡ Live Feed</a>
+    <a href="/trades">📋 All Trades</a>
+    <a href="/status">📊 Status</a>
+    <a href="/learn">🧠 Strategy</a>
     <a href="https://pump.fun" target="_blank">🚀 Pump.fun</a>
     <a href="https://solscan.io" target="_blank">🔍 Solscan</a>
   </nav>
 
   <div class="actions">
     <a href="/" class="btn btn-gold">⚡ Refresh Now</a>
-    <a href="/status" class="btn btn-ghost">📡 Live Status</a>
+    <a href="/live" class="btn btn-ghost">📡 Live Feed</a>
     <a href="/trades" class="btn btn-ghost">💼 All Trades</a>
   </div>
 
@@ -2067,6 +2068,324 @@ document.addEventListener('keydown', e => {{ if(e.key==='Escape') closeModal(); 
 @app.route("/log", methods=["GET"])
 def get_log():
     return jsonify({"logs": trade_log[-100:]})
+
+@app.route("/live/api", methods=["GET"])
+def live_api():
+    """Polled every 3s by the live page — returns open trades + recent events."""
+    with trades_lock:
+        open_now = []
+        for t in open_trades.values():
+            elapsed = round(time.time() - t["opened_at"], 1)
+            cur_bond = 0
+            pct = 0
+            open_now.append({
+                "symbol":     t["symbol"],
+                "mint":       t["mint"],
+                "strategy":   t["strategy"],
+                "amount":     round(t["amount"], 2),
+                "entry":      t["entry"],
+                "bond_entry": round(t.get("bond_entry", 0), 1),
+                "bond_high":  round(t.get("bond_high", 0), 1),
+                "price_high": t.get("price_high", t["entry"]),
+                "elapsed_s":  elapsed,
+                "opened_at":  round(t["opened_at"]),
+            })
+    with capital_lock:
+        cap = capital
+    recent_closed = list(reversed(completed_trades[-30:]))
+    return jsonify({
+        "ts":       round(time.time()),
+        "capital":  round(cap, 2),
+        "open":     open_now,
+        "closed":   recent_closed,
+        "scanning": scan_active,
+        "paused":   _pause_until > time.time(),
+        "today":    {"trades": _daily_trades, "wins": _daily_wins, "losses": _daily_losses},
+    })
+
+@app.route("/live", methods=["GET"])
+def live():
+    html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Live Feed — Boogey's Treasure Chest</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{--gold:#f5c542;--bg:#080810;--surface:#10101a;--surface2:#16162a;
+    --border:#ffffff0d;--text:#e8e8f0;--muted:#5a5a7a;
+    --green:#4ade80;--red:#f87171;--blue:#60a5fa}
+  body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;
+    padding:16px;min-height:100vh}
+  .wrap{max-width:1000px;margin:0 auto}
+
+  /* HEADER */
+  .hdr{display:flex;align-items:center;justify-content:space-between;
+    flex-wrap:wrap;gap:10px;margin-bottom:20px}
+  .hdr-left{display:flex;align-items:center;gap:12px}
+  .hdr h1{font-size:1.25rem;font-weight:800;
+    background:linear-gradient(135deg,var(--gold),#fff);
+    -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+  .back{color:var(--muted);text-decoration:none;font-size:.78rem;padding:6px 12px;
+    border-radius:8px;border:1px solid var(--border);background:var(--surface);transition:all .2s}
+  .back:hover{color:var(--gold);border-color:#f5c54244}
+
+  /* STATUS BAR */
+  .status-bar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px}
+  .pill{padding:5px 14px;border-radius:999px;font-size:.72rem;font-weight:700;
+    border:1px solid var(--border);background:var(--surface);
+    display:inline-flex;align-items:center;gap:6px}
+  .dot{width:7px;height:7px;border-radius:50%}
+  .dot.green{background:var(--green);box-shadow:0 0 8px var(--green)}
+  .dot.red{background:var(--red);box-shadow:0 0 8px var(--red)}
+  .dot.gold{background:var(--gold);box-shadow:0 0 8px var(--gold)}
+  .blink{animation:blink 1s infinite}
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+
+  /* CAPITAL TICKER */
+  .cap-display{text-align:center;padding:20px;background:var(--surface);
+    border:1px solid #f5c54230;border-radius:16px;margin-bottom:20px;
+    background:linear-gradient(135deg,#1a140a,#10101a)}
+  .cap-display .lbl{font-size:.7rem;font-weight:700;color:var(--muted);
+    text-transform:uppercase;letter-spacing:.1em}
+  .cap-display .amount{font-size:2.8rem;font-weight:800;color:var(--gold);
+    font-family:'JetBrains Mono',monospace;letter-spacing:-.02em;
+    text-shadow:0 0 40px #f5c54250}
+  .cap-display .sub{font-size:.75rem;color:var(--muted);margin-top:4px}
+
+  /* OPEN TRADES */
+  .section{background:var(--surface);border:1px solid var(--border);
+    border-radius:16px;padding:16px;margin-bottom:16px}
+  .section-hdr{display:flex;align-items:center;justify-content:space-between;
+    margin-bottom:14px}
+  .section-hdr h2{font-size:.72rem;font-weight:700;color:var(--muted);
+    text-transform:uppercase;letter-spacing:.1em}
+  .count-badge{background:#f5c54220;color:var(--gold);border:1px solid #f5c54240;
+    border-radius:999px;font-size:.65rem;font-weight:700;padding:2px 8px}
+
+  /* TIMER */
+  .timer{font-family:'JetBrains Mono',monospace;font-size:.85rem;
+    color:var(--gold);font-weight:600}
+  .live-dot{display:inline-block;width:6px;height:6px;background:var(--green);
+    border-radius:50%;margin-right:4px;animation:blink 1s infinite;
+    box-shadow:0 0 6px var(--green)}
+
+  /* TABLE */
+  .table-wrap{overflow-x:auto;border-radius:10px;border:1px solid var(--border)}
+  table{width:100%;border-collapse:collapse;font-size:.78rem}
+  thead{background:var(--surface2)}
+  th{padding:9px 12px;color:var(--muted);font-size:.63rem;font-weight:700;
+    text-transform:uppercase;letter-spacing:.08em;text-align:left;
+    border-bottom:1px solid var(--border);white-space:nowrap}
+  td{padding:10px 12px;border-bottom:1px solid #ffffff05;vertical-align:middle}
+  tr:last-child td{border-bottom:none}
+  tr.new-row{animation:flash .8s ease-out}
+  @keyframes flash{0%{background:#f5c54218}100%{background:transparent}}
+
+  .mono{font-family:'JetBrains Mono',monospace;font-size:.75rem}
+  .sym{font-weight:700;font-size:.85rem}
+  .muted{color:var(--muted)}
+  .green{color:var(--green)} .red{color:var(--red)} .gold{color:var(--gold)}
+
+  /* BADGES */
+  .badge{display:inline-block;padding:2px 8px;border-radius:5px;
+    font-size:.62rem;font-weight:700;letter-spacing:.04em;white-space:nowrap}
+  .badge.win{background:#4ade8020;color:var(--green);border:1px solid #4ade8040}
+  .badge.loss{background:#f8717120;color:var(--red);border:1px solid #f8717140}
+  .badge.strat{background:#60a5fa18;color:var(--blue);border:1px solid #60a5fa30}
+  .badge.open{background:#f5c54218;color:var(--gold);border:1px solid #f5c54240}
+
+  /* FEED */
+  .feed{display:flex;flex-direction:column;gap:6px;max-height:400px;overflow-y:auto}
+  .feed-item{display:flex;align-items:center;gap:10px;padding:10px 14px;
+    border-radius:10px;border:1px solid var(--border);background:var(--surface2);
+    font-size:.78rem;animation:flash .8s ease-out}
+  .feed-item.buy{border-color:#60a5fa30;background:#60a5fa08}
+  .feed-item.win{border-color:#4ade8030;background:#4ade8008}
+  .feed-item.loss{border-color:#f8717130;background:#f8717108}
+  .feed-ts{font-family:'JetBrains Mono',monospace;font-size:.65rem;
+    color:var(--muted);white-space:nowrap;min-width:60px}
+  .feed-icon{font-size:1rem;width:20px;text-align:center}
+  .feed-body{flex:1}
+  .feed-sym{font-weight:700;margin-right:6px}
+  .feed-detail{color:var(--muted);font-size:.72rem;margin-top:1px}
+  .feed-pnl{font-family:'JetBrains Mono',monospace;font-weight:700;white-space:nowrap}
+
+  .empty{text-align:center;padding:32px;color:var(--muted);font-size:.82rem}
+  #last-update{font-size:.65rem;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="hdr">
+    <div class="hdr-left">
+      <h1>⚡ Live Feed</h1>
+      <span id="last-update"></span>
+    </div>
+    <a href="/" class="back">← Dashboard</a>
+  </div>
+
+  <div class="status-bar">
+    <div class="pill"><span class="dot green blink" id="scan-dot"></span>
+      <span id="scan-label">Scanning</span></div>
+    <div class="pill">Capital: <strong id="cap-pill" class="gold">$--</strong></div>
+    <div class="pill">Today: <span id="today-pill">--</span></div>
+    <div class="pill">Open: <span id="open-count" class="gold">0</span></div>
+  </div>
+
+  <div class="cap-display">
+    <div class="lbl">Current Capital</div>
+    <div class="amount" id="cap-big">$---.--</div>
+    <div class="sub">Started at $39.67 &nbsp;·&nbsp; Goal: $25,000</div>
+  </div>
+
+  <div class="section" id="open-section">
+    <div class="section-hdr">
+      <h2><span class="live-dot"></span>Open Trades</h2>
+      <span class="count-badge" id="open-badge">0 active</span>
+    </div>
+    <div id="open-body">
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Symbol</th><th>Strategy</th><th>Size</th>
+            <th>Bond In</th><th>Bond High</th><th>Elapsed</th>
+          </tr></thead>
+          <tbody id="open-rows"><tr><td colspan="6" class="empty">No open trades — scanning...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-hdr">
+      <h2>📡 Trade Events</h2>
+      <a href="/trades" style="font-size:.7rem;color:var(--gold);text-decoration:none">
+        Full History →</a>
+    </div>
+    <div class="feed" id="feed">
+      <div class="empty">Waiting for trades...</div>
+    </div>
+  </div>
+
+</div>
+<script>
+let seenIds = new Set();
+let openTimers = {};
+
+function fmt(n, dec=4) { return (n>=0?'+':'')+n.toFixed(dec); }
+function fmtTime(ts) {
+  const d = new Date(ts*1000);
+  return d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+}
+function elapsed(s) {
+  if (s < 60) return s.toFixed(0)+'s';
+  return Math.floor(s/60)+'m '+(s%60).toFixed(0)+'s';
+}
+
+function tick() {
+  // Update elapsed timers for open trades
+  document.querySelectorAll('.elapsed-cell').forEach(el => {
+    const start = parseInt(el.dataset.start);
+    el.textContent = elapsed(Date.now()/1000 - start);
+  });
+}
+setInterval(tick, 1000);
+
+async function poll() {
+  try {
+    const r = await fetch('/live/api');
+    const d = await r.json();
+
+    // Capital
+    document.getElementById('cap-big').textContent = '$'+d.capital.toFixed(2);
+    document.getElementById('cap-pill').textContent = '$'+d.capital.toFixed(2);
+    document.getElementById('today-pill').textContent =
+      d.today.trades+'T '+d.today.wins+'W '+d.today.losses+'L';
+    document.getElementById('open-count').textContent = d.open.length;
+    document.getElementById('open-badge').textContent = d.open.length+' active';
+
+    // Scan status
+    const dot = document.getElementById('scan-dot');
+    const lbl = document.getElementById('scan-label');
+    if (d.paused) {
+      dot.className='dot red blink'; lbl.textContent='Cooling Down';
+    } else if (d.scanning) {
+      dot.className='dot green blink'; lbl.textContent='Scanning';
+    } else {
+      dot.className='dot red'; lbl.textContent='Halted';
+    }
+
+    // Open trades table
+    const tbody = document.getElementById('open-rows');
+    if (d.open.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty">No open trades — scanning...</td></tr>';
+    } else {
+      tbody.innerHTML = d.open.map(t => `
+        <tr>
+          <td><span class="sym">${t.symbol}</span><br>
+            <span class="muted" style="font-size:.65rem">${t.strategy.toUpperCase()}</span></td>
+          <td><span class="badge strat">${t.strategy.toUpperCase()}</span></td>
+          <td class="mono gold">$${t.amount.toFixed(2)}</td>
+          <td class="mono">${t.bond_entry.toFixed(1)}%</td>
+          <td class="mono gold">${t.bond_high.toFixed(1)}%</td>
+          <td class="timer elapsed-cell" data-start="${t.opened_at}">${elapsed(Date.now()/1000 - t.opened_at)}</td>
+        </tr>`).join('');
+    }
+
+    // Feed — closed trades, newest first
+    const feed = document.getElementById('feed');
+    let added = false;
+    const sorted = [...d.closed].reverse();
+    const newItems = [];
+
+    sorted.forEach(t => {
+      const key = t.id ?? (t.symbol+t.time);
+      if (!seenIds.has(key)) {
+        seenIds.add(key);
+        added = true;
+        const won = t.pnl > 0;
+        const isBuy = false; // closed trades only here
+        const sign = t.pnl >= 0 ? '+' : '';
+        newItems.push(`
+          <div class="feed-item ${won?'win':'loss'}">
+            <span class="feed-ts">${t.time}</span>
+            <span class="feed-icon">${won?'✅':'❌'}</span>
+            <div class="feed-body">
+              <span class="feed-sym">${t.symbol}</span>
+              <span class="badge ${won?'win':'loss'}">${won?'WIN':'LOSS'}</span>
+              &nbsp;<span class="badge strat">${t.strategy.toUpperCase()}</span>
+              <div class="feed-detail">
+                Entry $${t.entry.toFixed(6)} → Exit $${t.exit.toFixed(6)}
+                &nbsp;·&nbsp; ${t.result} &nbsp;·&nbsp; held ${t.hold_m.toFixed(1)}m
+              </div>
+            </div>
+            <span class="feed-pnl ${won?'green':'red'}">${sign}$${t.pnl.toFixed(4)}</span>
+          </div>`);
+      }
+    });
+
+    if (newItems.length > 0) {
+      const existing = feed.innerHTML === '<div class="empty">Waiting for trades...</div>'
+        ? '' : feed.innerHTML;
+      feed.innerHTML = newItems.join('') + existing;
+    }
+
+    // Last updated
+    document.getElementById('last-update').textContent =
+      'Updated ' + new Date().toLocaleTimeString();
+
+  } catch(e) { console.error(e); }
+}
+
+poll();
+setInterval(poll, 3000);
+</script>
+</body></html>"""
+    return html, 200
 
 @app.route("/learn", methods=["GET"])
 def learn():
