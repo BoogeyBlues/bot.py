@@ -1,1 +1,4 @@
-PLACEHOLDER
+__pycache__/
+*.pyc
+*.pyo
+.env
