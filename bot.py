@@ -1355,35 +1355,39 @@ def home():
     wr    = round(len(wins) / max(total, 1) * 100, 1)
     pnl   = sum(t["pnl"] for t in completed_trades)
     mode  = "PAPER" if PAPER_MODE else "LIVE"
-    mode_color = "#f59e0b" if PAPER_MODE else "#22c55e"
     pct, limit = _cap_tier(cap)
     next_m = next((m for m in MILESTONES if m > cap), None)
     progress_pct = min(round(cap / max(next_m, 1) * 100, 1), 100) if next_m else 100
 
-    # Capital history for chart — build from week logs + today
     cap_points = [{"day": d["date"][-5:], "cap": round(d["capital"], 2)} for d in _week_day_logs[-14:]]
     cap_points.append({"day": "Today", "cap": round(cap, 2)})
     cap_json = json.dumps(cap_points)
 
-    # Recent trades table rows
     recent = list(reversed(completed_trades[-20:]))
     rows = ""
     for t in recent:
-        color = "#22c55e" if t["pnl"] >= 0 else "#ef4444"
+        color = "#4ade80" if t["pnl"] >= 0 else "#f87171"
+        icon  = "▲" if t["pnl"] >= 0 else "▼"
         sign  = "+" if t["pnl"] >= 0 else ""
-        rows += (f'<tr><td>{t["time"]}</td><td>{t["symbol"]}</td>'
-                 f'<td>{t["strategy"].upper()}</td>'
-                 f'<td style="color:{color};font-weight:600">{sign}${t["pnl"]:.4f}</td>'
-                 f'<td>{t["result"]}</td>'
-                 f'<td>{t["hold_m"]:.1f}m</td></tr>')
+        rows += (f'<tr>'
+                 f'<td><span class="badge badge-strategy">{t["strategy"].upper()}</span></td>'
+                 f'<td class="sym">{t["symbol"]}</td>'
+                 f'<td style="color:{color};font-weight:700">{icon} {sign}${t["pnl"]:.4f}</td>'
+                 f'<td><span class="badge">{t["result"]}</span></td>'
+                 f'<td class="muted">{t["hold_m"]:.1f}m</td>'
+                 f'<td class="muted">{t["time"]}</td>'
+                 f'</tr>')
 
-    # Open trades rows
     open_rows = ""
     for t in open_list:
         elapsed = round((time.time() - t["opened_at"]) / 60, 1)
-        open_rows += (f'<tr><td>{t["symbol"]}</td><td>{t["strategy"].upper()}</td>'
-                      f'<td>${t["amount"]:.2f}</td><td>{t.get("bond_entry",0):.1f}%</td>'
-                      f'<td>{elapsed}m</td></tr>')
+        open_rows += (f'<tr>'
+                      f'<td class="sym">{t["symbol"]}</td>'
+                      f'<td><span class="badge badge-strategy">{t["strategy"].upper()}</span></td>'
+                      f'<td class="gold">${t["amount"]:.2f}</td>'
+                      f'<td class="muted">{t.get("bond_entry",0):.1f}%</td>'
+                      f'<td class="muted pulse-text">{elapsed}m</td>'
+                      f'</tr>')
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -1391,124 +1395,274 @@ def home():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="30">
-<title>PumpFun Sniper</title>
+<title>Boogey's Treasure Chest</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
   *{{box-sizing:border-box;margin:0;padding:0}}
-  body{{background:#0f0f0f;color:#e5e5e5;font-family:'Segoe UI',sans-serif;padding:20px}}
-  h1{{font-size:1.4rem;font-weight:700;margin-bottom:4px;color:#fff}}
-  .subtitle{{color:#71717a;font-size:.85rem;margin-bottom:24px}}
-  .cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:24px}}
-  .card{{background:#1c1c1e;border-radius:12px;padding:16px}}
-  .card .label{{font-size:.75rem;color:#71717a;text-transform:uppercase;letter-spacing:.05em}}
-  .card .value{{font-size:1.6rem;font-weight:700;margin-top:4px}}
-  .card .sub{{font-size:.75rem;color:#a1a1aa;margin-top:2px}}
-  .green{{color:#22c55e}} .red{{color:#ef4444}} .yellow{{color:#f59e0b}} .blue{{color:#3b82f6}}
-  .mode-badge{{display:inline-block;padding:2px 10px;border-radius:999px;font-size:.75rem;
-    font-weight:700;background:{mode_color}22;color:{mode_color};border:1px solid {mode_color}44}}
-  .section{{background:#1c1c1e;border-radius:12px;padding:16px;margin-bottom:16px}}
-  .section h2{{font-size:.85rem;color:#71717a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px}}
-  .progress-bar{{background:#27272a;border-radius:999px;height:8px;margin:8px 0 4px}}
-  .progress-fill{{background:linear-gradient(90deg,#3b82f6,#8b5cf6);height:8px;border-radius:999px;
-    width:{progress_pct}%;transition:width .5s}}
-  table{{width:100%;border-collapse:collapse;font-size:.8rem}}
-  th{{text-align:left;color:#71717a;font-weight:500;padding:4px 8px;border-bottom:1px solid #27272a}}
-  td{{padding:6px 8px;border-bottom:1px solid #1a1a1a}}
-  .chart-wrap{{position:relative;height:180px}}
-  @media(max-width:600px){{.cards{{grid-template-columns:1fr 1fr}}}}
+  :root{{
+    --gold:#f5c542;--gold2:#e8a800;--bg:#080810;--surface:#10101a;
+    --surface2:#16162a;--border:#ffffff0d;--text:#e8e8f0;--muted:#5a5a7a;
+  }}
+  body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;
+    min-height:100vh;overflow-x:hidden}}
+
+  /* animated starfield */
+  body::before{{content:'';position:fixed;inset:0;
+    background:radial-gradient(ellipse at 20% 50%,#1a0a3a22 0%,transparent 60%),
+               radial-gradient(ellipse at 80% 20%,#0a1a3a22 0%,transparent 60%);
+    pointer-events:none;z-index:0}}
+
+  .wrap{{max-width:900px;margin:0 auto;padding:20px 16px;position:relative;z-index:1}}
+
+  /* HEADER */
+  header{{text-align:center;padding:32px 0 24px;position:relative}}
+  .chest-icon{{font-size:2.8rem;display:block;margin-bottom:8px;
+    filter:drop-shadow(0 0 20px #f5c54288)}}
+  h1{{font-size:1.9rem;font-weight:800;letter-spacing:-.02em;
+    background:linear-gradient(135deg,var(--gold) 0%,#fff 50%,var(--gold2) 100%);
+    -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}}
+  .tagline{{color:var(--muted);font-size:.8rem;margin-top:6px;letter-spacing:.08em;text-transform:uppercase}}
+  .mode-pill{{display:inline-flex;align-items:center;gap:6px;padding:4px 14px;
+    border-radius:999px;font-size:.72rem;font-weight:700;letter-spacing:.05em;
+    margin-top:12px;border:1px solid;
+    {'background:#f5c54218;color:#f5c542;border-color:#f5c54244' if PAPER_MODE else 'background:#4ade8018;color:#4ade80;border-color:#4ade8044'}}}
+  .dot{{width:6px;height:6px;border-radius:50%;
+    background:{'#f5c542' if PAPER_MODE else '#4ade80'};
+    box-shadow:0 0 6px {'#f5c542' if PAPER_MODE else '#4ade80'};
+    animation:pulse 2s infinite}}
+  @keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.4}}}}
+
+  /* NAV LINKS */
+  nav{{display:flex;justify-content:center;flex-wrap:wrap;gap:8px;margin:20px 0 28px}}
+  nav a{{color:var(--muted);font-size:.78rem;font-weight:500;text-decoration:none;
+    padding:6px 14px;border-radius:8px;border:1px solid var(--border);
+    background:var(--surface);transition:all .2s;letter-spacing:.03em}}
+  nav a:hover{{color:var(--gold);border-color:#f5c54244;background:#f5c54210}}
+
+  /* STAT CARDS */
+  .cards{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:20px}}
+  @media(max-width:540px){{.cards{{grid-template-columns:1fr 1fr}}}}
+  .card{{background:var(--surface);border:1px solid var(--border);border-radius:16px;
+    padding:16px 14px;position:relative;overflow:hidden;transition:transform .2s}}
+  .card:hover{{transform:translateY(-2px)}}
+  .card::before{{content:'';position:absolute;inset:0;
+    background:linear-gradient(135deg,#ffffff04 0%,transparent 100%);pointer-events:none}}
+  .card .lbl{{font-size:.68rem;font-weight:600;color:var(--muted);
+    text-transform:uppercase;letter-spacing:.08em}}
+  .card .val{{font-size:1.55rem;font-weight:800;margin-top:5px;line-height:1}}
+  .card .sub{{font-size:.7rem;color:var(--muted);margin-top:5px}}
+  .card.gold-card{{border-color:#f5c54230;background:linear-gradient(135deg,#1a140a,#10101a)}}
+  .gold{{color:var(--gold)}}
+  .green{{color:#4ade80}}
+  .red{{color:#f87171}}
+  .blue{{color:#60a5fa}}
+  .muted{{color:var(--muted)}}
+
+  /* GLOW CARD */
+  .card.glow::after{{content:'';position:absolute;inset:-1px;border-radius:16px;
+    background:linear-gradient(135deg,#f5c54240,transparent,#f5c54220);
+    -webkit-mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);
+    -webkit-mask-composite:xor;mask-composite:exclude;pointer-events:none}}
+
+  /* SECTIONS */
+  .section{{background:var(--surface);border:1px solid var(--border);
+    border-radius:16px;padding:18px;margin-bottom:14px}}
+  .section-hdr{{display:flex;align-items:center;justify-content:space-between;
+    margin-bottom:14px}}
+  .section-hdr h2{{font-size:.72rem;font-weight:700;color:var(--muted);
+    text-transform:uppercase;letter-spacing:.1em}}
+  .section-hdr a{{font-size:.7rem;color:var(--gold);text-decoration:none;
+    padding:4px 10px;border-radius:6px;border:1px solid #f5c54230;
+    background:#f5c54210;transition:all .2s}}
+  .section-hdr a:hover{{background:#f5c54220}}
+
+  /* PROGRESS */
+  .prog-labels{{display:flex;justify-content:space-between;
+    font-size:.72rem;color:var(--muted);margin-bottom:8px}}
+  .prog-track{{background:#ffffff08;border-radius:999px;height:10px;overflow:hidden}}
+  .prog-fill{{height:10px;border-radius:999px;
+    background:linear-gradient(90deg,var(--gold2),var(--gold),#fff8dc);
+    width:{progress_pct}%;box-shadow:0 0 12px #f5c54266;
+    transition:width 1s cubic-bezier(.4,0,.2,1)}}
+  .milestones{{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}}
+  .ms{{font-size:.68rem;padding:3px 10px;border-radius:6px;border:1px solid var(--border);
+    color:var(--muted);background:var(--surface2)}}
+  .ms.hit{{color:var(--gold);border-color:#f5c54240;background:#f5c54210}}
+
+  /* TABLE */
+  table{{width:100%;border-collapse:collapse;font-size:.78rem}}
+  thead tr{{border-bottom:1px solid var(--border)}}
+  th{{padding:8px 10px;color:var(--muted);font-weight:600;
+    font-size:.68rem;text-transform:uppercase;letter-spacing:.06em;text-align:left}}
+  td{{padding:9px 10px;border-bottom:1px solid #ffffff06}}
+  tr:last-child td{{border-bottom:none}}
+  tr:hover td{{background:#ffffff04}}
+  .sym{{font-weight:700;font-size:.82rem;letter-spacing:.02em}}
+  .badge{{display:inline-block;padding:2px 7px;border-radius:5px;font-size:.64rem;
+    font-weight:700;letter-spacing:.04em;background:#ffffff0a;color:var(--muted);border:1px solid var(--border)}}
+  .badge-strategy{{background:#60a5fa18;color:#60a5fa;border-color:#60a5fa30}}
+
+  /* CHART */
+  .chart-wrap{{position:relative;height:160px}}
+
+  /* FOOTER */
+  footer{{text-align:center;padding:24px 0 8px;color:var(--muted);font-size:.72rem}}
+
+  /* ACTION BUTTONS */
+  .actions{{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px}}
+  .btn{{padding:10px 18px;border-radius:10px;font-size:.78rem;font-weight:600;
+    text-decoration:none;border:1px solid;cursor:pointer;transition:all .2s;
+    display:inline-flex;align-items:center;gap:6px;letter-spacing:.02em}}
+  .btn-gold{{background:linear-gradient(135deg,#f5c542,#e8a800);
+    color:#000;border-color:#f5c542;box-shadow:0 0 20px #f5c54240}}
+  .btn-gold:hover{{box-shadow:0 0 30px #f5c54260;transform:translateY(-1px)}}
+  .btn-ghost{{background:#ffffff08;color:var(--text);border-color:var(--border)}}
+  .btn-ghost:hover{{background:#ffffff12;border-color:#ffffff20}}
+
+  .pulse-text{{animation:pulse 2s infinite}}
+  .empty{{text-align:center;padding:28px;color:var(--muted);font-size:.82rem}}
 </style>
 </head>
 <body>
-<h1>PumpFun Sniper &nbsp;<span class="mode-badge">{mode}</span></h1>
-<p class="subtitle">Auto-refreshes every 30s &nbsp;·&nbsp; Goal: $25,000 &nbsp;·&nbsp; Retuning every {ANALYZE_EVERY} trades</p>
+<div class="wrap">
 
-<div class="cards">
-  <div class="card">
-    <div class="label">Capital</div>
-    <div class="value green">${cap:.2f}</div>
-    <div class="sub">Started $39.67</div>
+  <header>
+    <span class="chest-icon">🏴‍☠️</span>
+    <h1>Boogey's Treasure Chest</h1>
+    <p class="tagline">Autonomous pump.fun sniper &nbsp;·&nbsp; goal $25,000</p>
+    <div class="mode-pill"><span class="dot"></span>{mode} MODE</div>
+  </header>
+
+  <nav>
+    <a href="/status">📊 Status JSON</a>
+    <a href="/trades">📋 Trades JSON</a>
+    <a href="/learn">🧠 Strategy Data</a>
+    <a href="https://pump.fun" target="_blank">🚀 Pump.fun</a>
+    <a href="https://solscan.io" target="_blank">🔍 Solscan</a>
+  </nav>
+
+  <div class="actions">
+    <a href="/" class="btn btn-gold">⚡ Refresh Now</a>
+    <a href="/status" class="btn btn-ghost">📡 Live Status</a>
+    <a href="/trades" class="btn btn-ghost">💼 All Trades</a>
   </div>
-  <div class="card">
-    <div class="label">Total PnL</div>
-    <div class="value {'green' if pnl>=0 else 'red'}">{'+' if pnl>=0 else ''}${pnl:.2f}</div>
-    <div class="sub">{total} trades closed</div>
+
+  <div class="cards">
+    <div class="card gold-card glow">
+      <div class="lbl">Capital</div>
+      <div class="val gold">${cap:.2f}</div>
+      <div class="sub">Started at $39.67</div>
+    </div>
+    <div class="card">
+      <div class="lbl">Total PnL</div>
+      <div class="val {'green' if pnl>=0 else 'red'}">{'+' if pnl>=0 else ''}${pnl:.2f}</div>
+      <div class="sub">{total} trades closed</div>
+    </div>
+    <div class="card">
+      <div class="lbl">Win Rate</div>
+      <div class="val {'green' if wr>=50 else 'red'}">{wr}%</div>
+      <div class="sub">{len(wins)}W &nbsp;/&nbsp; {total-len(wins)}L</div>
+    </div>
+    <div class="card">
+      <div class="lbl">Trade Size</div>
+      <div class="val blue">${trade_size():.2f}</div>
+      <div class="sub">{pct*100:.0f}% tier · {_daily_trades}/{limit} today</div>
+    </div>
+    <div class="card">
+      <div class="lbl">Open Trades</div>
+      <div class="val {'green' if open_list else ''}">{len(open_list)}<span style="font-size:1rem;font-weight:500;color:var(--muted)">/{MAX_OPEN}</span></div>
+      <div class="sub">{'🟢 Active' if open_list else '🔍 Scanning...'}</div>
+    </div>
+    <div class="card">
+      <div class="lbl">USDC Locked</div>
+      <div class="val blue">${locked:.2f}</div>
+      <div class="sub">Profit secured</div>
+    </div>
   </div>
-  <div class="card">
-    <div class="label">Win Rate</div>
-    <div class="value {'green' if wr>=50 else 'yellow'}">{wr}%</div>
-    <div class="sub">{len(wins)}W / {total-len(wins)}L</div>
+
+  <div class="section">
+    <div class="section-hdr">
+      <h2>🏆 Milestone Progress</h2>
+      <span style="font-size:.72rem;color:var(--muted)">${cap:.2f} → ${next_m:,}</span>
+    </div>
+    <div class="prog-labels"><span>${cap:.2f}</span><span>${next_m:,}</span></div>
+    <div class="prog-track"><div class="prog-fill"></div></div>
+    <div class="milestones">
+      {''.join(f'<span class="ms{" hit" if cap >= m else ""}">${m:,}</span>' for m in MILESTONES)}
+    </div>
   </div>
-  <div class="card">
-    <div class="label">Trade Size</div>
-    <div class="value blue">${trade_size():.2f}</div>
-    <div class="sub">{pct*100:.0f}% · {_daily_trades}/{limit} today</div>
+
+  <div class="section">
+    <div class="section-hdr">
+      <h2>📈 Capital Growth</h2>
+      <a href="/status">Full Data →</a>
+    </div>
+    <div class="chart-wrap"><canvas id="capChart"></canvas></div>
   </div>
-  <div class="card">
-    <div class="label">Open Trades</div>
-    <div class="value">{len(open_list)}/{MAX_OPEN}</div>
-    <div class="sub">{'Active' if open_list else 'Scanning...'}</div>
+
+  {"" if not open_list else f'''
+  <div class="section">
+    <div class="section-hdr"><h2>⚡ Open Trades ({len(open_list)})</h2></div>
+    <table>
+      <thead><tr><th>Symbol</th><th>Strategy</th><th>Size</th><th>Bond In</th><th>Held</th></tr></thead>
+      <tbody>{open_rows}</tbody>
+    </table>
+  </div>'''}
+
+  <div class="section">
+    <div class="section-hdr">
+      <h2>📋 Recent Trades</h2>
+      <a href="/trades">View All →</a>
+    </div>
+    <table>
+      <thead><tr><th>Strategy</th><th>Symbol</th><th>PnL</th><th>Exit</th><th>Hold</th><th>Time</th></tr></thead>
+      <tbody>{rows if rows else '<tr><td colspan="6" class="empty">No trades yet — bot is scanning...</td></tr>'}</tbody>
+    </table>
   </div>
-  <div class="card">
-    <div class="label">USDC Locked</div>
-    <div class="value blue">${locked:.2f}</div>
-    <div class="sub">Profit secured</div>
-  </div>
+
+  <footer>
+    Auto-refreshes every 30s &nbsp;·&nbsp; Retuning every {ANALYZE_EVERY} trades &nbsp;·&nbsp;
+    Built by Boogey &nbsp;·&nbsp;
+    <a href="https://github.com/BoogeyBlues/bot.py" target="_blank" style="color:var(--gold);text-decoration:none">GitHub ↗</a>
+  </footer>
+
 </div>
-
-<div class="section">
-  <h2>Progress → Next milestone ${next_m:,}</h2>
-  <div class="progress-bar"><div class="progress-fill"></div></div>
-  <div style="font-size:.75rem;color:#71717a">${cap:.2f} / ${next_m:,} &nbsp;({progress_pct}%)</div>
-</div>
-
-<div class="section">
-  <h2>Capital Growth</h2>
-  <div class="chart-wrap">
-    <canvas id="capChart"></canvas>
-  </div>
-</div>
-
-{"" if not open_list else f'''<div class="section"><h2>Open Trades ({len(open_list)})</h2>
-<table><thead><tr><th>Symbol</th><th>Strategy</th><th>Size</th><th>Bond In</th><th>Held</th></tr></thead>
-<tbody>{open_rows}</tbody></table></div>'''}
-
-<div class="section">
-  <h2>Recent Trades</h2>
-  <table>
-    <thead><tr><th>Time</th><th>Symbol</th><th>Strategy</th><th>PnL</th><th>Exit</th><th>Hold</th></tr></thead>
-    <tbody>{rows if rows else '<tr><td colspan="6" style="color:#71717a;text-align:center;padding:20px">No trades yet</td></tr>'}</tbody>
-  </table>
-</div>
-
 <script>
 const data = {cap_json};
 new Chart(document.getElementById('capChart'), {{
-  type: 'line',
-  data: {{
-    labels: data.map(d => d.day),
-    datasets: [{{
-      data: data.map(d => d.cap),
-      borderColor: '#3b82f6',
-      backgroundColor: 'rgba(59,130,246,0.1)',
-      fill: true,
-      tension: 0.4,
-      pointRadius: 4,
-      pointBackgroundColor: '#3b82f6',
+  type:'line',
+  data:{{
+    labels: data.map(d=>d.day),
+    datasets:[{{
+      data: data.map(d=>d.cap),
+      borderColor:'#f5c542',
+      backgroundColor:'rgba(245,197,66,0.08)',
+      fill:true,tension:0.45,
+      pointRadius:4,pointHoverRadius:6,
+      pointBackgroundColor:'#f5c542',
+      pointBorderColor:'#080810',pointBorderWidth:2,
     }}]
   }},
-  options: {{
-    responsive: true,
-    maintainAspectRatio: false,
-    plugins: {{ legend: {{ display: false }} }},
-    scales: {{
-      x: {{ grid: {{ color: '#27272a' }}, ticks: {{ color: '#71717a' }} }},
-      y: {{ grid: {{ color: '#27272a' }}, ticks: {{ color: '#71717a', callback: v => '$'+v }} }}
+  options:{{
+    responsive:true,maintainAspectRatio:false,
+    plugins:{{legend:{{display:false}},tooltip:{{
+      backgroundColor:'#16162a',borderColor:'#f5c54240',borderWidth:1,
+      titleColor:'#f5c542',bodyColor:'#e8e8f0',
+      callbacks:{{label:ctx=>' $'+ctx.parsed.y.toFixed(2)}}
+    }}}},
+    scales:{{
+      x:{{grid:{{color:'#ffffff06'}},ticks:{{color:'#5a5a7a',font:{{size:10}}}}}},
+      y:{{grid:{{color:'#ffffff06'}},ticks:{{color:'#5a5a7a',font:{{size:10}},
+        callback:v=>'$'+v}}}}
     }}
   }}
 }});
 </script>
 </body></html>"""
     return html, 200
+
+
 
 @app.route("/status", methods=["GET"])
 def status():
