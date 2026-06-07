@@ -1685,6 +1685,212 @@ new Chart(document.getElementById('capChart'), {{
     return html, 200
 
 
+def _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
+               pct, limit, next_m, progress_pct, cap_json, rows, open_rows):
+    sign      = "+" if pnl >= 0 else ""
+    pnl_color = "#39ff14" if pnl >= 0 else "#ff006e"
+    wr_color  = "#39ff14" if wr >= 50 else ("#ffee00" if wr >= 35 else "#ff006e")
+    mode_color= "#ffee00" if mode == "PAPER" else "#39ff14"
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<meta http-equiv="refresh" content="30">
+<title>Boogey's Treasure Chest</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  :root{{--pink:#ff006e;--cyan:#00f5ff;--yellow:#ffee00;--green:#39ff14;
+    --bg:#0a0008;--card:#110010;--border:#ffffff15}}
+  body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;
+    max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
+  .vid-wrap{{width:100%;line-height:0;position:relative}}
+  .vid-wrap video{{width:100%;mix-blend-mode:screen;display:block}}
+  .vid-wrap::after{{content:'';position:absolute;bottom:0;left:0;right:0;height:40px;
+    background:linear-gradient(transparent,var(--bg))}}
+  nav{{display:flex;gap:0;border-bottom:2px solid var(--pink);overflow-x:auto;
+    scrollbar-width:none}}
+  nav::-webkit-scrollbar{{display:none}}
+  nav a{{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;
+    padding:10px 14px;white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;
+    border-right:1px solid var(--border);transition:all .15s}}
+  nav a:hover{{background:var(--pink);color:#000}}
+  .mode-strip{{background:var(--card);border-bottom:2px solid var(--yellow);
+    padding:6px 16px;display:flex;align-items:center;justify-content:space-between}}
+  .mode-strip .left{{font-size:.62rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#888}}
+  .mode-pill{{font-size:.68rem;font-weight:900;padding:3px 12px;letter-spacing:.08em;background:{mode_color};color:#000}}
+  .hero{{padding:20px 16px 16px;background:linear-gradient(180deg,#1a000f,var(--bg));
+    border-bottom:3px solid var(--pink);text-align:center}}
+  .hero-lbl{{font-size:.62rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.15em;margin-bottom:4px}}
+  .hero-cap{{font-family:'Bebas Neue',sans-serif;font-size:4.2rem;letter-spacing:.02em;
+    color:var(--yellow);text-shadow:0 0 30px #ffee0066,3px 3px 0 var(--pink);line-height:1}}
+  .hero-pnl{{font-family:'JetBrains Mono',monospace;font-size:1rem;font-weight:600;
+    margin-top:8px;color:{pnl_color}}}
+  .hero-sub{{font-size:.7rem;color:#888;margin-top:6px}}
+  .grid{{display:grid;grid-template-columns:1fr 1fr;gap:2px;background:var(--pink);border:2px solid var(--pink)}}
+  .stat{{background:var(--card);padding:14px 16px}}
+  .stat .lbl{{font-size:.58rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em}}
+  .stat .val{{font-family:'Bebas Neue',sans-serif;font-size:2rem;margin-top:2px;line-height:1}}
+  .stat .sub{{font-size:.62rem;color:#888;margin-top:3px}}
+  .pink{{color:var(--pink)}} .cyan{{color:var(--cyan)}} .yellow{{color:var(--yellow)}}
+  .green{{color:var(--green)}} .muted{{color:#888}}
+  .prog-wrap{{padding:14px 16px;background:var(--card);border-bottom:2px solid var(--border)}}
+  .prog-lbl{{font-size:.62rem;font-weight:700;color:#888;text-transform:uppercase;
+    letter-spacing:.1em;margin-bottom:8px;display:flex;justify-content:space-between}}
+  .prog-track{{background:#ffffff10;height:6px;overflow:hidden}}
+  .prog-fill{{background:linear-gradient(90deg,var(--pink),var(--yellow),var(--cyan));
+    height:6px;width:{progress_pct}%;box-shadow:0 0 10px var(--pink)}}
+  .milestones{{display:flex;flex-wrap:wrap;gap:4px;margin-top:10px}}
+  .ms{{font-size:.58rem;padding:3px 8px;font-weight:700;letter-spacing:.04em;
+    border:1px solid #ffffff15;color:#666;background:#ffffff05}}
+  .ms.hit{{color:var(--yellow);border-color:var(--yellow);background:#ffee0015;box-shadow:0 0 6px #ffee0040}}
+  .chart-wrap{{padding:16px;background:var(--card);border-bottom:2px solid var(--border)}}
+  .chart-hdr{{font-size:.62rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em;margin-bottom:12px}}
+  .chart-inner{{position:relative;height:130px}}
+  .section{{background:var(--card);border-bottom:2px solid var(--border)}}
+  .section-hdr{{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--border)}}
+  .section-hdr h2{{font-size:.62rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em}}
+  .section-hdr a{{font-size:.62rem;color:var(--cyan);text-decoration:none;font-weight:700;letter-spacing:.06em}}
+  .tbl-wrap{{overflow-x:auto}}
+  table{{width:100%;border-collapse:collapse;font-size:.72rem}}
+  th{{padding:8px 10px;font-size:.56rem;font-weight:700;color:#888;text-transform:uppercase;
+    letter-spacing:.08em;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap;background:#0d000c}}
+  td{{padding:9px 10px;border-bottom:1px solid #ffffff05;vertical-align:middle}}
+  .sym{{font-weight:900;font-size:.8rem}}
+  .mono{{font-family:'JetBrains Mono',monospace;font-size:.68rem}}
+  .badge{{display:inline-block;padding:2px 6px;font-size:.56rem;font-weight:900;letter-spacing:.06em;border:1px solid}}
+  .badge.win{{color:var(--green);border-color:var(--green);background:#39ff1415}}
+  .badge.loss{{color:var(--pink);border-color:var(--pink);background:#ff006e15}}
+  .badge.strat{{color:var(--cyan);border-color:var(--cyan);background:#00f5ff12}}
+  .badge.exit{{color:#888;border-color:#444;background:#ffffff05}}
+  .theme-bar{{padding:10px 16px;display:flex;align-items:center;justify-content:space-between;
+    border-top:2px solid var(--border);background:var(--card)}}
+  .theme-bar span{{font-size:.6rem;color:#888;font-weight:700;text-transform:uppercase;letter-spacing:.08em}}
+  .theme-links{{display:flex;gap:6px}}
+  .theme-links a{{font-size:.6rem;font-weight:700;padding:4px 10px;text-decoration:none;border:1px solid;letter-spacing:.06em}}
+  .theme-links a.active{{background:var(--pink);color:#000;border-color:var(--pink)}}
+  .theme-links a:not(.active){{color:#888;border-color:#555}}
+  footer{{padding:14px 16px;text-align:center;font-size:.6rem;color:#444;border-top:1px solid var(--border)}}
+  footer a{{color:var(--cyan);text-decoration:none}}
+</style>
+</head>
+<body>
+  <div class="vid-wrap">
+    <video autoplay loop muted playsinline>
+      <source src="/static/header.mp4" type="video/mp4">
+    </video>
+  </div>
+  <nav>
+    <a href="/live">⚡ LIVE</a>
+    <a href="/trades">📋 TRADES</a>
+    <a href="/status">📊 STATUS</a>
+    <a href="/learn">🧠 STRAT</a>
+    <a href="https://pump.fun" target="_blank">🚀 PUMP</a>
+    <a href="https://solscan.io" target="_blank">🔍 SCAN</a>
+  </nav>
+  <div class="mode-strip">
+    <span class="left">Refreshes 30s · Goal $25k</span>
+    <span class="mode-pill">{mode}</span>
+  </div>
+  <div class="hero">
+    <div class="hero-lbl">Current Capital</div>
+    <div class="hero-cap">${cap:.2f}</div>
+    <div class="hero-pnl">{sign}${pnl:.2f} total PnL</div>
+    <div class="hero-sub">Started $39.67 &nbsp;·&nbsp; {total} trades closed</div>
+  </div>
+  <div class="grid">
+    <div class="stat">
+      <div class="lbl">Win Rate</div>
+      <div class="val" style="color:{wr_color}">{wr}%</div>
+      <div class="sub">{len(wins)}W / {total-len(wins)}L</div>
+    </div>
+    <div class="stat">
+      <div class="lbl">Trade Size</div>
+      <div class="val cyan">${trade_size():.2f}</div>
+      <div class="sub">{pct*100:.0f}% tier</div>
+    </div>
+    <div class="stat">
+      <div class="lbl">Open Now</div>
+      <div class="val {'green' if open_list else 'yellow'}">{len(open_list)}<span style="font-size:1.1rem;color:#888">/{MAX_OPEN}</span></div>
+      <div class="sub">{'active' if open_list else 'scanning'}</div>
+    </div>
+    <div class="stat">
+      <div class="lbl">USDC Locked</div>
+      <div class="val cyan">${locked:.2f}</div>
+      <div class="sub">Secured</div>
+    </div>
+    <div class="stat">
+      <div class="lbl">Today</div>
+      <div class="val yellow">{_daily_trades}<span style="font-size:1.1rem;color:#888">/{limit}</span></div>
+      <div class="sub">{_daily_wins}W {_daily_losses}L</div>
+    </div>
+    <div class="stat">
+      <div class="lbl">Next Target</div>
+      <div class="val pink">${next_m:,}</div>
+      <div class="sub">{progress_pct}% there</div>
+    </div>
+  </div>
+  <div class="prog-wrap">
+    <div class="prog-lbl"><span>MILESTONE PROGRESS</span><span style="color:var(--yellow)">{progress_pct}%</span></div>
+    <div class="prog-track"><div class="prog-fill"></div></div>
+    <div class="milestones">
+      {''.join(f'<span class="ms{" hit" if cap >= m else ""}">${m:,}</span>' for m in MILESTONES)}
+    </div>
+  </div>
+  <div class="chart-wrap">
+    <div class="chart-hdr">CAPITAL GROWTH</div>
+    <div class="chart-inner"><canvas id="capChart"></canvas></div>
+  </div>
+  {"" if not open_list else f'''<div class="section">
+    <div class="section-hdr"><h2>⚡ OPEN ({len(open_list)})</h2></div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Symbol</th><th>Strat</th><th>$</th><th>Bond</th><th>Held</th></tr></thead>
+      <tbody>{open_rows}</tbody>
+    </table></div>
+  </div>'''}
+  <div class="section">
+    <div class="section-hdr"><h2>RECENT TRADES</h2><a href="/trades">ALL →</a></div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Strat</th><th>Symbol</th><th>PnL</th><th>Exit</th><th>Hold</th></tr></thead>
+      <tbody>{rows if rows else '<tr><td colspan="5" style="text-align:center;padding:24px;color:#444">No trades yet</td></tr>'}</tbody>
+    </table></div>
+  </div>
+  <div class="theme-bar">
+    <span>Theme</span>
+    <div class="theme-links">
+      <a href="/?theme=punk" class="active">PUNK</a>
+      <a href="/?theme=classic">CLASSIC</a>
+    </div>
+  </div>
+  <footer>Boogey's Treasure Chest &nbsp;·&nbsp;
+    <a href="https://github.com/BoogeyBlues/bot.py" target="_blank">GitHub ↗</a>
+  </footer>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<script>
+const data = {cap_json};
+new Chart(document.getElementById('capChart'),{{
+  type:'line',
+  data:{{labels:data.map(d=>d.day),datasets:[{{
+    data:data.map(d=>d.cap),borderColor:'#ff006e',
+    backgroundColor:'rgba(255,0,110,0.08)',fill:true,tension:0.45,
+    pointRadius:3,pointBackgroundColor:'#ffee00',
+    pointBorderColor:'#0a0008',pointBorderWidth:2
+  }}]}},
+  options:{{responsive:true,maintainAspectRatio:false,
+    plugins:{{legend:{{display:false}},tooltip:{{backgroundColor:'#110010',
+      borderColor:'#ff006e',borderWidth:1,titleColor:'#ffee00',bodyColor:'#fff',
+      callbacks:{{label:ctx=>' $'+ctx.parsed.y.toFixed(2)}}}}}},
+    scales:{{
+      x:{{grid:{{color:'#ffffff08'}},ticks:{{color:'#666',font:{{size:9}}}}}},
+      y:{{grid:{{color:'#ffffff08'}},ticks:{{color:'#666',font:{{size:9}},callback:v=>'$'+v}}}}
+    }}
+  }}
+}});
+</script>
+</body></html>"""
+    return html, 200
+
 
 @app.route("/status/api", methods=["GET"])
 def status_api():
