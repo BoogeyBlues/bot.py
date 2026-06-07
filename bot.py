@@ -61,6 +61,9 @@ SPIKE_MAX_SECS  = int(os.environ.get("SPIKE_MAX_SECS",    "180"))   # 3 min hard
 SLIP_TRIGGER   = float(os.environ.get("SLIP_TRIGGER",  "90"))
 SLIP_DROP_TO   = float(os.environ.get("SLIP_DROP_TO",  "85"))
 SLIP_WAIT_SECS = int(os.environ.get("SLIP_WAIT_SECS",  "6"))
+
+# Trailing stop loss — activates once trade is up TSL_ACTIVATE_PCT, then trails BOND_SL_PCT below peak
+TSL_ACTIVATE_PCT = float(os.environ.get("TSL_ACTIVATE_PCT", "5"))  # lock-in starts at +5%
 SHARP_DROP_PCT = float(os.environ.get("SHARP_DROP_PCT", "4"))
 
 # Bundle mode: "avoid" or "ride"
@@ -867,8 +870,9 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
             "bond_entry":        bond_entry,
             "bond_high":         bond_entry,
             "bond_prev":         bond_entry,
-            "bond_last_moved":   time.time(),  # tracks last time bond increased
+            "bond_last_moved":   time.time(),
             "bond_slip_start":   None,
+            "price_high":        entry_price,   # trailing SL tracks peak price
             "replies":           replies,
         }
 
@@ -964,12 +968,15 @@ def monitor_loop():
                 if mint not in open_trades:
                     continue
                 if bond > open_trades[mint]["bond_high"]:
-                    open_trades[mint]["bond_high"]       = bond
-                    open_trades[mint]["bond_last_moved"]  = time.time()
+                    open_trades[mint]["bond_high"]      = bond
+                    open_trades[mint]["bond_last_moved"] = time.time()
+                if price > open_trades[mint]["price_high"]:
+                    open_trades[mint]["price_high"] = price
                 bond_high       = open_trades[mint]["bond_high"]
                 bond_prev       = open_trades[mint]["bond_prev"]
                 bond_last_moved = open_trades[mint].get("bond_last_moved", time.time())
                 slip_start      = open_trades[mint]["bond_slip_start"]
+                price_high      = open_trades[mint]["price_high"]
                 open_trades[mint]["bond_prev"] = bond
 
             bond_drop = bond - bond_prev
@@ -1008,13 +1015,22 @@ def monitor_loop():
                 exit_trade(mint, price, "STALE", bond)
                 continue
 
+            # Compute trailing SL level for all strategies
+            # Once trade is up TSL_ACTIVATE_PCT, stop trails below price_high
+            entry_gain_pct = ((price_high - trade["entry"]) / trade["entry"]) * 100
+            if entry_gain_pct >= TSL_ACTIVATE_PCT:
+                tsl_price = price_high * (1 - BOND_SL_PCT / 100)
+            else:
+                tsl_price = trade["entry"] * (1 - BOND_SL_PCT / 100)
+
             # Bond Runner exits
             if strategy == "bond":
                 if bond >= BOND_TP:
                     exit_trade(mint, price, "BOND_TP", bond)
                     continue
-                if price <= trade["entry"] * (1 - BOND_SL_PCT / 100):
-                    exit_trade(mint, price, "BOND_SL", bond)
+                if price <= tsl_price:
+                    reason = "BOND_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "BOND_SL"
+                    exit_trade(mint, price, reason, bond)
                     continue
                 if elapsed >= BOND_MAX_SECS:
                     exit_trade(mint, price, "BOND_TIME", bond)
@@ -1026,28 +1042,31 @@ def monitor_loop():
                 if move >= SPIKE_TP_PCT:
                     exit_trade(mint, price, "SPIKE_TP", bond)
                     continue
-                if move <= -SPIKE_SL_PCT:
-                    exit_trade(mint, price, "SPIKE_SL", bond)
+                if price <= tsl_price:
+                    reason = "SPIKE_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "SPIKE_SL"
+                    exit_trade(mint, price, reason, bond)
                     continue
                 if elapsed >= SPIKE_MAX_SECS:
                     exit_trade(mint, price, "SPIKE_TIME", bond)
                     continue
 
-            # Copy trade exits (price-based, same params as spike)
+            # Copy trade exits
             if strategy == "copy":
                 move = ((price - trade["entry"]) / trade["entry"]) * 100
                 if move >= COPY_TP_PCT:
                     exit_trade(mint, price, "COPY_TP", bond)
                     continue
-                if move <= -COPY_SL_PCT:
-                    exit_trade(mint, price, "COPY_SL", bond)
+                if price <= tsl_price:
+                    reason = "COPY_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "COPY_SL"
+                    exit_trade(mint, price, reason, bond)
                     continue
                 if elapsed >= COPY_MAX_SECS:
                     exit_trade(mint, price, "COPY_TIME", bond)
                     continue
 
             pct = ((price - trade["entry"]) / trade["entry"]) * 100
-            log("info", f"[{strategy}] bond={bond:.1f}% price={pct:+.1f}% {elapsed/60:.1f}m", symbol)
+            tsl_info = f" TSL@{tsl_price:.6f}" if entry_gain_pct >= TSL_ACTIVATE_PCT else ""
+            log("info", f"[{strategy}] bond={bond:.1f}% price={pct:+.1f}% peak={entry_gain_pct:+.1f}%{tsl_info} {elapsed/60:.1f}m", symbol)
 
 # ── COPY TRADING ─────────────────────────────────────────────────
 def fetch_smart_wallets():
@@ -1328,12 +1347,168 @@ def home():
     with capital_lock:
         cap = capital
     with trades_lock:
-        n = len(open_trades)
+        open_list = list(open_trades.values())
     with usdc_lock:
         locked = usdc_locked
-    return (f"PumpFun Sniper | Capital:${cap:.2f} | "
-            f"USDC locked:${locked:.2f} | Trade:${trade_size():.2f} | "
-            f"Open:{n}/{MAX_OPEN} | {'PAPER' if PAPER_MODE else 'LIVE'}"), 200
+    wins  = [t for t in completed_trades if t["pnl"] > 0]
+    total = len(completed_trades)
+    wr    = round(len(wins) / max(total, 1) * 100, 1)
+    pnl   = sum(t["pnl"] for t in completed_trades)
+    mode  = "PAPER" if PAPER_MODE else "LIVE"
+    mode_color = "#f59e0b" if PAPER_MODE else "#22c55e"
+    pct, limit = _cap_tier(cap)
+    next_m = next((m for m in MILESTONES if m > cap), None)
+    progress_pct = min(round(cap / max(next_m, 1) * 100, 1), 100) if next_m else 100
+
+    # Capital history for chart — build from week logs + today
+    cap_points = [{"day": d["date"][-5:], "cap": round(d["capital"], 2)} for d in _week_day_logs[-14:]]
+    cap_points.append({"day": "Today", "cap": round(cap, 2)})
+    cap_json = json.dumps(cap_points)
+
+    # Recent trades table rows
+    recent = list(reversed(completed_trades[-20:]))
+    rows = ""
+    for t in recent:
+        color = "#22c55e" if t["pnl"] >= 0 else "#ef4444"
+        sign  = "+" if t["pnl"] >= 0 else ""
+        rows += (f'<tr><td>{t["time"]}</td><td>{t["symbol"]}</td>'
+                 f'<td>{t["strategy"].upper()}</td>'
+                 f'<td style="color:{color};font-weight:600">{sign}${t["pnl"]:.4f}</td>'
+                 f'<td>{t["result"]}</td>'
+                 f'<td>{t["hold_m"]:.1f}m</td></tr>')
+
+    # Open trades rows
+    open_rows = ""
+    for t in open_list:
+        elapsed = round((time.time() - t["opened_at"]) / 60, 1)
+        open_rows += (f'<tr><td>{t["symbol"]}</td><td>{t["strategy"].upper()}</td>'
+                      f'<td>${t["amount"]:.2f}</td><td>{t.get("bond_entry",0):.1f}%</td>'
+                      f'<td>{elapsed}m</td></tr>')
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="30">
+<title>PumpFun Sniper</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<style>
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  body{{background:#0f0f0f;color:#e5e5e5;font-family:'Segoe UI',sans-serif;padding:20px}}
+  h1{{font-size:1.4rem;font-weight:700;margin-bottom:4px;color:#fff}}
+  .subtitle{{color:#71717a;font-size:.85rem;margin-bottom:24px}}
+  .cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:24px}}
+  .card{{background:#1c1c1e;border-radius:12px;padding:16px}}
+  .card .label{{font-size:.75rem;color:#71717a;text-transform:uppercase;letter-spacing:.05em}}
+  .card .value{{font-size:1.6rem;font-weight:700;margin-top:4px}}
+  .card .sub{{font-size:.75rem;color:#a1a1aa;margin-top:2px}}
+  .green{{color:#22c55e}} .red{{color:#ef4444}} .yellow{{color:#f59e0b}} .blue{{color:#3b82f6}}
+  .mode-badge{{display:inline-block;padding:2px 10px;border-radius:999px;font-size:.75rem;
+    font-weight:700;background:{mode_color}22;color:{mode_color};border:1px solid {mode_color}44}}
+  .section{{background:#1c1c1e;border-radius:12px;padding:16px;margin-bottom:16px}}
+  .section h2{{font-size:.85rem;color:#71717a;text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px}}
+  .progress-bar{{background:#27272a;border-radius:999px;height:8px;margin:8px 0 4px}}
+  .progress-fill{{background:linear-gradient(90deg,#3b82f6,#8b5cf6);height:8px;border-radius:999px;
+    width:{progress_pct}%;transition:width .5s}}
+  table{{width:100%;border-collapse:collapse;font-size:.8rem}}
+  th{{text-align:left;color:#71717a;font-weight:500;padding:4px 8px;border-bottom:1px solid #27272a}}
+  td{{padding:6px 8px;border-bottom:1px solid #1a1a1a}}
+  .chart-wrap{{position:relative;height:180px}}
+  @media(max-width:600px){{.cards{{grid-template-columns:1fr 1fr}}}}
+</style>
+</head>
+<body>
+<h1>PumpFun Sniper &nbsp;<span class="mode-badge">{mode}</span></h1>
+<p class="subtitle">Auto-refreshes every 30s &nbsp;·&nbsp; Goal: $25,000 &nbsp;·&nbsp; Retuning every {ANALYZE_EVERY} trades</p>
+
+<div class="cards">
+  <div class="card">
+    <div class="label">Capital</div>
+    <div class="value green">${cap:.2f}</div>
+    <div class="sub">Started $39.67</div>
+  </div>
+  <div class="card">
+    <div class="label">Total PnL</div>
+    <div class="value {'green' if pnl>=0 else 'red'}">{'+' if pnl>=0 else ''}${pnl:.2f}</div>
+    <div class="sub">{total} trades closed</div>
+  </div>
+  <div class="card">
+    <div class="label">Win Rate</div>
+    <div class="value {'green' if wr>=50 else 'yellow'}">{wr}%</div>
+    <div class="sub">{len(wins)}W / {total-len(wins)}L</div>
+  </div>
+  <div class="card">
+    <div class="label">Trade Size</div>
+    <div class="value blue">${trade_size():.2f}</div>
+    <div class="sub">{pct*100:.0f}% · {_daily_trades}/{limit} today</div>
+  </div>
+  <div class="card">
+    <div class="label">Open Trades</div>
+    <div class="value">{len(open_list)}/{MAX_OPEN}</div>
+    <div class="sub">{'Active' if open_list else 'Scanning...'}</div>
+  </div>
+  <div class="card">
+    <div class="label">USDC Locked</div>
+    <div class="value blue">${locked:.2f}</div>
+    <div class="sub">Profit secured</div>
+  </div>
+</div>
+
+<div class="section">
+  <h2>Progress → Next milestone ${next_m:,}</h2>
+  <div class="progress-bar"><div class="progress-fill"></div></div>
+  <div style="font-size:.75rem;color:#71717a">${cap:.2f} / ${next_m:,} &nbsp;({progress_pct}%)</div>
+</div>
+
+<div class="section">
+  <h2>Capital Growth</h2>
+  <div class="chart-wrap">
+    <canvas id="capChart"></canvas>
+  </div>
+</div>
+
+{"" if not open_list else f'''<div class="section"><h2>Open Trades ({len(open_list)})</h2>
+<table><thead><tr><th>Symbol</th><th>Strategy</th><th>Size</th><th>Bond In</th><th>Held</th></tr></thead>
+<tbody>{open_rows}</tbody></table></div>'''}
+
+<div class="section">
+  <h2>Recent Trades</h2>
+  <table>
+    <thead><tr><th>Time</th><th>Symbol</th><th>Strategy</th><th>PnL</th><th>Exit</th><th>Hold</th></tr></thead>
+    <tbody>{rows if rows else '<tr><td colspan="6" style="color:#71717a;text-align:center;padding:20px">No trades yet</td></tr>'}</tbody>
+  </table>
+</div>
+
+<script>
+const data = {cap_json};
+new Chart(document.getElementById('capChart'), {{
+  type: 'line',
+  data: {{
+    labels: data.map(d => d.day),
+    datasets: [{{
+      data: data.map(d => d.cap),
+      borderColor: '#3b82f6',
+      backgroundColor: 'rgba(59,130,246,0.1)',
+      fill: true,
+      tension: 0.4,
+      pointRadius: 4,
+      pointBackgroundColor: '#3b82f6',
+    }}]
+  }},
+  options: {{
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {{ legend: {{ display: false }} }},
+    scales: {{
+      x: {{ grid: {{ color: '#27272a' }}, ticks: {{ color: '#71717a' }} }},
+      y: {{ grid: {{ color: '#27272a' }}, ticks: {{ color: '#71717a', callback: v => '$'+v }} }}
+    }}
+  }}
+}});
+</script>
+</body></html>"""
+    return html, 200
 
 @app.route("/status", methods=["GET"])
 def status():
