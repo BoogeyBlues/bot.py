@@ -976,6 +976,12 @@ def trades_api():
         return jsonify(list(_trades))
 
 
+@app.route("/logs/api", methods=["GET"])
+def logs_api():
+    with _log_lock:
+        return jsonify(list(_log_buffer))
+
+
 @app.route("/api/manual-long/<market>", methods=["POST"])
 def manual_long(market):
     market = market.upper()
@@ -1044,6 +1050,271 @@ def manual_close(market):
     return jsonify({"msg": f"Closed {market} position @ ${price:.4f}"})
 
 
+def run_position_price_updater():
+    while True:
+        try:
+            with _state_lock:
+                markets = list(_positions.keys())
+            for market in markets:
+                price = get_market_price(market)
+                if price:
+                    with _state_lock:
+                        if market in _positions:
+                            pos = _positions[market]
+                            raw_pct = (price - pos["entry"]) / pos["entry"] * (1 if pos["side"] == "long" else -1)
+                            _positions[market]["pnl"] = raw_pct * pos["size"] * pos["leverage"]
+                            _positions[market]["current_price"] = price
+        except Exception as e:
+            log("warn", f"Price updater error: {e}")
+        time.sleep(5)
+
+
+@app.route("/monitor", methods=["GET"])
+def monitor():
+    mode = "PAPER" if DRIFT_PAPER_MODE else "LIVE"
+    mode_color = "#ffee00" if DRIFT_PAPER_MODE else "#39ff14"
+    markets_list = [m.strip().upper() for m in DRIFT_MARKETS.split(",")]
+    close_btns = "".join(
+        f'<option value="{m}">{m}</option>' for m in markets_list
+    )
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Monitor — {DRIFT_BOT_NAME}</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
+*{{box-sizing:border-box;margin:0;padding:0}}
+:root{{--cyan:#00e5ff;--green:#00ff88;--red:#ff3355;--yellow:#ffee00;--bg:#050a14;--card:#0a1220;--border:#ffffff15}}
+body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh}}
+nav{{display:flex;border-bottom:2px solid var(--cyan);overflow-x:auto;scrollbar-width:none}}
+nav a{{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;border-right:1px solid var(--border);transition:background .15s}}
+nav a:hover,nav a.active{{background:var(--cyan);color:#000}}
+.strip{{background:var(--card);border-bottom:2px solid var(--border);padding:5px 16px;display:flex;justify-content:space-between;align-items:center}}
+.strip-left{{font-size:.6rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em}}
+.pill{{font-size:.65rem;font-weight:900;padding:3px 10px;background:{mode_color};color:#000}}
+.dot{{display:inline-block;width:6px;height:6px;border-radius:50%;background:{mode_color};margin-right:5px;animation:pulse 2s infinite}}
+@keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.4}}}}
+.section{{margin-bottom:2px;background:var(--card)}}
+.sec-hdr{{padding:10px 16px;border-bottom:1px solid var(--border);font-size:.6rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em;display:flex;justify-content:space-between;align-items:center}}
+.sec-hdr span{{color:var(--cyan)}}
+.pos-card{{padding:14px 16px;border-bottom:1px solid var(--border)}}
+.pos-top{{display:flex;align-items:baseline;gap:10px;margin-bottom:6px}}
+.pos-sym{{font-family:'Bebas Neue',sans-serif;font-size:1.4rem;color:var(--cyan)}}
+.pos-side{{font-size:.68rem;font-weight:900;padding:2px 7px;border:1px solid}}
+.pos-pnl{{font-family:'JetBrains Mono',monospace;font-size:1.1rem;font-weight:700;margin-left:auto}}
+.pos-meta{{display:grid;grid-template-columns:1fr 1fr;gap:3px 12px;font-size:.62rem;color:#666;font-family:'JetBrains Mono',monospace;margin-bottom:10px}}
+.pos-meta b{{color:#aaa;font-weight:400}}
+canvas{{width:100%!important;display:block;margin-bottom:10px}}
+.close-btn{{width:100%;padding:9px;background:transparent;border:1px solid var(--red);color:var(--red);font-size:.65rem;font-weight:900;letter-spacing:.08em;cursor:pointer;text-transform:uppercase;transition:all .15s}}
+.close-btn:hover{{background:var(--red);color:#fff}}
+.empty{{text-align:center;padding:30px 16px;color:#444;font-size:.75rem}}
+.log-box{{height:220px;overflow-y:auto;padding:10px 16px;font-family:'JetBrains Mono',monospace;font-size:.62rem;line-height:1.7;background:#040810}}
+.log-ok{{color:#00ff88}}.log-err{{color:#ff3355}}.log-warn{{color:#ffee00}}.log-info{{color:#888}}
+.trade-row{{display:grid;grid-template-columns:2fr 1fr 1fr 1.2fr 1fr;gap:4px;padding:8px 16px;border-bottom:1px solid var(--border);font-size:.65rem;font-family:'JetBrains Mono',monospace;align-items:center}}
+.trade-row.hdr{{font-size:.56rem;color:#666;font-weight:700;text-transform:uppercase;letter-spacing:.06em;padding:7px 16px;background:#080f1a}}
+.badge{{display:inline-block;padding:1px 5px;font-size:.54rem;font-weight:900;border:1px solid}}
+.badge.win{{color:var(--green);border-color:var(--green)}}.badge.loss{{color:var(--red);border-color:var(--red)}}
+</style>
+</head>
+<body>
+<nav>
+  <a href="/">HOME</a>
+  <a href="/monitor" class="active">MONITOR</a>
+  <a href="/trades">TRADES</a>
+  <a href="/status/api" target="_blank">API ↗</a>
+  <a href="https://drift.trade" target="_blank">DRIFT ↗</a>
+</nav>
+<div class="strip">
+  <span class="strip-left"><span class="dot"></span>LIVE MONITOR</span>
+  <span class="pill">{mode}</span>
+</div>
+
+<div class="section">
+  <div class="sec-hdr">OPEN POSITIONS <span id="pos-count">0</span></div>
+  <div id="pos-wrap"><div class="empty" id="no-pos">Scanning for signals...</div></div>
+</div>
+
+<div class="section">
+  <div class="sec-hdr">RECENT TRADES <span id="trade-count">0</span></div>
+  <div class="trade-row hdr"><span>MARKET</span><span>SIDE</span><span>PNL</span><span>RESULT</span><span>TIME</span></div>
+  <div id="trades-wrap"><div class="empty">No trades yet</div></div>
+</div>
+
+<div class="section">
+  <div class="sec-hdr">LOG FEED <span id="log-ts"></span></div>
+  <div class="log-box" id="log-box">Connecting...</div>
+</div>
+
+<script>
+const charts = {{}};
+const pnlHist = {{}};
+
+async function poll() {{
+  try {{
+    const d = await fetch('/status/api').then(r => r.json());
+    const pos = d.positions || {{}};
+    const keys = Object.keys(pos);
+
+    document.getElementById('pos-count').textContent = keys.length;
+
+    const wrap = document.getElementById('pos-wrap');
+    const noPos = document.getElementById('no-pos');
+    noPos.style.display = keys.length ? 'none' : 'block';
+
+    // Add / update position cards
+    keys.forEach(market => {{
+      const p = pos[market];
+      const pnl = p.pnl || 0;
+      const cur = p.current_price || p.entry;
+
+      if (!pnlHist[market]) pnlHist[market] = [];
+      pnlHist[market].push(pnl);
+      if (pnlHist[market].length > 120) pnlHist[market].shift();
+
+      let card = document.getElementById('pc-' + market);
+      if (!card) {{
+        card = document.createElement('div');
+        card.id = 'pc-' + market;
+        card.className = 'pos-card';
+        card.innerHTML = cardHTML(market, p);
+        wrap.appendChild(card);
+        setTimeout(() => initChart(market), 50);
+      }} else {{
+        const pnlEl = document.getElementById('pp-' + market);
+        const curEl = document.getElementById('pc2-' + market);
+        const c = pnl >= 0 ? '#00ff88' : '#ff3355';
+        if (pnlEl) {{ pnlEl.textContent = (pnl>=0?'+':'') + '$' + pnl.toFixed(2); pnlEl.style.color = c; }}
+        if (curEl) curEl.textContent = '$' + cur.toFixed(4);
+        updateChart(market, pnl);
+      }}
+    }});
+
+    // Remove closed
+    document.querySelectorAll('.pos-card').forEach(el => {{
+      const m = el.id.replace('pc-','');
+      if (!pos[m]) {{ if(charts[m]){{charts[m].destroy();delete charts[m];}} delete pnlHist[m]; el.remove(); }}
+    }});
+
+  }} catch(e) {{ console.error(e); }}
+}}
+
+async function pollTrades() {{
+  try {{
+    const trades = await fetch('/trades/api').then(r => r.json());
+    document.getElementById('trade-count').textContent = trades.length;
+    const wrap = document.getElementById('trades-wrap');
+    if (!trades.length) {{ wrap.innerHTML = '<div class="empty">No trades yet</div>'; return; }}
+    wrap.innerHTML = trades.slice(0,15).map(t => {{
+      const sc = t.side==='long' ? '#00ff88' : '#ff3355';
+      const pc = t.pnl>=0 ? '#00ff88' : '#ff3355';
+      const badge = t.pnl>=0 ? 'win' : 'loss';
+      return `<div class="trade-row">
+        <span style="color:var(--cyan);font-weight:900">${{t.market}}</span>
+        <span style="color:${{sc}}">${{t.side.toUpperCase()}}</span>
+        <span style="color:${{pc}}">${{t.pnl>=0?'+':''}}$${{t.pnl.toFixed(2)}}</span>
+        <span><span class="badge ${{badge}}">${{t.reason}}</span></span>
+        <span style="color:#666">${{t.ts.slice(-5)}}</span>
+      </div>`;
+    }}).join('');
+  }} catch(e) {{}}
+}}
+
+async function pollLogs() {{
+  try {{
+    const d = await fetch('/logs/api').then(r => r.json());
+    const box = document.getElementById('log-box');
+    document.getElementById('log-ts').textContent = new Date().toLocaleTimeString();
+    box.innerHTML = d.slice().reverse().map(l => {{
+      const cls = l.tag==='ok'?'log-ok':l.tag==='err'?'log-err':l.tag==='warn'?'log-warn':'log-info';
+      const sym = l.sym ? ' ['+l.sym+']' : '';
+      return `<div class="${{cls}}">[${{l.time}}]${{sym}} ${{l.msg}}</div>`;
+    }}).join('');
+    box.scrollTop = 0;
+  }} catch(e) {{}}
+}}
+
+function cardHTML(market, p) {{
+  const side = p.side || 'long';
+  const sc = side==='long' ? '#00ff88' : '#ff3355';
+  const pnl = p.pnl || 0;
+  const pc = pnl>=0 ? '#00ff88' : '#ff3355';
+  const cur = p.current_price || p.entry;
+  return `
+    <div class="pos-top">
+      <span class="pos-sym">${{market}}-PERP</span>
+      <span class="pos-side" style="color:${{sc}};border-color:${{sc}}">${{side.toUpperCase()}}</span>
+      <span class="pos-pnl" id="pp-${{market}}" style="color:${{pc}}">${{pnl>=0?'+':''}}$${{pnl.toFixed(2)}}</span>
+    </div>
+    <div class="pos-meta">
+      <span><b>Entry</b> $${{(p.entry||0).toFixed(4)}}</span>
+      <span><b>Current</b> <span id="pc2-${{market}}">$${{cur.toFixed(4)}}</span></span>
+      <span><b>TP</b> <span style="color:#00ff88">$${{(p.tp||0).toFixed(4)}}</span></span>
+      <span><b>SL</b> <span style="color:#ff3355">$${{(p.sl||0).toFixed(4)}}</span></span>
+      <span><b>Size</b> $${{(p.size||0).toFixed(2)}}</span>
+      <span><b>Leverage</b> ${{p.leverage||3}}x</span>
+    </div>
+    <canvas id="chart-${{market}}" height="80"></canvas>
+    <button class="close-btn" onclick="closePos('${{market}}')">✕ CLOSE ${{market}}</button>
+  `;
+}}
+
+function initChart(market) {{
+  const el = document.getElementById('chart-' + market);
+  if (!el || charts[market]) return;
+  charts[market] = new Chart(el.getContext('2d'), {{
+    type: 'line',
+    data: {{
+      labels: [],
+      datasets: [{{
+        data: [],
+        borderColor: '#00e5ff',
+        backgroundColor: 'rgba(0,229,255,0.07)',
+        borderWidth: 2, pointRadius: 0, tension: 0.4, fill: true
+      }}]
+    }},
+    options: {{
+      responsive: true, animation: {{duration:300}},
+      plugins: {{ legend: {{display:false}}, tooltip: {{ callbacks: {{ label: c => (c.parsed.y>=0?'+':'')+'$'+c.parsed.y.toFixed(2) }} }} }},
+      scales: {{
+        x: {{display:false}},
+        y: {{ grid:{{color:'#ffffff10'}}, ticks:{{color:'#555',font:{{size:9}},callback:v=>'$'+v.toFixed(2)}} }}
+      }}
+    }}
+  }});
+  updateChart(market, pnlHist[market]?.slice(-1)[0] || 0);
+}}
+
+function updateChart(market, latestPnl) {{
+  const c = charts[market];
+  if (!c) return;
+  const hist = pnlHist[market] || [];
+  const color = latestPnl >= 0 ? '#00ff88' : '#ff3355';
+  c.data.labels = hist.map((_,i) => i);
+  c.data.datasets[0].data = hist;
+  c.data.datasets[0].borderColor = color;
+  c.data.datasets[0].backgroundColor = latestPnl>=0 ? 'rgba(0,255,136,0.07)' : 'rgba(255,51,85,0.07)';
+  c.update('none');
+}}
+
+function closePos(market) {{
+  if (!confirm('Close ' + market + '?')) return;
+  fetch('/api/close/' + market, {{method:'POST'}})
+    .then(r=>r.json()).then(d=>alert(d.msg||d.error)).catch(e=>alert(e));
+}}
+
+poll();
+pollTrades();
+pollLogs();
+setInterval(poll, 3000);
+setInterval(pollTrades, 5000);
+setInterval(pollLogs, 4000);
+</script>
+</body></html>"""
+
+
 # ── ENTRY POINT ───────────────────────────────────────────────────
 if __name__ == "__main__":
     if not DRIFT_PAPER_MODE:
@@ -1060,6 +1331,9 @@ if __name__ == "__main__":
 
     t_trade = threading.Thread(target=run_trading_loop, daemon=True)
     t_trade.start()
+
+    t_prices = threading.Thread(target=run_position_price_updater, daemon=True)
+    t_prices.start()
 
     notify(
         f"*{DRIFT_BOT_NAME}* started\n"
