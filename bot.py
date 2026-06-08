@@ -91,6 +91,12 @@ COPY_SL_PCT       = float(os.environ.get("COPY_SL_PCT",       "15"))
 COPY_MAX_SECS     = int(os.environ.get("COPY_MAX_SECS",       "180"))
 GMGN_RANK         = "https://gmgn.ai/defi/quotation/v1/rank/sol/wallets/7d"
 GMGN_ACTIVITY     = "https://gmgn.ai/defi/quotation/v1/wallet_activity/sol"
+GMGN_API_KEY       = os.environ.get("GMGN_API_KEY", "")
+GMGN_TOP_HOLDERS   = "https://gmgn.ai/defi/quotation/v1/tokens/top_holders/sol"
+GMGN_CREATED_TOKENS= "https://gmgn.ai/defi/quotation/v1/portfolio/sol"
+GMGN_SIGNALS_URL   = "https://gmgn.ai/defi/quotation/v1/signals/sol"
+GMGN_KOL_TRACK     = "https://gmgn.ai/defi/quotation/v1/tracks/kol/sol"
+GMGN_SM_TRACK      = "https://gmgn.ai/defi/quotation/v1/tracks/smartmoney/sol"
 
 # Notifications
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
@@ -146,6 +152,11 @@ _copied_mints     = {}   # mint -> timestamp, to avoid double-copy
 _copy_lock        = threading.Lock()
 _gmgn_backoff     = 0    # seconds to wait before retrying GMGN rank
 _sold_mints       = {}   # mint -> timestamp, cooldown after selling to prevent re-buy
+_gmgn_sm_signal_mints  = set()   # smart money buy signal mints (type 12)
+_gmgn_surge_mints      = set()   # price surge signal mints (type 6)
+_gmgn_kol_mints        = set()   # KOL buy mints
+_gmgn_signal_time      = 0.0     # last signal refresh time
+_signal_lock           = threading.Lock()
 
 # ── LOGGING ─────────────────────────────────────────────────────
 def log(tag, msg, symbol=""):
@@ -726,6 +737,115 @@ def run_rugcheck(mint):
         }
     except Exception:
         return None
+
+def check_holder_concentration(mint) -> tuple:
+    """(ok, reason) — ok=False if top-10 wallets hold >60% of supply."""
+    try:
+        hdrs = {"User-Agent":"Mozilla/5.0","Referer":"https://gmgn.ai/","Origin":"https://gmgn.ai"}
+        r = _session.get(f"{GMGN_TOP_HOLDERS}/{mint}", headers=hdrs, params={"limit":10}, timeout=8)
+        if r.status_code != 200:
+            return True, ""
+        data = r.json().get("data") or {}
+        holders = data.get("holders") or data if isinstance(data, list) else []
+        top10_pct = sum(float(h.get("amount_percentage") or h.get("percent") or 0) for h in holders[:10])
+        if top10_pct > 60:
+            return False, f"top10={top10_pct:.0f}%"
+        return True, ""
+    except Exception:
+        return True, ""
+
+def check_dev_history(dev_wallet) -> tuple:
+    """(ok, reason) — ok=False if dev has 2+ tokens that rugged (>95% drop from ATH)."""
+    if not dev_wallet:
+        return True, ""
+    try:
+        hdrs = {"User-Agent":"Mozilla/5.0","Referer":"https://gmgn.ai/","Origin":"https://gmgn.ai"}
+        r = _session.get(
+            f"{GMGN_CREATED_TOKENS}/{dev_wallet}/created_tokens",
+            headers=hdrs, params={"order_by":"token_ath_mc","direction":"desc","limit":20}, timeout=8)
+        if r.status_code != 200:
+            return True, ""
+        raw = r.json().get("data") or {}
+        tokens = raw.get("tokens") or (raw if isinstance(raw, list) else [])
+        rugs = sum(
+            1 for t in tokens
+            if float(t.get("token_ath_mc") or 0) > 50_000
+            and float(t.get("market_cap") or 0) < float(t.get("token_ath_mc") or 1) * 0.05
+        )
+        if rugs >= 2:
+            return False, f"dev rugged {rugs}x"
+        return True, ""
+    except Exception:
+        return True, ""
+
+def _refresh_gmgn_signals():
+    """Refresh smart-money / KOL signal mint sets. Runs periodically in background."""
+    global _gmgn_sm_signal_mints, _gmgn_surge_mints, _gmgn_kol_mints, _gmgn_signal_time
+    try:
+        hdrs = {"Referer":"https://gmgn.ai/","Origin":"https://gmgn.ai"}
+        if GMGN_API_KEY:
+            hdrs["Authorization"] = f"Bearer {GMGN_API_KEY}"
+
+        def _fetch_signal(stype):
+            r = _session.get(GMGN_SIGNALS_URL, headers=hdrs,
+                             params={"signal_type": stype, "chain":"sol","limit":100}, timeout=8)
+            if r.status_code == 200:
+                items = r.json().get("data") or []
+                return {i.get("address") or i.get("mint","") for i in items if i.get("address") or i.get("mint")}
+            return set()
+
+        sm  = _fetch_signal(12)   # smart money buy
+        srg = _fetch_signal(6)    # price surge
+
+        # KOL buys
+        kol = set()
+        if GMGN_API_KEY:
+            r2 = _session.get(GMGN_KOL_TRACK, headers=hdrs,
+                              params={"side":"buy","limit":50}, timeout=8)
+            if r2.status_code == 200:
+                kol = {i.get("token_address") or i.get("mint","") for i in (r2.json().get("data") or [])}
+
+        # smart-money sell exits (for sell signal)
+        sm_sell = set()
+        r3 = _session.get(GMGN_SM_TRACK, headers={**hdrs},
+                          params={"side":"sell","limit":50}, timeout=8)
+        if r3.status_code == 200:
+            sm_sell = {i.get("token_address") or i.get("mint","") for i in (r3.json().get("data") or [])}
+
+        with _signal_lock:
+            _gmgn_sm_signal_mints = sm
+            _gmgn_surge_mints     = srg
+            _gmgn_kol_mints       = kol | sm_sell  # kol_mints doubles as "smart money sell" set for exit
+            _gmgn_signal_time     = time.time()
+            if sm or srg or kol:
+                log("info", f"GMGN signals: sm_buy={len(sm)} surge={len(srg)} kol={len(kol)} sm_sell={len(sm_sell)}", "GMGN")
+    except Exception as e:
+        log("warn", f"GMGN signal refresh error: {e}", "GMGN")
+
+def run_signal_refresh_loop():
+    """Background thread: refresh GMGN signals every 5 minutes."""
+    while True:
+        _refresh_gmgn_signals()
+        time.sleep(300)
+
+def gmgn_signal_score(mint) -> int:
+    """
+    Returns 0-3 signal score for a mint:
+      +1 if in smart money buy signal set
+      +1 if in price surge set
+      +1 if in KOL buy set
+    """
+    with _signal_lock:
+        return (
+            (1 if mint in _gmgn_sm_signal_mints else 0) +
+            (1 if mint in _gmgn_surge_mints else 0) +
+            (1 if mint in _gmgn_kol_mints else 0)
+        )
+
+def gmgn_smart_money_selling(mint) -> bool:
+    """Returns True if smart money is actively selling this mint."""
+    with _signal_lock:
+        return mint in _gmgn_kol_mints  # kol_mints includes sm_sell mints
 
 # ── USDC PROFIT LOCK ─────────────────────────────────────────────
 def lock_profit_to_usdc(profit_usd):
@@ -3556,6 +3676,8 @@ if __name__ == "__main__":
     threading.Thread(target=daily_summary_loop, daemon=True).start()
     if COPY_TRADE:
         threading.Thread(target=copy_trade_loop, daemon=True).start()
+    t_signals = threading.Thread(target=run_signal_refresh_loop, daemon=True)
+    t_signals.start()
     port = int(os.environ.get("PORT", 5000))
     log("ok", "=" * 55)
     log("ok", f"Mode      : {'PAPER' if PAPER_MODE else 'LIVE'}")
