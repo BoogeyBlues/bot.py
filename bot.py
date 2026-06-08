@@ -2733,6 +2733,36 @@ document.addEventListener('keydown', e => {{ if(e.key==='Escape') closeModal(); 
 def get_log():
     return jsonify({"logs": trade_log[-100:]})
 
+@app.route("/scan-debug", methods=["GET"])
+def scan_debug():
+    coins = get_pumpfun_coins()
+    if not coins:
+        return jsonify({"error": "PumpFun API returned no coins", "fetched": 0})
+    results = []
+    for coin in coins[:20]:
+        mint   = coin["mint"]
+        symbol = coin["symbol"]
+        bond   = coin.get("bond_pct", 0)
+        has_social = bool(coin.get("twitter") or coin.get("telegram"))
+        last_trade = coin.get("last_trade", 0)
+        secs_since = round((time.time() - last_trade / 1000)) if last_trade > 0 else 9999
+        in_bond_range = BOND_ENTRY_MIN <= bond <= BOND_ENTRY_MAX
+        results.append({
+            "symbol": symbol, "bond": bond,
+            "social": has_social,
+            "secs_since_trade": secs_since,
+            "in_bond_range": in_bond_range,
+            "pass": has_social and secs_since <= 300 and in_bond_range,
+        })
+    passing = [r for r in results if r["pass"]]
+    return jsonify({
+        "fetched": len(coins),
+        "bond_range": f"{BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%",
+        "passing_all_filters": len(passing),
+        "sample": results,
+    })
+
+
 @app.route("/live/api", methods=["GET"])
 def live_api():
     """Polled every 3s by the live page — returns open trades + recent events."""
