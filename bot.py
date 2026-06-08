@@ -31,16 +31,16 @@ FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "0"))  # 0 = use ti
 _CAP_TIERS = [
     (5_000, 0.18, 20),
     (  500, 0.15, 15),
-    (  100, 0.12, 10),
-    (    0, 0.08,  6),
+    (  100, 0.12, 12),
+    (    0, 0.08, 12),
 ]
 
 MAX_DAILY_LOSS_PCT = float(os.environ.get("MAX_DAILY_LOSS_PCT", "20"))  # stop day if down >20% of start capital
 
 # Risk limits
-DAILY_LOSS_MAX    = int(os.environ.get("DAILY_LOSS_MAX",  "3"))   # cooldown after N consecutive losses
-LOSS_COOLDOWN_HRS = int(os.environ.get("LOSS_COOLDOWN_HRS", "4")) # hours to pause + retune
-ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "10"))  # retune after every N completed trades
+DAILY_LOSS_MAX    = int(os.environ.get("DAILY_LOSS_MAX",  "3"))   # retune after N consecutive losses
+LOSS_COOLDOWN_HRS = float(os.environ.get("LOSS_COOLDOWN_HRS", "0.5")) # 30-min pause then resume
+ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # retune every 5 trades for faster learning
 
 # Bond Runner strategy
 BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "58"))
@@ -99,7 +99,7 @@ MIN_REPLIES  = int(os.environ.get("MIN_REPLIES",  "10"))
 MIN_LIQ      = float(os.environ.get("MIN_LIQ",    "500"))
 
 # General
-MAX_OPEN      = int(os.environ.get("MAX_OPEN",      "3"))
+MAX_OPEN      = int(os.environ.get("MAX_OPEN",      "4"))
 SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "10"))
 
 SOL_RPC     = "https://api.mainnet-beta.solana.com"
@@ -322,9 +322,9 @@ def record_daily_trade(won):
             resume_ts   = time.time() + LOSS_COOLDOWN_HRS * 3600
             _pause_until = resume_ts
             resume_str   = time.strftime("%H:%M", time.localtime(resume_ts))
-            log("warn", f"{_daily_losses} losses — cooling down {LOSS_COOLDOWN_HRS}h. Resumes {resume_str}")
-            notify("🔧 Cooling Down",
-                   f"{_daily_losses} losses hit.\nPausing {LOSS_COOLDOWN_HRS}h to retune.\nResumes: {resume_str}")
+            log("warn", f"{_daily_losses} losses — pausing 30min to retune. Resumes {resume_str}")
+            notify("🔧 Retuning",
+                   f"{_daily_losses} losses hit.\nPausing 30min, retuning strategy.\nResumes: {resume_str}")
             threading.Thread(target=_retune_strategies, daemon=True).start()
     _save_daily_state()
 
