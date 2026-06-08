@@ -1352,6 +1352,49 @@ def scanner_loop():
         time.sleep(SCAN_INTERVAL)
 
 # ── FLASK ENDPOINTS ───────────────────────────────────────────────
+
+_CURSOR = """<style>
+@media(pointer:fine){*{cursor:none!important}}
+#px-cur{position:fixed;pointer-events:none;z-index:99999;width:4px;height:4px;
+  background:#ff006e;transform:translate(-2px,-2px);
+  animation:px-walk .35s steps(1) infinite}
+@keyframes px-walk{
+  0%,100%{box-shadow:
+    8px 0 0 #ff006e,12px 0 0 #ff006e,
+    8px 4px 0 #ff006e,12px 4px 0 #ff006e,
+    4px 8px 0 #ff006e,8px 8px 0 #ff006e,12px 8px 0 #ff006e,16px 8px 0 #ff006e,
+    8px 12px 0 #ff006e,12px 12px 0 #ff006e,
+    8px 16px 0 #ff006e,12px 16px 0 #ff006e,
+    4px 20px 0 #ff006e,16px 20px 0 #ff006e,
+    0px 24px 0 #ff006e,20px 24px 0 #ff006e}
+  50%{box-shadow:
+    8px 0 0 #ff006e,12px 0 0 #ff006e,
+    8px 4px 0 #ff006e,12px 4px 0 #ff006e,
+    4px 8px 0 #ff006e,8px 8px 0 #ff006e,12px 8px 0 #ff006e,16px 8px 0 #ff006e,
+    8px 12px 0 #ff006e,12px 12px 0 #ff006e,
+    8px 16px 0 #ff006e,12px 16px 0 #ff006e,
+    8px 20px 0 #ff006e,12px 20px 0 #ff006e,
+    4px 24px 0 #ff006e,16px 24px 0 #ff006e}
+}
+</style>
+<script>
+(function(){
+  var c=document.createElement('div');c.id='px-cur';
+  document.body.appendChild(c);
+  document.addEventListener('mousemove',function(e){
+    c.style.left=e.clientX+'px';c.style.top=e.clientY+'px';
+  });
+})();
+</script>"""
+
+@app.after_request
+def _inject_cursor(resp):
+    if 'text/html' in resp.content_type:
+        html = resp.get_data(as_text=True)
+        if '</body>' in html:
+            resp.set_data(html.replace('</body>', _CURSOR + '</body>', 1))
+    return resp
+
 @app.route("/", methods=["GET"])
 def home():
     from flask import request as _req
