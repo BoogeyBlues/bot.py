@@ -1472,7 +1472,7 @@ def home():
                radial-gradient(ellipse at 80% 20%,#0a1a3a22 0%,transparent 60%);
     pointer-events:none;z-index:0}}
 
-  .wrap{{max-width:900px;margin:0 auto;padding:20px 16px;position:relative;z-index:1}}
+  .wrap{{max-width:900px;margin:0 auto;padding:20px 16px;position:relative}}
 
   /* HEADER */
   header{{text-align:center;padding:16px 0 24px;position:relative}}
@@ -2022,7 +2022,7 @@ def status():
   :root{{--acc:#ffee00;--bg:#0a0008;--card:#110010;--border:#ffffff15}}
   body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
   .bg-art{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}}
-  .wrap{{position:relative;z-index:1}}
+  .wrap{{position:relative}}
   nav{{display:flex;gap:0;border-bottom:2px solid var(--acc);overflow-x:auto;scrollbar-width:none}}
   nav::-webkit-scrollbar{{display:none}}
   nav a{{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;border-right:1px solid var(--border);transition:all .15s}}
@@ -2232,7 +2232,7 @@ def trades():
   :root{{--acc:#39ff14;--bg:#0a0008;--card:#110010;--border:#ffffff15}}
   body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
   .bg-art{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}}
-  .wrap{{position:relative;z-index:1}}
+  .wrap{{position:relative}}
   nav{{display:flex;gap:0;border-bottom:2px solid var(--acc);overflow-x:auto;scrollbar-width:none}}
   nav::-webkit-scrollbar{{display:none}}
   nav a{{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;border-right:1px solid var(--border);transition:all .15s}}
@@ -2501,7 +2501,7 @@ def live():
   :root{--acc:#00f5ff;--bg:#0a0008;--card:#110010;--border:#ffffff15}
   body{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}
   .bg-art{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}
-  .wrap{position:relative;z-index:1}
+  .wrap{position:relative}
   nav{display:flex;gap:0;border-bottom:2px solid var(--acc);overflow-x:auto;scrollbar-width:none}
   nav::-webkit-scrollbar{display:none}
   nav a{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;border-right:1px solid var(--border);transition:all .15s}
