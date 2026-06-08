@@ -16,6 +16,35 @@ _session.trust_env = False  # bypass Railway proxy env vars
 
 app = Flask(__name__)
 
+# ── REDIS PERSISTENCE (Upstash REST) ────────────────────────────
+def _redis_cmd(*args):
+    if not REDIS_URL or not REDIS_TOKEN:
+        return None
+    try:
+        r = requests.post(
+            REDIS_URL,
+            headers={"Authorization": f"Bearer {REDIS_TOKEN}"},
+            json=list(args),
+            timeout=5
+        )
+        if r.status_code == 200:
+            return r.json().get("result")
+    except Exception:
+        pass
+    return None
+
+def redis_save(key, obj):
+    _redis_cmd("SET", key, json.dumps(obj))
+
+def redis_load(key):
+    raw = _redis_cmd("GET", key)
+    if raw:
+        try:
+            return json.loads(raw)
+        except Exception:
+            pass
+    return None
+
 # ── CONFIG ──────────────────────────────────────────────────────
 WALLET             = os.environ.get("WALLET", "")
 WALLET_PRIVATE_KEY = os.environ.get("WALLET_PRIVATE_KEY", "")
@@ -118,6 +147,8 @@ os.makedirs(DATA_DIR, exist_ok=True)
 LEARN_FILE  = os.path.join(DATA_DIR, "bot_learn.json")
 STATE_FILE  = os.path.join(DATA_DIR, "bot_state.json")
 WEEK_FILE   = os.path.join(DATA_DIR, "bot_week.json")
+REDIS_URL   = os.environ.get("UPSTASH_REDIS_REST_URL", "")
+REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
 
 MILESTONES = [100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000]
 
@@ -238,29 +269,39 @@ def daily_trade_limit():
 
 # ── DAILY LIMITS ─────────────────────────────────────────────────
 def _save_daily_state():
+    state = {
+        "date":         _daily_date,
+        "trades":       _daily_trades,
+        "wins":         _daily_wins,
+        "losses":       _daily_losses,
+        "pause_until":  _pause_until,
+        "capital":      capital,
+        "week_start":   _week_start_date,
+        "week_logs":    _week_day_logs,
+    }
     try:
         with open(STATE_FILE, "w") as f:
-            json.dump({
-                "date":         _daily_date,
-                "trades":       _daily_trades,
-                "wins":         _daily_wins,
-                "losses":       _daily_losses,
-                "pause_until":  _pause_until,
-                "capital":      capital,
-                "week_start":   _week_start_date,
-                "week_logs":    _week_day_logs,
-            }, f)
+            json.dump(state, f)
     except Exception:
         pass
+    redis_save("bot_state", state)
 
 def _load_daily_state():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses
     global _pause_until, capital, _week_start_date, _week_day_logs, completed_trades
-    try:
-        if os.path.exists(STATE_FILE):
-            with open(STATE_FILE) as f:
-                s = json.load(f)
-            today = time.strftime("%Y-%m-%d")
+    today = time.strftime("%Y-%m-%d")
+
+    # Try Redis first (survives redeploys), fall back to local file
+    s = redis_load("bot_state")
+    if not s:
+        try:
+            if os.path.exists(STATE_FILE):
+                with open(STATE_FILE) as f:
+                    s = json.load(f)
+        except Exception:
+            s = {}
+    if s:
+        try:
             if s.get("date") == today:
                 _daily_date   = s["date"]
                 _daily_trades = s.get("trades",      0)
@@ -268,22 +309,26 @@ def _load_daily_state():
                 _daily_losses = s.get("losses",      0)
                 _pause_until  = s.get("pause_until", 0.0)
                 capital       = s.get("capital",     capital)
-            _week_start_date  = s.get("week_start", "")
-            _week_day_logs    = s.get("week_logs",  [])
+            _week_start_date = s.get("week_start", "")
+            _week_day_logs   = s.get("week_logs",  [])
             paused_msg = f" | paused until {time.strftime('%H:%M', time.localtime(_pause_until))}" if _pause_until > time.time() else ""
             log("ok", f"Restored: {_daily_trades} trades | {_daily_wins}W {_daily_losses}L | cap=${capital:.2f}{paused_msg}")
-    except Exception as e:
-        log("warn", f"State load: {e}")
-    # Reload completed trade history from learn file
-    try:
-        if os.path.exists(LEARN_FILE):
-            with open(LEARN_FILE) as f:
-                saved = json.load(f)
-            completed_trades.clear()
-            completed_trades.extend(saved)
-            log("ok", f"Reloaded {len(completed_trades)} completed trades from disk")
-    except Exception as e:
-        log("warn", f"Trade history reload: {e}")
+        except Exception as e:
+            log("warn", f"State restore: {e}")
+
+    # Reload trade history — Redis first, then local file
+    trades_data = redis_load("bot_trades")
+    if not trades_data:
+        try:
+            if os.path.exists(LEARN_FILE):
+                with open(LEARN_FILE) as f:
+                    trades_data = json.load(f)
+        except Exception:
+            trades_data = []
+    if trades_data:
+        completed_trades.clear()
+        completed_trades.extend(trades_data)
+        log("ok", f"Reloaded {len(completed_trades)} completed trades")
 
 def _reset_daily_if_needed():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses, _pause_until
@@ -538,8 +583,10 @@ def record_trade(trade_data):
             with open(LEARN_FILE, "r") as f:
                 history = json.load(f)
         history.append(trade_data)
+        trimmed = history[-200:]
         with open(LEARN_FILE, "w") as f:
-            json.dump(history[-200:], f)
+            json.dump(trimmed, f)
+        redis_save("bot_trades", trimmed)
         if len(history) % ANALYZE_EVERY == 0:
             log("ok", f"Analyzing last {ANALYZE_EVERY} trades — retuning strategy...", "TUNE")
             auto_tune(history)
