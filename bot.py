@@ -113,9 +113,11 @@ SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "10"))
 
 SOL_RPC     = "https://api.mainnet-beta.solana.com"
 PUMPPORTAL  = "https://pumpportal.fun/api/trade-local"
-LEARN_FILE  = "/tmp/bot_learn.json"
-STATE_FILE  = "/tmp/bot_state.json"
-WEEK_FILE   = "/tmp/bot_week.json"
+DATA_DIR    = os.environ.get("DATA_DIR", "/tmp")
+os.makedirs(DATA_DIR, exist_ok=True)
+LEARN_FILE  = os.path.join(DATA_DIR, "bot_learn.json")
+STATE_FILE  = os.path.join(DATA_DIR, "bot_state.json")
+WEEK_FILE   = os.path.join(DATA_DIR, "bot_week.json")
 
 MILESTONES = [100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000]
 
@@ -253,7 +255,7 @@ def _save_daily_state():
 
 def _load_daily_state():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses
-    global _pause_until, capital, _week_start_date, _week_day_logs
+    global _pause_until, capital, _week_start_date, _week_day_logs, completed_trades
     try:
         if os.path.exists(STATE_FILE):
             with open(STATE_FILE) as f:
@@ -272,6 +274,16 @@ def _load_daily_state():
             log("ok", f"Restored: {_daily_trades} trades | {_daily_wins}W {_daily_losses}L | cap=${capital:.2f}{paused_msg}")
     except Exception as e:
         log("warn", f"State load: {e}")
+    # Reload completed trade history from learn file
+    try:
+        if os.path.exists(LEARN_FILE):
+            with open(LEARN_FILE) as f:
+                saved = json.load(f)
+            completed_trades.clear()
+            completed_trades.extend(saved)
+            log("ok", f"Reloaded {len(completed_trades)} completed trades from disk")
+    except Exception as e:
+        log("warn", f"Trade history reload: {e}")
 
 def _reset_daily_if_needed():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses, _pause_until
