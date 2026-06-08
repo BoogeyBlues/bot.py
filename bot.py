@@ -1354,6 +1354,16 @@ def scanner_loop():
 # ── FLASK ENDPOINTS ───────────────────────────────────────────────
 
 _CURSOR = """<style>
+@media(pointer:fine){
+  body{
+    background-image:linear-gradient(rgba(10,0,8,.62),rgba(10,0,8,.62)),
+      url('/static/tankgirl.png')!important;
+    background-size:cover!important;background-position:center!important;
+    background-attachment:fixed!important;
+  }
+  .bg-art{display:none!important}
+  .wrap{z-index:auto!important}
+}
 @media(pointer:fine){*{cursor:none!important}}
 #px-cur{position:fixed;pointer-events:none;z-index:99999;width:4px;height:4px;
   background:#ff006e;transform:translate(-2px,-2px);
