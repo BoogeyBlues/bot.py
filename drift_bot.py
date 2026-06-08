@@ -40,6 +40,7 @@ _log_buffer    = []
 _log_lock      = threading.Lock()
 _notify_queue  = []
 _notify_q_lock = threading.Lock()
+_notify_log    = []   # last 50 messages sent (same text as Telegram)
 _signals_cache = {}   # market -> {signal, ts}
 
 _session = requests.Session()
@@ -59,6 +60,9 @@ def log(level, msg, symbol=""):
 def notify(msg):
     with _notify_q_lock:
         _notify_queue.append(msg)
+        _notify_log.insert(0, {"time": time.strftime('%H:%M:%S'), "text": msg})
+        if len(_notify_log) > 50:
+            _notify_log.pop()
 
 def _notify_worker():
     while True:
@@ -982,6 +986,12 @@ def logs_api():
         return jsonify(list(_log_buffer))
 
 
+@app.route("/notify/api", methods=["GET"])
+def notify_api():
+    with _notify_q_lock:
+        return jsonify(list(_notify_log))
+
+
 @app.route("/api/manual-long/<market>", methods=["POST"])
 def manual_long(market):
     market = market.upper()
@@ -1144,7 +1154,7 @@ canvas{{width:100%!important;display:block;margin-bottom:10px}}
 </div>
 
 <div class="section">
-  <div class="sec-hdr">LOG FEED <span id="log-ts"></span></div>
+  <div class="sec-hdr">LIVE FEED <span id="log-ts"></span></div>
   <div class="log-box" id="log-box">Connecting...</div>
 </div>
 
@@ -1224,15 +1234,27 @@ async function pollTrades() {{
 
 async function pollLogs() {{
   try {{
-    const d = await fetch('/logs/api').then(r => r.json());
+    const d = await fetch('/notify/api').then(r => r.json());
     const box = document.getElementById('log-box');
     document.getElementById('log-ts').textContent = new Date().toLocaleTimeString();
-    box.innerHTML = d.slice().reverse().map(l => {{
-      const cls = l.tag==='ok'?'log-ok':l.tag==='err'?'log-err':l.tag==='warn'?'log-warn':'log-info';
-      const sym = l.sym ? ' ['+l.sym+']' : '';
-      return `<div class="${{cls}}">[${{l.time}}]${{sym}} ${{l.msg}}</div>`;
+    if (!d.length) {{ box.innerHTML = '<span style="color:#444">Waiting for first signal...</span>'; return; }}
+    box.innerHTML = d.map(n => {{
+      const txt = n.text || '';
+      const isOpen = txt.includes('OPEN ');
+      const isClose = txt.includes('CLOSE ');
+      const isMile = txt.includes('MILESTONE');
+      const isStart = txt.includes('started');
+      const color = isClose && txt.includes('+') ? '#00ff88' :
+                    isClose && txt.includes('-') ? '#ff3355' :
+                    isOpen ? '#00e5ff' :
+                    isMile ? '#ffee00' : '#888';
+      const icon = isOpen ? '▶' : isClose ? (txt.includes('+') ? '✅' : '❌') : isMile ? '🏆' : '•';
+      const lines = txt.replace(/\*/g,'').split('\\n').filter(Boolean);
+      return `<div style="border-left:2px solid ${{color}};padding:6px 10px;margin-bottom:6px;background:#ffffff05">
+        <div style="font-size:.58rem;color:#555;margin-bottom:3px">[${{n.time}}]</div>
+        ${{lines.map((l,i) => `<div style="color:${{i===0?color:'#aaa'}};font-weight:${{i===0?'700':'400'}}">${{icon}} ${{l}}</div>`).join('')}}
+      </div>`;
     }}).join('');
-    box.scrollTop = 0;
   }} catch(e) {{}}
 }}
 
@@ -1310,7 +1332,7 @@ pollTrades();
 pollLogs();
 setInterval(poll, 3000);
 setInterval(pollTrades, 5000);
-setInterval(pollLogs, 4000);
+setInterval(pollLogs, 3000);
 </script>
 </body></html>"""
 
