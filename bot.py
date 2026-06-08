@@ -1363,29 +1363,8 @@ _CURSOR = """<style>
   }
   .bg-art{display:none!important}
   .wrap{z-index:auto!important}
-  *{cursor:none!important}
-  #px-cur{position:fixed;pointer-events:none;z-index:99999;
-    width:50px;height:37px;transform:translate(-4px,-4px);
-    image-rendering:pixelated}
 }
-</style>
-<script>
-(function(){
-  var c=document.createElement('img');
-  c.id='px-cur';
-  c.src='/static/cursor_walk.gif';
-  c.style.cssText='position:fixed;pointer-events:none;z-index:99999;width:50px;height:37px;transform:translate(-25px,-18px);image-rendering:pixelated;top:-100px;left:-100px;display:none';
-  document.body.appendChild(c);
-  function move(x,y){c.style.display='block';c.style.left=x+'px';c.style.top=y+'px';}
-  document.addEventListener('mousemove',function(e){move(e.clientX,e.clientY);});
-  document.addEventListener('touchmove',function(e){
-    var t=e.touches[0];move(t.clientX,t.clientY);
-  },{passive:true});
-  document.addEventListener('touchstart',function(e){
-    var t=e.touches[0];move(t.clientX,t.clientY);
-  },{passive:true});
-})();
-</script>"""
+</style>"""
 
 @app.after_request
 def _inject_cursor(resp):
