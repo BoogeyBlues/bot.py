@@ -75,8 +75,8 @@ LOSS_COOLDOWN_HRS = float(os.environ.get("LOSS_COOLDOWN_HRS", "0.5")) # 30-min p
 ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # retune every 5 trades for faster learning
 
 # Bond Runner strategy
-BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "58"))
-BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "63"))
+BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "40"))
+BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "75"))
 BOND_TP         = float(os.environ.get("BOND_TP",        "67"))
 BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "10"))
 BOND_MAX_SECS   = int(os.environ.get("BOND_MAX_SECS",    "240"))   # 4 min hard cap
@@ -1460,15 +1460,14 @@ def scanner_loop():
                     if mint in open_trades:
                         continue
 
-                # Require Twitter OR Telegram (at least one)
-                if not coin.get("twitter") and not coin.get("telegram"):
-                    continue
-                n_social += 1
+                # Social is a bonus signal, not a hard gate
+                if coin.get("twitter") or coin.get("telegram"):
+                    n_social += 1
 
-                # Active trading: last trade within 5 minutes
+                # Active trading: last trade within 10 minutes
                 last_trade = coin.get("last_trade", 0)
                 secs_since = (time.time() - last_trade / 1000) if last_trade > 0 else 9999
-                if secs_since > 300:
+                if secs_since > 600:
                     continue
                 n_replies += 1  # reuse counter — now means "recently active"
 
