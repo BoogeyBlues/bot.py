@@ -24,6 +24,8 @@ TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
 GMGN_API_KEY       = os.environ.get("GMGN_API_KEY", "")
 STARTING_CAPITAL   = float(os.environ.get("DRIFT_STARTING_CAPITAL", "100"))
 PROFIT_GOAL        = float(os.environ.get("DRIFT_PROFIT_GOAL", "10000"))
+REDIS_URL          = os.environ.get("UPSTASH_REDIS_REST_URL", "")
+REDIS_TOKEN        = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
 
 MILESTONES = [250, 500, 1000, 2500, 5000, 10000, 25000]
 
@@ -45,6 +47,58 @@ _signals_cache = {}   # market -> {signal, ts}
 
 _session = requests.Session()
 _session.trust_env = False
+
+# ── REDIS ─────────────────────────────────────────────────────────
+def _redis_cmd(*args):
+    if not REDIS_URL or not REDIS_TOKEN:
+        return None
+    try:
+        r = _session.post(REDIS_URL, headers={"Authorization": f"Bearer {REDIS_TOKEN}"},
+                          json=list(args), timeout=5)
+        if r.status_code == 200:
+            return r.json().get("result")
+    except Exception:
+        pass
+    return None
+
+def redis_save(key, obj):
+    _redis_cmd("SET", key, json.dumps(obj))
+
+def redis_load(key):
+    raw = _redis_cmd("GET", key)
+    if raw:
+        try:
+            return json.loads(raw)
+        except Exception:
+            pass
+    return None
+
+def _save_state():
+    with _state_lock:
+        cap  = _capital
+        pos  = {k: dict(v) for k, v in _positions.items()}
+        trd  = list(_trades)
+        ms   = list(_milestones_hit)
+    redis_save("drift_capital",    cap)
+    redis_save("drift_positions",  pos)
+    redis_save("drift_trades",     trd[-200:])
+    redis_save("drift_milestones", ms)
+
+def _load_state():
+    global _capital, _positions, _trades, _milestones_hit
+    cap = redis_load("drift_capital")
+    pos = redis_load("drift_positions")
+    trd = redis_load("drift_trades")
+    ms  = redis_load("drift_milestones")
+    with _state_lock:
+        if cap is not None:
+            _capital = float(cap)
+        if pos:
+            _positions = pos
+        if trd:
+            _trades = trd
+        if ms:
+            _milestones_hit = set(ms)
 
 # ── LOGGING ───────────────────────────────────────────────────────
 def log(level, msg, symbol=""):
@@ -307,6 +361,7 @@ def open_position(market, side, price, size_usd, leverage):
         f"Size: ${size_usd:.2f} @ {leverage}x\n"
         f"TP: ${tp:.4f} | SL: ${sl:.4f}"
     )
+    _save_state()
 
 def close_position(market, exit_price, reason=""):
     global _capital, _daily_pnl
@@ -351,6 +406,7 @@ def close_position(market, exit_price, reason=""):
         f"Exit: ${exit_price:.4f}\n"
         f"PnL: ${pnl_usd:+.2f} ({pnl_pct * 100 * pos['leverage']:+.1f}%) | {reason}"
     )
+    _save_state()
     _check_milestones()
 
 def monitor_positions():
@@ -1344,6 +1400,7 @@ if __name__ == "__main__":
             print("[FATAL] DRIFT_PAPER_MODE=false requires WALLET and WALLET_PRIVATE_KEY. Exiting.")
             raise SystemExit(1)
 
+    _load_state()
     log("ok", f"{'[PAPER] ' if DRIFT_PAPER_MODE else '[LIVE] '}{DRIFT_BOT_NAME} starting")
     log("ok", f"Exchange: {DRIFT_EXCHANGE.upper()} | Markets: {DRIFT_MARKETS} | Leverage: {DRIFT_LEVERAGE}x")
     log("ok", f"Capital: ${_capital:.2f} | Goal: ${PROFIT_GOAL:,.0f} | Port: {DRIFT_PORT}")
