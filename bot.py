@@ -1330,13 +1330,26 @@ def copy_trade_loop():
                             continue
                         if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
                             continue
+                        holder_ok, holder_reason = check_holder_concentration(mint)
+                        if not holder_ok:
+                            log("warn", f"SKIP: {holder_reason}", symbol)
+                            continue
+                        dev_wallet = act.get("creator", "") or act.get("dev", "")
+                        dev_ok, dev_reason = check_dev_history(dev_wallet)
+                        if not dev_ok:
+                            log("warn", f"SKIP: {dev_reason}", symbol)
+                            continue
+                        if gmgn_smart_money_selling(mint):
+                            log("warn", "SKIP: smart money selling", symbol)
+                            continue
+                        sig_score = gmgn_signal_score(mint)
                         market = get_market_data(mint)
                         if not market or market["price"] <= 0 or market["liq"] < MIN_LIQ:
                             continue
                         with _copy_lock:
                             _copied_mints[mint] = time.time()
                         amt = trade_size()
-                        log("ok", f"COPY {addr[:8]}... WR:{w['winrate']}% | ${amt:.2f}", symbol)
+                        log("ok", f"COPY {addr[:8]}... WR:{w['winrate']}% | ${amt:.2f} | sig={sig_score}", symbol)
                         notify(f"📋 COPY {symbol}",
                                f"Wallet: {addr[:8]}...\nWin rate: {w['winrate']}%\nAmount: ${amt:.2f}")
                         enter_trade(mint, symbol, market["price"], amt, "copy", 0, 0)
@@ -1413,10 +1426,23 @@ def scanner_loop():
                 if BUNDLE_MODE == "ride" and 0 < bond < 75:
                     rug = run_rugcheck(mint)
                     if rug and rug.get("is_bundled") and not rug.get("has_mint_auth") and not rug.get("has_freeze_auth"):
+                        holder_ok, holder_reason = check_holder_concentration(mint)
+                        if not holder_ok:
+                            log("warn", f"SKIP: {holder_reason}", symbol)
+                            continue
+                        dev_wallet = coin.get("creator", "") or coin.get("dev", "")
+                        dev_ok, dev_reason = check_dev_history(dev_wallet)
+                        if not dev_ok:
+                            log("warn", f"SKIP: {dev_reason}", symbol)
+                            continue
+                        if gmgn_smart_money_selling(mint):
+                            log("warn", "SKIP: smart money selling", symbol)
+                            continue
+                        sig_score = gmgn_signal_score(mint)
                         market = get_market_data(mint)
                         if market and market["price"] > 0 and market["liq"] >= MIN_LIQ:
                             amt = trade_size()
-                            log("ok", f"BUNDLE RIDE | bond={bond:.1f}%", symbol)
+                            log("ok", f"BUNDLE RIDE | bond={bond:.1f}% | sig={sig_score}", symbol)
                             enter_trade(mint, symbol, market["price"], amt, "bundle", bond, 0)
                             time.sleep(0.5)
                             continue
@@ -1441,6 +1467,19 @@ def scanner_loop():
                     if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
                         log("warn", f"BOND SKIP: bundled", symbol)
                         continue
+                    holder_ok, holder_reason = check_holder_concentration(mint)
+                    if not holder_ok:
+                        log("warn", f"SKIP: {holder_reason}", symbol)
+                        continue
+                    dev_wallet = coin.get("creator", "") or coin.get("dev", "")
+                    dev_ok, dev_reason = check_dev_history(dev_wallet)
+                    if not dev_ok:
+                        log("warn", f"SKIP: {dev_reason}", symbol)
+                        continue
+                    if gmgn_smart_money_selling(mint):
+                        log("warn", "SKIP: smart money selling", symbol)
+                        continue
+                    sig_score = gmgn_signal_score(mint)
 
                     market = get_market_data(mint)
                     if not market:
@@ -1452,7 +1491,7 @@ def scanner_loop():
                     # Skip liquidity check for bond runner — bonding curve IS the liquidity
 
                     amt = trade_size()
-                    log("ok", f"BOND RUNNER | bond={bond:.1f}%", symbol)
+                    log("ok", f"BOND RUNNER | bond={bond:.1f}% | sig={sig_score}", symbol)
                     enter_trade(mint, symbol, market["price"], amt, "bond", bond, 0)
                     time.sleep(0.5)
                     continue
@@ -1474,8 +1513,21 @@ def scanner_loop():
                         if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
                             log("warn", "Bundle detected — skip", symbol)
                             continue
+                        holder_ok, holder_reason = check_holder_concentration(mint)
+                        if not holder_ok:
+                            log("warn", f"SKIP: {holder_reason}", symbol)
+                            continue
+                        dev_wallet = coin.get("creator", "") or coin.get("dev", "")
+                        dev_ok, dev_reason = check_dev_history(dev_wallet)
+                        if not dev_ok:
+                            log("warn", f"SKIP: {dev_reason}", symbol)
+                            continue
+                        if gmgn_smart_money_selling(mint):
+                            log("warn", "SKIP: smart money selling", symbol)
+                            continue
+                        sig_score = gmgn_signal_score(mint)
                         amt = trade_size()
-                        log("ok", f"DORMANT SPIKE | age={age_h:.1f}h 1h={market['change1h']:+.0f}%", symbol)
+                        log("ok", f"DORMANT SPIKE | age={age_h:.1f}h 1h={market['change1h']:+.0f}% | sig={sig_score}", symbol)
                         enter_trade(mint, symbol, market["price"], amt, "spike", bond, 0)
                         time.sleep(0.5)
 
@@ -3444,6 +3496,15 @@ def setup():
       <span class="check-badge badge-ok">LIVE</span>
     </div>
 
+    <div class="check-row">
+      <span class="check-icon">{'✅' if GMGN_API_KEY else '🟡'}</span>
+      <div class="check-body">
+        <div class="check-title">GMGN API Key</div>
+        <div class="check-sub">{'Smart money signals + KOL tracking enabled' if GMGN_API_KEY else 'Optional — set GMGN_API_KEY for KOL tracking; smart money signals work without it'}</div>
+      </div>
+      <span class="check-badge {'badge-ok' if GMGN_API_KEY else 'badge-warn'}">{'SET' if GMGN_API_KEY else 'OPTIONAL'}</span>
+    </div>
+
     {'<button class="btn" style="margin-top:12px" onclick="testTelegram()">📱 Test Telegram Connection</button><div class="result-msg" id="tg-result"></div>' if tg_ok else '<div style="font-size:.68rem;color:#888;margin-top:10px;padding:8px;border:1px solid var(--border)">Add TELEGRAM_TOKEN and TELEGRAM_CHAT_ID to Railway env vars to enable notifications.</div>'}
   </div>
 
@@ -3505,6 +3566,10 @@ def setup():
       <div class="env-row">
         <span class="env-key">TELEGRAM_CHAT_ID</span>
         <span class="env-val {'env-set' if TELEGRAM_CHAT_ID else 'env-unset'}">{'set ✓' if TELEGRAM_CHAT_ID else 'not set'}</span>
+      </div>
+      <div class="env-row">
+        <span class="env-key">GMGN_API_KEY</span>
+        <span class="env-val {'env-set' if GMGN_API_KEY else 'env-unset'}">{'set ✓' if GMGN_API_KEY else 'not set (optional)'}</span>
       </div>
     </div>
     <a href="https://railway.app" target="_blank" class="btn btn-ghost" style="margin-top:10px">Open Railway Dashboard →</a>
