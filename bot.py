@@ -1540,9 +1540,11 @@ def home():
 
   .pulse-text{{animation:pulse 2s infinite}}
   .empty{{text-align:center;padding:28px;color:var(--muted);font-size:.82rem}}
+  .bg-art{{position:fixed;bottom:0;right:0;width:340px;opacity:.18;pointer-events:none;z-index:0}}
 </style>
 </head>
 <body>
+<img src="/static/tankgirl.png" class="bg-art" alt="">
 <div class="wrap">
 
   <header>
@@ -1773,9 +1775,11 @@ def _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
   .theme-links a:not(.active){{color:#888;border-color:#555}}
   footer{{padding:14px 16px;text-align:center;font-size:.6rem;color:#444;border-top:1px solid var(--border)}}
   footer a{{color:var(--cyan);text-decoration:none}}
+  .bg-art{{position:fixed;bottom:0;right:0;width:340px;opacity:.18;pointer-events:none;z-index:0}}
 </style>
 </head>
 <body>
+<img src="/static/tankgirl.png" class="bg-art" alt="">
   <div class="vid-wrap">
     <video autoplay loop muted playsinline>
       <source src="/static/header.mp4" type="video/mp4">
@@ -2012,9 +2016,12 @@ def status():
   .ms{{font-size:.7rem;padding:4px 12px;border-radius:6px;font-weight:600;
     border:1px solid var(--border);color:var(--muted);background:var(--surface2)}}
   .ms.hit{{color:var(--gold);border-color:#f5c54240;background:#f5c54215;box-shadow:0 0 8px #f5c54220}}
+  .bg-art{{position:fixed;bottom:0;right:0;width:340px;opacity:.18;pointer-events:none;z-index:0}}
+  .wrap{{max-width:900px;margin:0 auto;position:relative;z-index:1}}
 </style>
 </head>
 <body>
+<img src="/static/tankgirl.png" class="bg-art" alt="">
 <div class="wrap">
   <div class="page-hdr">
     <h1>📊 Bot Status</h1>
@@ -2268,9 +2275,12 @@ def trades():
     transition:all .2s}}
   .solscan-btn:hover{{background:#f5c54225}}
   @media(max-width:600px){{.stats{{grid-template-columns:1fr 1fr}}th,td{{padding:8px 8px}}}}
+  .bg-art{{position:fixed;bottom:0;right:0;width:340px;opacity:.18;pointer-events:none;z-index:0}}
+  .wrap{{max-width:1100px;margin:0 auto;position:relative;z-index:1}}
 </style>
 </head>
 <body>
+<img src="/static/tankgirl.png" class="bg-art" alt="">
 <div class="wrap">
 
   <div class="page-hdr">
@@ -2585,9 +2595,12 @@ def live():
 
   .empty{text-align:center;padding:32px;color:var(--muted);font-size:.82rem}
   #last-update{font-size:.65rem;color:var(--muted)}
+  .bg-art{position:fixed;bottom:0;right:0;width:340px;opacity:.18;pointer-events:none;z-index:0}
+  .wrap{max-width:1000px;margin:0 auto;position:relative;z-index:1}
 </style>
 </head>
 <body>
+<img src="/static/tankgirl.png" class="bg-art" alt="">
 <div class="wrap">
 
   <div class="hdr">
