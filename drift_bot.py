@@ -1012,6 +1012,21 @@ def manual_short(market):
     return jsonify({"msg": f"Opened SHORT {market} @ ${price:.4f} size=${size_usd:.2f}"})
 
 
+@app.route("/ping-telegram", methods=["GET"])
+def ping_telegram():
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return jsonify({"error": "TELEGRAM_TOKEN or TELEGRAM_CHAT_ID not set", "token_set": bool(TELEGRAM_TOKEN), "chat_id_set": bool(TELEGRAM_CHAT_ID)}), 400
+    try:
+        r = _session.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": f"*{DRIFT_BOT_NAME}* ping test ✅", "parse_mode": "Markdown"},
+            timeout=10
+        )
+        return jsonify({"status": r.status_code, "response": r.json()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/close/<market>", methods=["POST"])
 def manual_close(market):
     market = market.upper()
