@@ -2068,6 +2068,7 @@ def status():
     <a href="/live">LIVE</a>
     <a href="/trades">TRADES</a>
     <a href="/status" class="active">STATUS</a>
+    <a href="/learn">STRATEGY</a>
   </nav>
 
   <div class="page-title">BOT STATUS</div>
@@ -2294,6 +2295,7 @@ def trades():
     <a href="/live">LIVE</a>
     <a href="/trades" class="active">TRADES</a>
     <a href="/status">STATUS</a>
+    <a href="/learn">STRATEGY</a>
   </nav>
 
   <div class="page-title">TRADES</div>
@@ -2566,6 +2568,7 @@ def live():
     <a href="/live" class="active">LIVE</a>
     <a href="/trades">TRADES</a>
     <a href="/status">STATUS</a>
+    <a href="/learn">STRATEGY</a>
   </nav>
 
   <div class="page-title">LIVE FEED</div>
@@ -2729,16 +2732,396 @@ setInterval(poll, 3000);
 </body></html>"""
     return html, 200
 
-@app.route("/learn", methods=["GET"])
-def learn():
+@app.route("/learn/api", methods=["GET"])
+def learn_api():
     try:
+        with trades_lock:
+            recent = list(completed_trades[-60:])
+        wins   = [t for t in recent if t.get("pnl", 0) > 0]
+        losses = [t for t in recent if t.get("pnl", 0) <= 0]
+        bond_all   = [t for t in recent if t.get("strategy") == "bond"]
+        spike_all  = [t for t in recent if t.get("strategy") == "spike"]
+        copy_all   = [t for t in recent if t.get("strategy") == "copy"]
+        bond_wins  = [t for t in bond_all  if t.get("pnl", 0) > 0]
+        spike_wins = [t for t in spike_all if t.get("pnl", 0) > 0]
+        copy_wins  = [t for t in copy_all  if t.get("pnl", 0) > 0]
+
+        stats = None
         stats_file = LEARN_FILE.replace(".json", "_stats.json")
         if os.path.exists(stats_file):
             with open(stats_file) as f:
-                return jsonify(json.load(f))
-        return jsonify({"status": "no data yet - need 20 completed trades"})
+                stats = json.load(f)
+
+        return jsonify({
+            "params": {
+                "bond_entry":      f"{BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%",
+                "bond_tp":         f"{BOND_TP}%",
+                "bond_sl":         f"{BOND_SL_PCT}%",
+                "bond_stale_secs": BOND_STALE_SECS,
+                "bond_max_secs":   BOND_MAX_SECS,
+                "spike_min_age_h": SPIKE_MIN_AGE_H,
+                "spike_min_1h":    SPIKE_MIN_1H,
+                "spike_tp":        f"{SPIKE_TP_PCT}%",
+                "spike_sl":        f"{SPIKE_SL_PCT}%",
+                "spike_max_secs":  SPIKE_MAX_SECS,
+                "analyze_every":   ANALYZE_EVERY,
+                "bundle_mode":     BUNDLE_MODE,
+            },
+            "live": {
+                "bond_trades":  len(bond_all),
+                "bond_wins":    len(bond_wins),
+                "bond_wr":      round(len(bond_wins)/max(len(bond_all),1)*100,1),
+                "spike_trades": len(spike_all),
+                "spike_wins":   len(spike_wins),
+                "spike_wr":     round(len(spike_wins)/max(len(spike_all),1)*100,1),
+                "copy_trades":  len(copy_all),
+                "copy_wins":    len(copy_wins),
+                "copy_wr":      round(len(copy_wins)/max(len(copy_all),1)*100,1),
+                "total_trades": len(recent),
+                "total_wins":   len(wins),
+                "overall_wr":   round(len(wins)/max(len(recent),1)*100,1),
+            },
+            "last_tune": stats,
+            "paper_mode": PAPER_MODE,
+        })
     except Exception as e:
         return jsonify({"error": str(e)})
+
+@app.route("/learn", methods=["GET"])
+def learn():
+    html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Strategy — Boogey's Treasure Chest</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{--acc:#b44fff;--bg:#080010;--card:#0e0018;--border:#ffffff15}
+  body{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}
+  .bg-art{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}
+  .wrap{position:relative}
+  nav{display:flex;gap:0;border-bottom:2px solid var(--acc);overflow-x:auto;scrollbar-width:none}
+  nav::-webkit-scrollbar{display:none}
+  nav a{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;border-right:1px solid var(--border);transition:all .15s}
+  nav a:hover{background:var(--acc);color:#000}
+  nav a.active{background:var(--acc);color:#000}
+  .page-title{font-family:'Bebas Neue',sans-serif;font-size:3rem;color:var(--acc);text-shadow:0 0 24px #b44fff88;padding:18px 16px 8px;line-height:1;letter-spacing:.04em}
+  .status-bar{display:flex;flex-wrap:wrap;gap:6px;padding:0 12px 12px}
+  .pill{padding:5px 12px;font-size:.68rem;font-weight:700;border:1px solid var(--border);background:var(--card);display:inline-flex;align-items:center;gap:6px;letter-spacing:.04em}
+  .pill.mode{border-color:#b44fff44;background:#b44fff10;color:var(--acc)}
+  .dot{width:7px;height:7px;border-radius:50%}
+  .dot.purple{background:var(--acc);box-shadow:0 0 8px var(--acc)}
+  .dot.green{background:#39ff14;box-shadow:0 0 8px #39ff14}
+  .dot.orange{background:#ff9500;box-shadow:0 0 8px #ff9500}
+  .blink{animation:blink 2s infinite}
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+  .section{background:var(--card);border-top:2px solid var(--border);padding:14px;margin:0 12px 12px}
+  .section.accent{border-top-color:var(--acc)}
+  .section-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+  .section-hdr h2{font-size:.62rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em}
+  .tune-badge{background:#b44fff20;color:var(--acc);border:1px solid #b44fff40;font-size:.62rem;font-weight:700;padding:2px 8px;letter-spacing:.04em}
+  /* Win rate bars */
+  .strat-row{margin-bottom:16px}
+  .strat-row:last-child{margin-bottom:0}
+  .strat-meta{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px}
+  .strat-name{font-size:.8rem;font-weight:900;letter-spacing:.06em;text-transform:uppercase}
+  .strat-desc{font-size:.64rem;color:#888;margin-top:1px}
+  .strat-wr{font-family:'JetBrains Mono',monospace;font-size:1rem;font-weight:700}
+  .bar-track{height:6px;background:#ffffff0d;border-radius:3px;overflow:hidden}
+  .bar-fill{height:100%;border-radius:3px;transition:width 1s ease;background:var(--acc)}
+  .bar-fill.green{background:#39ff14}
+  .bar-fill.orange{background:#ff9500}
+  .strat-counts{display:flex;gap:12px;margin-top:5px}
+  .strat-counts span{font-size:.62rem;color:#888}
+  .strat-counts strong{color:#fff}
+  /* Param grid */
+  .param-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .param-card{background:#ffffff05;border:1px solid var(--border);padding:10px 12px}
+  .param-card .p-lbl{font-size:.58rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.08em;margin-bottom:3px}
+  .param-card .p-val{font-family:'JetBrains Mono',monospace;font-size:.9rem;font-weight:700;color:var(--acc)}
+  .param-card .p-desc{font-size:.6rem;color:#666;margin-top:2px}
+  .param-card.highlight{border-color:#b44fff40;background:#b44fff08}
+  /* Tune block */
+  .tune-block{background:#ffffff05;border:1px solid var(--border);padding:12px;margin-top:8px}
+  .tune-block .tune-lbl{font-size:.58rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px}
+  .tune-row{display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #ffffff08;font-size:.72rem}
+  .tune-row:last-child{border-bottom:none}
+  .tune-row .k{color:#888}
+  .tune-row .v{font-family:'JetBrains Mono',monospace;font-weight:700;color:#fff}
+  /* Strategy desc cards */
+  .strat-card{border:1px solid var(--border);padding:12px;margin-bottom:8px;background:#ffffff03}
+  .strat-card:last-child{margin-bottom:0}
+  .strat-card-hdr{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+  .strat-card-hdr .tag{font-size:.58rem;font-weight:900;letter-spacing:.1em;padding:2px 7px;border:1px solid}
+  .tag.bond{color:#b44fff;border-color:#b44fff40;background:#b44fff15}
+  .tag.spike{color:#ff9500;border-color:#ff950040;background:#ff950015}
+  .tag.copy{color:#00f5ff;border-color:#00f5ff40;background:#00f5ff15}
+  .strat-card-body{font-size:.7rem;color:#aaa;line-height:1.5}
+  .mono{font-family:'JetBrains Mono',monospace;font-size:.68rem}
+  .purple{color:var(--acc)}
+  footer{padding:14px 16px;text-align:center;font-size:.6rem;color:#444;border-top:1px solid var(--border)}
+  #last-update{font-size:.62rem;color:#888}
+</style>
+</head>
+<body>
+<img src="/static/tankgirl.png" class="bg-art" alt="">
+<div class="wrap">
+  <nav>
+    <a href="/">HOME</a>
+    <a href="/live">LIVE</a>
+    <a href="/trades">TRADES</a>
+    <a href="/status">STATUS</a>
+    <a href="/learn" class="active">STRATEGY</a>
+  </nav>
+
+  <div class="page-title">STRATEGY</div>
+
+  <div class="status-bar">
+    <div class="pill mode"><span class="dot purple blink"></span><span id="mode-pill">Loading...</span></div>
+    <div class="pill">Tuned every <strong id="tune-every" class="purple">--</strong> trades</div>
+  </div>
+
+  <!-- Win Rates -->
+  <div class="section accent">
+    <div class="section-hdr">
+      <h2>Win Rates (last 60 trades)</h2>
+      <span class="tune-badge" id="overall-wr">--%</span>
+    </div>
+
+    <div class="strat-row">
+      <div class="strat-meta">
+        <div>
+          <div class="strat-name purple">Bond Runner</div>
+          <div class="strat-desc">Rides bonding curve momentum</div>
+        </div>
+        <div class="strat-wr purple" id="bond-wr">--%</div>
+      </div>
+      <div class="bar-track"><div class="bar-fill" id="bond-bar" style="width:0%"></div></div>
+      <div class="strat-counts">
+        <span><strong id="bond-wins">-</strong> wins</span>
+        <span><strong id="bond-trades">-</strong> total</span>
+      </div>
+    </div>
+
+    <div class="strat-row">
+      <div class="strat-meta">
+        <div>
+          <div class="strat-name" style="color:#ff9500">Spike Detector</div>
+          <div class="strat-desc">Catches volume spikes on older tokens</div>
+        </div>
+        <div class="strat-wr" style="color:#ff9500" id="spike-wr">--%</div>
+      </div>
+      <div class="bar-track"><div class="bar-fill orange" id="spike-bar" style="width:0%"></div></div>
+      <div class="strat-counts">
+        <span><strong id="spike-wins">-</strong> wins</span>
+        <span><strong id="spike-trades">-</strong> total</span>
+      </div>
+    </div>
+
+    <div class="strat-row">
+      <div class="strat-meta">
+        <div>
+          <div class="strat-name" style="color:#00f5ff">Copy Trader</div>
+          <div class="strat-desc">Mirrors whale wallet activity</div>
+        </div>
+        <div class="strat-wr" style="color:#00f5ff" id="copy-wr">--%</div>
+      </div>
+      <div class="bar-track"><div class="bar-fill green" id="copy-bar" style="width:0%"></div></div>
+      <div class="strat-counts">
+        <span><strong id="copy-wins">-</strong> wins</span>
+        <span><strong id="copy-trades">-</strong> total</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bond Runner Params -->
+  <div class="section">
+    <div class="section-hdr">
+      <h2>Bond Runner Params</h2>
+      <span class="tune-badge purple">AUTO-TUNED</span>
+    </div>
+    <div class="param-grid">
+      <div class="param-card highlight">
+        <div class="p-lbl">Entry Range</div>
+        <div class="p-val" id="p-bond-entry">--</div>
+        <div class="p-desc">Bond curve %</div>
+      </div>
+      <div class="param-card">
+        <div class="p-lbl">Take Profit</div>
+        <div class="p-val" id="p-bond-tp">--</div>
+        <div class="p-desc">Exit on gain</div>
+      </div>
+      <div class="param-card">
+        <div class="p-lbl">Stop Loss</div>
+        <div class="p-val" id="p-bond-sl">--</div>
+        <div class="p-desc">Max drawdown</div>
+      </div>
+      <div class="param-card highlight">
+        <div class="p-lbl">Stale Exit</div>
+        <div class="p-val" id="p-bond-stale">--s</div>
+        <div class="p-desc">If bond stalls</div>
+      </div>
+      <div class="param-card">
+        <div class="p-lbl">Hard Timeout</div>
+        <div class="p-val" id="p-bond-max">--s</div>
+        <div class="p-desc">Max hold time</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Spike Detector Params -->
+  <div class="section">
+    <div class="section-hdr">
+      <h2>Spike Detector Params</h2>
+    </div>
+    <div class="param-grid">
+      <div class="param-card">
+        <div class="p-lbl">Min Token Age</div>
+        <div class="p-val" id="p-spike-age">--h</div>
+        <div class="p-desc">Hours old</div>
+      </div>
+      <div class="param-card">
+        <div class="p-lbl">Min 1h Volume</div>
+        <div class="p-val" id="p-spike-vol">--</div>
+        <div class="p-desc">SOL in 1 hour</div>
+      </div>
+      <div class="param-card highlight">
+        <div class="p-lbl">Take Profit</div>
+        <div class="p-val" id="p-spike-tp">--</div>
+        <div class="p-desc">Exit on gain</div>
+      </div>
+      <div class="param-card">
+        <div class="p-lbl">Stop Loss</div>
+        <div class="p-val" id="p-spike-sl">--</div>
+        <div class="p-desc">Max drawdown</div>
+      </div>
+      <div class="param-card">
+        <div class="p-lbl">Hard Timeout</div>
+        <div class="p-val" id="p-spike-max">--s</div>
+        <div class="p-desc">Max hold time</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Last Auto-Tune -->
+  <div class="section" id="tune-section">
+    <div class="section-hdr">
+      <h2>Last Auto-Tune</h2>
+      <span id="tune-time" class="tune-badge">Never</span>
+    </div>
+    <div id="tune-body">
+      <div style="text-align:center;padding:20px;color:#555;font-size:.75rem">No tune data yet — need """ + str(ANALYZE_EVERY) + """ completed trades</div>
+    </div>
+  </div>
+
+  <!-- How It Works -->
+  <div class="section">
+    <div class="section-hdr"><h2>How It Works</h2></div>
+
+    <div class="strat-card">
+      <div class="strat-card-hdr">
+        <span class="tag bond">BOND</span>
+        <span style="font-size:.75rem;font-weight:700">Bond Runner</span>
+      </div>
+      <div class="strat-card-body">
+        Enters when a token's bonding curve hits <strong id="desc-bond-entry">--</strong>.
+        Rides momentum toward 100% graduation. Exits on TP, SL, stale curve, or hard timeout.
+        Parameters auto-tune every <strong id="desc-tune-every">--</strong> trades.
+      </div>
+    </div>
+
+    <div class="strat-card">
+      <div class="strat-card-hdr">
+        <span class="tag spike">SPIKE</span>
+        <span style="font-size:.75rem;font-weight:700">Spike Detector</span>
+      </div>
+      <div class="strat-card-body">
+        Targets tokens older than <strong id="desc-spike-age">--</strong>h with sudden 1h volume above
+        <strong id="desc-spike-vol">--</strong> SOL. Scalps the momentum burst. High TP, tighter timeout.
+      </div>
+    </div>
+
+    <div class="strat-card">
+      <div class="strat-card-hdr">
+        <span class="tag copy">COPY</span>
+        <span style="font-size:.75rem;font-weight:700">Copy Trader</span>
+      </div>
+      <div class="strat-card-body">
+        Mirrors buys from tracked whale wallets. Enters on the same token within seconds of a whale buy.
+        Exits with trailing stop loss once position gains.
+      </div>
+    </div>
+  </div>
+
+  <div style="padding:0 12px 8px;text-align:right"><span id="last-update"></span></div>
+  <footer>Boogey's Treasure Chest · Strategy</footer>
+</div>
+<script>
+async function load() {
+  try {
+    const d = await (await fetch('/learn/api')).json();
+
+    document.getElementById('mode-pill').textContent = d.paper_mode ? 'Paper Mode' : 'Live Mode';
+    document.getElementById('tune-every').textContent = d.params.analyze_every;
+    document.getElementById('overall-wr').textContent = 'Overall ' + d.live.overall_wr + '%';
+
+    // Win rate bars
+    function setStrat(prefix, wr, wins, total) {
+      document.getElementById(prefix+'-wr').textContent = wr + '%';
+      document.getElementById(prefix+'-bar').style.width = Math.min(wr, 100) + '%';
+      document.getElementById(prefix+'-wins').textContent = wins;
+      document.getElementById(prefix+'-trades').textContent = total;
+    }
+    setStrat('bond',  d.live.bond_wr,  d.live.bond_wins,  d.live.bond_trades);
+    setStrat('spike', d.live.spike_wr, d.live.spike_wins, d.live.spike_trades);
+    setStrat('copy',  d.live.copy_wr,  d.live.copy_wins,  d.live.copy_trades);
+
+    // Bond params
+    document.getElementById('p-bond-entry').textContent = d.params.bond_entry;
+    document.getElementById('p-bond-tp').textContent    = d.params.bond_tp;
+    document.getElementById('p-bond-sl').textContent    = d.params.bond_sl;
+    document.getElementById('p-bond-stale').textContent = d.params.bond_stale_secs + 's';
+    document.getElementById('p-bond-max').textContent   = d.params.bond_max_secs + 's';
+
+    // Spike params
+    document.getElementById('p-spike-age').textContent = d.params.spike_min_age_h + 'h';
+    document.getElementById('p-spike-vol').textContent = d.params.spike_min_1h;
+    document.getElementById('p-spike-tp').textContent  = d.params.spike_tp;
+    document.getElementById('p-spike-sl').textContent  = d.params.spike_sl;
+    document.getElementById('p-spike-max').textContent = d.params.spike_max_secs + 's';
+
+    // Descriptions
+    document.getElementById('desc-bond-entry').textContent = d.params.bond_entry;
+    document.getElementById('desc-spike-age').textContent  = d.params.spike_min_age_h;
+    document.getElementById('desc-spike-vol').textContent  = d.params.spike_min_1h;
+    document.getElementById('desc-tune-every').textContent = d.params.analyze_every;
+
+    // Last tune
+    if (d.last_tune) {
+      document.getElementById('tune-time').textContent = d.last_tune.tuned_at || 'Recently';
+      document.getElementById('tune-body').innerHTML = `
+        <div class="tune-block">
+          <div class="tune-row"><span class="k">Trades Analyzed</span><span class="v">${d.last_tune.trades_analyzed}</span></div>
+          <div class="tune-row"><span class="k">Overall Win Rate</span><span class="v">${d.last_tune.overall_wr}</span></div>
+          <div class="tune-row"><span class="k">Bond Win Rate</span><span class="v">${d.last_tune.bond_wr}</span></div>
+          <div class="tune-row"><span class="k">Spike Win Rate</span><span class="v">${d.last_tune.spike_wr}</span></div>
+          <div class="tune-row"><span class="k">Bond Entry</span><span class="v">${d.last_tune.bond_entry}</span></div>
+          <div class="tune-row"><span class="k">Stale Exit</span><span class="v">${d.last_tune.bond_stale_secs}s</span></div>
+          <div class="tune-row"><span class="k">Stop Loss</span><span class="v">${d.last_tune.bond_sl_pct}%</span></div>
+          <div class="tune-row"><span class="k">Spike TP</span><span class="v">${d.last_tune.spike_tp_pct}%</span></div>
+        </div>`;
+    }
+
+    document.getElementById('last-update').textContent = 'Updated ' + new Date().toLocaleTimeString();
+  } catch(e) { console.error(e); }
+}
+load();
+setInterval(load, 10000);
+</script>
+</body></html>"""
+    return html
 
 @app.route("/blacklist/<mint>", methods=["GET"])
 def blacklist_route(mint):
