@@ -1435,6 +1435,7 @@ def home():
   header{{text-align:center;padding:16px 0 24px;position:relative}}
   .vid-wrap{{position:relative;width:100%;max-width:520px;margin:0 auto -8px;line-height:0}}
   .vid-wrap video{{width:100%;mix-blend-mode:screen;display:block}}
+  .vid-wrap a{{display:block;cursor:pointer}}
   .chest-icon{{font-size:2.8rem;display:block;margin-bottom:8px;
     filter:drop-shadow(0 0 20px #f5c54288)}}
   h1{{font-size:1.9rem;font-weight:800;letter-spacing:-.02em;
@@ -1549,9 +1550,9 @@ def home():
 
   <header>
     <div class="vid-wrap">
-      <video autoplay loop muted playsinline>
+      <a href="/"><video autoplay loop muted playsinline>
         <source src="/static/header.mp4" type="video/mp4">
-      </video>
+      </video></a>
     </div>
     <p class="tagline">Autonomous pump.fun sniper &nbsp;·&nbsp; goal $25,000</p>
     <div class="mode-pill"><span class="dot"></span>{mode} MODE</div>
@@ -1709,6 +1710,7 @@ def _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
     max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
   .vid-wrap{{width:100%;line-height:0;position:relative}}
   .vid-wrap video{{width:100%;mix-blend-mode:screen;display:block}}
+  .vid-wrap a{{display:block;cursor:pointer}}
   .vid-wrap::after{{content:'';position:absolute;bottom:0;left:0;right:0;height:40px;
     background:linear-gradient(transparent,var(--bg))}}
   nav{{display:flex;gap:0;border-bottom:2px solid var(--pink);overflow-x:auto;
@@ -1781,9 +1783,9 @@ def _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
 <body>
 <img src="/static/tankgirl.png" class="bg-art" alt="">
   <div class="vid-wrap">
-    <video autoplay loop muted playsinline>
+    <a href="/"><video autoplay loop muted playsinline>
       <source src="/static/header.mp4" type="video/mp4">
-    </video>
+    </video></a>
   </div>
   <nav>
     <a href="/live">⚡ LIVE</a>
