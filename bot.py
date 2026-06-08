@@ -354,21 +354,33 @@ def _send_daily_summary():
     try:
         with capital_lock:
             cap = capital
-        total_pnl = sum(t["pnl"] for t in completed_trades)
+        today_pnl = cap - _day_start_cap if _day_start_cap > 0 else 0
         wr = round(_daily_wins / max(_daily_trades, 1) * 100, 1)
+        # Today's exit breakdown
+        today_trades = [t for t in completed_trades if t.get("date", "") == time.strftime("%Y-%m-%d")]
         exit_counts = {}
-        for t in completed_trades:
+        for t in today_trades:
             r = t.get("result", "?")
             exit_counts[r] = exit_counts.get(r, 0) + 1
         exit_str = " | ".join(f"{k}:{v}" for k, v in sorted(exit_counts.items(), key=lambda x: -x[1])[:4])
+        # Progress toward $25k goal
+        goal = 25000
+        to_go = goal - cap
         day_num = len(_week_day_logs) + 1
-        msg = (f"Day {day_num} running\n"
+        # Next tune in N trades
+        total_done = len(completed_trades)
+        next_tune_in = ANALYZE_EVERY - (total_done % ANALYZE_EVERY)
+        pct_tier, _ = _cap_tier(cap)
+        msg = (f"Day {day_num} wrap-up\n"
+               f"────────────────────\n"
                f"Trades: {_daily_trades} | {_daily_wins}W {_daily_losses}L ({wr}% WR)\n"
-               f"PnL today: ${total_pnl:+.2f}\n"
-               f"Capital: ${cap:.2f} → goal $100,000\n"
-               f"Exits: {exit_str or 'none yet'}\n"
-               f"Bond range: {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%")
-        log("ok", f"Daily summary: {_daily_wins}W/{_daily_losses}L cap=${cap:.2f}", "DAY")
+               f"PnL today: ${today_pnl:+.2f}\n"
+               f"Capital: ${cap:.2f} (${to_go:,.0f} to $25k)\n"
+               f"Trade size: {pct_tier*100:.0f}% (${trade_size():.2f})\n"
+               f"Bond range: {BOND_ENTRY_MIN}–{BOND_ENTRY_MAX}%\n"
+               f"Next tune in: {next_tune_in} trade(s)\n"
+               f"Exits: {exit_str or 'none today'}")
+        log("ok", f"Daily summary: {_daily_wins}W/{_daily_losses}L pnl=${today_pnl:+.2f} cap=${cap:.2f}", "DAY")
         notify(f"📊 Day {day_num} Summary", msg)
     except Exception as e:
         log("warn", f"Daily summary error: {e}", "DAY")
@@ -570,6 +582,14 @@ def auto_tune(history):
         }
         log("ok", f"Auto-tuned: bond={BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% "
                   f"stale={BOND_STALE_SECS}s sl={BOND_SL_PCT}% wr={overall_wr}%", "TUNE")
+        notify("🧠 Auto-Tuned",
+               f"Analyzed {len(recent)} trades\n"
+               f"Overall WR: {overall_wr}%\n"
+               f"Bond WR: {round(bond_wr*100,1)}% | Spike WR: {round(spike_wr*100,1)}%\n"
+               f"────────────────────\n"
+               f"Bond entry: {BOND_ENTRY_MIN}–{BOND_ENTRY_MAX}%\n"
+               f"Stale exit: {BOND_STALE_SECS}s | SL: {BOND_SL_PCT}%\n"
+               f"Spike TP: {SPIKE_TP_PCT}%")
         try:
             with open(LEARN_FILE.replace(".json", "_stats.json"), "w") as f:
                 json.dump(stats, f, indent=2)
@@ -1950,12 +1970,16 @@ def status_api():
     pnl   = sum(t["pnl"] for t in completed_trades)
     with capital_lock:
         cap = capital
+    sol_price = get_sol_price()
+    next_tune_in = ANALYZE_EVERY - (total % ANALYZE_EVERY) if total > 0 else ANALYZE_EVERY
     return jsonify({
         "capital": round(cap, 2), "paper_mode": PAPER_MODE,
         "open_trades": len(open_trades), "total_trades": total,
         "wins": len(wins), "losses": total - len(wins),
         "win_rate": round(len(wins) / max(total, 1) * 100, 1),
         "total_pnl": round(pnl, 4),
+        "sol_price": round(sol_price, 2) if sol_price else None,
+        "next_tune_in": next_tune_in,
         "today": {"trades": _daily_trades, "wins": _daily_wins, "losses": _daily_losses,
                   "paused_until": time.strftime("%H:%M", time.localtime(_pause_until)) if _pause_until > time.time() else None},
     })
@@ -2134,7 +2158,9 @@ def status():
     <div class="row"><span class="row-key">Max Daily Loss</span>
       <span class="row-val" style="color:#ff006e">{MAX_DAILY_LOSS_PCT:.0f}% of open capital</span></div>
     <div class="row"><span class="row-key">Loss Cooldown</span>
-      <span class="row-val">{DAILY_LOSS_MAX} losses → {LOSS_COOLDOWN_HRS}h pause + retune</span></div>
+      <span class="row-val">{DAILY_LOSS_MAX} losses → {int(LOSS_COOLDOWN_HRS*60)}min pause + retune</span></div>
+    <div class="row"><span class="row-key">SOL Price</span>
+      <span class="row-val" id="sol-price">...</span></div>
     <div class="row"><span class="row-key">Bond Entry Range</span>
       <span class="row-val">{BOND_ENTRY_MIN}% – {BOND_ENTRY_MAX}%</span></div>
     <div class="row"><span class="row-key">Bond Take Profit</span>
@@ -2143,6 +2169,8 @@ def status():
       <span class="row-val" style="color:#ff006e">{BOND_SL_PCT}% · Trailing SL at +{TSL_ACTIVATE_PCT}%</span></div>
     <div class="row"><span class="row-key">Retune Interval</span>
       <span class="row-val">Every {ANALYZE_EVERY} trades</span></div>
+    <div class="row"><span class="row-key">Next Auto-Tune</span>
+      <span class="row-val" id="next-tune">...</span></div>
   </div>
 
   {"" if not _week_day_logs else f'''<div class="section" style="margin:0 12px 12px">
@@ -2154,7 +2182,18 @@ def status():
   </div>'''}
 
   <footer>Boogey's Treasure Chest · Refreshes every 20s</footer>
-</div></body></html>"""
+</div>
+<script>
+fetch('/status/api').then(r=>r.json()).then(d=>{
+  if(d.sol_price) document.getElementById('sol-price').textContent='$'+d.sol_price.toLocaleString();
+  if(d.next_tune_in !== undefined) {
+    const el = document.getElementById('next-tune');
+    el.textContent = d.next_tune_in === 1 ? '1 trade away' : d.next_tune_in+' trades away';
+    if(d.next_tune_in <= 2) el.style.color='#39ff14';
+  }
+}).catch(()=>{});
+</script>
+</body></html>"""
     return html, 200
 
 @app.route("/trades/api", methods=["GET"])
