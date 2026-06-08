@@ -21,19 +21,22 @@ WALLET             = os.environ.get("WALLET", "")
 WALLET_PRIVATE_KEY = os.environ.get("WALLET_PRIVATE_KEY", "")
 _PAPER_ENV         = os.environ.get("PAPER_MODE", "true").lower()
 PAPER_MODE         = _PAPER_ENV == "true" or not WALLET or not WALLET_PRIVATE_KEY
+PROFIT_GOAL       = float(os.environ.get("PROFIT_GOAL", "25000"))
+RISK_LEVEL        = os.environ.get("RISK_LEVEL", "standard").lower()  # conservative / standard / aggressive
+BOT_NAME          = os.environ.get("BOT_NAME", "Boogey's Treasure Chest")
 
 # Position sizing — capital-tiered (protects small accounts)
 MIN_TRADE         = float(os.environ.get("MIN_TRADE",   "3"))
 MAX_TRADE         = float(os.environ.get("MAX_TRADE",   "500"))
 FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "0"))  # 0 = use tiered %
 
-# Capital tiers: (min_capital, trade_pct, daily_max_trades)
-_CAP_TIERS = [
-    (5_000, 0.18, 20),
-    (  500, 0.15, 15),
-    (  100, 0.12, 12),
-    (    0, 0.08, 12),
-]
+# Capital tiers per risk level: (min_capital, trade_pct, daily_max_trades)
+_RISK_TIERS = {
+    "conservative": [(5_000,0.12,15),(500,0.10,12),(100,0.08,10),(0,0.05,8)],
+    "standard":     [(5_000,0.18,20),(500,0.15,15),(100,0.12,12),(0,0.08,12)],
+    "aggressive":   [(5_000,0.22,25),(500,0.18,20),(100,0.15,15),(0,0.12,15)],
+}
+_CAP_TIERS = _RISK_TIERS.get(RISK_LEVEL, _RISK_TIERS["standard"])
 
 MAX_DAILY_LOSS_PCT = float(os.environ.get("MAX_DAILY_LOSS_PCT", "20"))  # stop day if down >20% of start capital
 
@@ -112,6 +115,7 @@ MILESTONES = [100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000]
 
 # ── STATE ────────────────────────────────────────────────────────
 capital           = float(os.environ.get("STARTING_CAPITAL", "39.67"))
+STARTING_CAPITAL  = capital  # snapshot of configured start, for UI display
 SOL_ALLOCATED     = float(os.environ.get("SOL_ALLOCATED",     "19.67"))  # SOL wallet funded for trading
 capital_lock      = threading.Lock()
 open_trades       = {}
@@ -363,8 +367,8 @@ def _send_daily_summary():
             r = t.get("result", "?")
             exit_counts[r] = exit_counts.get(r, 0) + 1
         exit_str = " | ".join(f"{k}:{v}" for k, v in sorted(exit_counts.items(), key=lambda x: -x[1])[:4])
-        # Progress toward $25k goal
-        goal = 25000
+        # Progress toward goal
+        goal = PROFIT_GOAL
         to_go = goal - cap
         day_num = len(_week_day_logs) + 1
         # Next tune in N trades
@@ -375,7 +379,7 @@ def _send_daily_summary():
                f"────────────────────\n"
                f"Trades: {_daily_trades} | {_daily_wins}W {_daily_losses}L ({wr}% WR)\n"
                f"PnL today: ${today_pnl:+.2f}\n"
-               f"Capital: ${cap:.2f} (${to_go:,.0f} to $25k)\n"
+               f"Capital: ${cap:.2f} (${to_go:,.0f} to ${PROFIT_GOAL:,.0f})\n"
                f"Trade size: {pct_tier*100:.0f}% (${trade_size():.2f})\n"
                f"Bond range: {BOND_ENTRY_MIN}–{BOND_ENTRY_MAX}%\n"
                f"Next tune in: {next_tune_in} trade(s)\n"
@@ -1474,7 +1478,7 @@ def home():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="30">
-<title>Boogey's Treasure Chest</title>
+<title>{BOT_NAME}</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
@@ -1618,7 +1622,7 @@ def home():
         <source src="/static/header.mp4" type="video/mp4">
       </video></a>
     </div>
-    <p class="tagline">Autonomous pump.fun sniper &nbsp;·&nbsp; goal $25,000</p>
+    <p class="tagline">Autonomous pump.fun sniper &nbsp;·&nbsp; goal ${PROFIT_GOAL:,.0f}</p>
     <div class="mode-pill"><span class="dot"></span>{mode} MODE</div>
   </header>
 
@@ -1627,6 +1631,7 @@ def home():
     <a href="/trades">📋 All Trades</a>
     <a href="/status">📊 Status</a>
     <a href="/learn">🧠 Strategy</a>
+    <a href="/setup">⚙️ Setup</a>
     <a href="https://pump.fun" target="_blank">🚀 Pump.fun</a>
     <a href="https://solscan.io" target="_blank">🔍 Solscan</a>
   </nav>
@@ -1641,7 +1646,7 @@ def home():
     <div class="card gold-card glow">
       <div class="lbl">Capital</div>
       <div class="val gold">${cap:.2f}</div>
-      <div class="sub">Started at $39.67</div>
+      <div class="sub">Started at ${STARTING_CAPITAL:.2f}</div>
     </div>
     <div class="card">
       <div class="lbl">Total PnL</div>
@@ -1764,7 +1769,7 @@ def _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <meta http-equiv="refresh" content="30">
-<title>Boogey's Treasure Chest</title>
+<title>{BOT_NAME}</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
   *{{box-sizing:border-box;margin:0;padding:0}}
@@ -1857,18 +1862,19 @@ def _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
     <a href="/trades">📋 TRADES</a>
     <a href="/status">📊 STATUS</a>
     <a href="/learn">🧠 STRAT</a>
+    <a href="/setup">⚙️ SETUP</a>
     <a href="https://pump.fun" target="_blank">🚀 PUMP</a>
     <a href="https://solscan.io" target="_blank">🔍 SCAN</a>
   </nav>
   <div class="mode-strip">
-    <span class="left">Refreshes 30s · Goal $25k</span>
+    <span class="left">Refreshes 30s · Goal ${PROFIT_GOAL:,.0f}</span>
     <span class="mode-pill">{mode}</span>
   </div>
   <div class="hero">
     <div class="hero-lbl">Current Capital</div>
     <div class="hero-cap">${cap:.2f}</div>
     <div class="hero-pnl">{sign}${pnl:.2f} total PnL</div>
-    <div class="hero-sub">Started $39.67 &nbsp;·&nbsp; {total} trades closed</div>
+    <div class="hero-sub">Started ${STARTING_CAPITAL:.2f} &nbsp;·&nbsp; {total} trades closed</div>
   </div>
   <div class="grid">
     <div class="stat">
@@ -1934,7 +1940,7 @@ def _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
       <a href="/?theme=classic">CLASSIC</a>
     </div>
   </div>
-  <footer>Boogey's Treasure Chest &nbsp;·&nbsp;
+  <footer>{BOT_NAME} &nbsp;·&nbsp;
     <a href="https://github.com/BoogeyBlues/bot.py" target="_blank">GitHub ↗</a>
   </footer>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
@@ -2026,7 +2032,7 @@ def status():
     for d in reversed(_week_day_logs[-7:]):
         dwr = round(d.get("wins", 0) / max(d.get("trades", 1), 1) * 100, 1)
         dc  = "#4ade80" if dwr >= 50 else ("#fbbf24" if dwr >= 35 else "#f87171")
-        cap_c = "#4ade80" if d["capital"] >= 39.67 else "#f87171"
+        cap_c = "#4ade80" if d["capital"] >= STARTING_CAPITAL else "#f87171"
         day_rows += (f'<tr><td>{d["date"]}</td>'
                      f'<td class="mono">{d.get("trades",0)}</td>'
                      f'<td class="mono green">{d.get("wins",0)}W</td>'
@@ -2039,7 +2045,7 @@ def status():
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <meta http-equiv="refresh" content="20">
-<title>Status — Boogey's Treasure Chest</title>
+<title>Status — {BOT_NAME}</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
   *{{box-sizing:border-box;margin:0;padding:0}}
@@ -2093,6 +2099,7 @@ def status():
     <a href="/trades">TRADES</a>
     <a href="/status" class="active">STATUS</a>
     <a href="/learn">STRATEGY</a>
+    <a href="/setup">SETUP</a>
   </nav>
 
   <div class="page-title">BOT STATUS</div>
@@ -2110,7 +2117,7 @@ def status():
     <div class="stat">
       <div class="lbl">Capital</div>
       <div class="val">${cap:.2f}</div>
-      <div class="sub">Started $39.67</div>
+      <div class="sub">Started ${STARTING_CAPITAL:.2f}</div>
     </div>
     <div class="stat">
       <div class="lbl">Total PnL</div>
@@ -2181,17 +2188,17 @@ def status():
     </table></div>
   </div>'''}
 
-  <footer>Boogey's Treasure Chest · Refreshes every 20s</footer>
+  <footer>{BOT_NAME} · Refreshes every 20s</footer>
 </div>
 <script>
-fetch('/status/api').then(r=>r.json()).then(d=>{
+fetch('/status/api').then(r=>r.json()).then(d=>{{
   if(d.sol_price) document.getElementById('sol-price').textContent='$'+d.sol_price.toLocaleString();
-  if(d.next_tune_in !== undefined) {
+  if(d.next_tune_in !== undefined) {{
     const el = document.getElementById('next-tune');
     el.textContent = d.next_tune_in === 1 ? '1 trade away' : d.next_tune_in+' trades away';
     if(d.next_tune_in <= 2) el.style.color='#39ff14';
-  }
-}).catch(()=>{});
+  }}
+}}).catch(()=>{{}});
 </script>
 </body></html>"""
     return html, 200
@@ -2265,7 +2272,7 @@ def trades():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <meta http-equiv="refresh" content="30">
-<title>Trades — Boogey's Treasure Chest</title>
+<title>Trades — {BOT_NAME}</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
   *{{box-sizing:border-box;margin:0;padding:0}}
@@ -2335,6 +2342,7 @@ def trades():
     <a href="/trades" class="active">TRADES</a>
     <a href="/status">STATUS</a>
     <a href="/learn">STRATEGY</a>
+    <a href="/setup">SETUP</a>
   </nav>
 
   <div class="page-title">TRADES</div>
@@ -2376,7 +2384,7 @@ def trades():
     </table></div>
   </div>
 
-  <footer>Boogey's Treasure Chest · Refreshes every 30s</footer>
+  <footer>{BOT_NAME} · Refreshes every 30s</footer>
 </div>
 
 <!-- TRADE DETAIL MODAL -->
@@ -2608,6 +2616,7 @@ def live():
     <a href="/trades">TRADES</a>
     <a href="/status">STATUS</a>
     <a href="/learn">STRATEGY</a>
+    <a href="/setup">SETUP</a>
   </nav>
 
   <div class="page-title">LIVE FEED</div>
@@ -2622,7 +2631,7 @@ def live():
   <div class="cap-display">
     <div class="lbl">Current Capital</div>
     <div class="amount" id="cap-big">$---.--</div>
-    <div class="sub">Started at $39.67 &nbsp;·&nbsp; Goal: $25,000</div>
+    <div class="sub">Started at ${STARTING_CAPITAL:.2f} &nbsp;·&nbsp; Goal: ${PROFIT_GOAL:,.0f}</div>
   </div>
 
   <div class="section" id="open-section">
@@ -2769,6 +2778,7 @@ poll();
 setInterval(poll, 3000);
 </script>
 </body></html>"""
+    html = html.replace("Boogey's Treasure Chest", BOT_NAME)
     return html, 200
 
 @app.route("/learn/api", methods=["GET"])
@@ -2913,6 +2923,7 @@ def learn():
     <a href="/trades">TRADES</a>
     <a href="/status">STATUS</a>
     <a href="/learn" class="active">STRATEGY</a>
+    <a href="/setup">SETUP</a>
   </nav>
 
   <div class="page-title">STRATEGY</div>
@@ -3158,6 +3169,262 @@ async function load() {
 }
 load();
 setInterval(load, 10000);
+</script>
+</body></html>"""
+    html = html.replace("Boogey's Treasure Chest", BOT_NAME)
+    return html
+
+@app.route("/setup/test-telegram", methods=["POST"])
+def setup_test_telegram():
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return jsonify({"ok": False, "error": "TELEGRAM_TOKEN or TELEGRAM_CHAT_ID not set in env vars"})
+    try:
+        r = _session.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": f"✅ {BOT_NAME} is connected and ready!"},
+            timeout=8
+        )
+        if r.json().get("ok"):
+            return jsonify({"ok": True})
+        return jsonify({"ok": False, "error": r.json().get("description", "unknown")})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+@app.route("/setup", methods=["GET"])
+def setup():
+    with capital_lock:
+        cap = capital
+    wallet_ok   = bool(WALLET)
+    tg_ok       = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
+    pct, limit  = _cap_tier(cap)
+    sol_price   = get_sol_price()
+    sol_display = f"${sol_price:,.2f}" if sol_price else "unavailable"
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Setup — {BOT_NAME}</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  :root{{--acc:#ff6b00;--bg:#0a0500;--card:#120900;--border:#ffffff15}}
+  body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
+  .bg-art{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}}
+  .wrap{{position:relative}}
+  nav{{display:flex;gap:0;border-bottom:2px solid var(--acc);overflow-x:auto;scrollbar-width:none}}
+  nav::-webkit-scrollbar{{display:none}}
+  nav a{{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;border-right:1px solid var(--border);transition:all .15s}}
+  nav a:hover{{background:var(--acc);color:#000}}
+  nav a.active{{background:var(--acc);color:#000}}
+  .page-title{{font-family:'Bebas Neue',sans-serif;font-size:3rem;color:var(--acc);text-shadow:0 0 24px #ff6b0088;padding:18px 16px 8px;line-height:1;letter-spacing:.04em}}
+  .section{{background:var(--card);border-top:2px solid var(--border);padding:14px;margin:0 12px 12px}}
+  .section.accent{{border-top-color:var(--acc)}}
+  .section-hdr{{font-size:.62rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em;margin-bottom:12px}}
+  /* Checklist */
+  .check-row{{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)}}
+  .check-row:last-child{{border-bottom:none}}
+  .check-icon{{font-size:1.1rem;width:22px;text-align:center;flex-shrink:0}}
+  .check-body{{flex:1}}
+  .check-title{{font-size:.8rem;font-weight:700}}
+  .check-sub{{font-size:.65rem;color:#888;margin-top:2px}}
+  .check-badge{{font-size:.6rem;font-weight:900;padding:2px 8px;border:1px solid;letter-spacing:.06em;flex-shrink:0}}
+  .badge-ok{{color:#39ff14;border-color:#39ff1440;background:#39ff1410}}
+  .badge-warn{{color:#ff6b00;border-color:#ff6b0040;background:#ff6b0010}}
+  .badge-err{{color:#ff006e;border-color:#ff006e40;background:#ff006e10}}
+  /* Risk cards */
+  .risk-grid{{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}}
+  .risk-card{{border:1px solid var(--border);padding:10px 8px;text-align:center;cursor:pointer;transition:all .15s;background:#ffffff03}}
+  .risk-card.selected{{border-color:var(--acc);background:#ff6b0015}}
+  .risk-card:hover{{border-color:#ff6b0066}}
+  .risk-name{{font-size:.7rem;font-weight:900;letter-spacing:.06em;text-transform:uppercase}}
+  .risk-detail{{font-size:.58rem;color:#888;margin-top:4px;line-height:1.4}}
+  .risk-selected-label{{font-size:.62rem;color:var(--acc);margin-top:4px;font-weight:700;display:none}}
+  .risk-card.selected .risk-selected-label{{display:block}}
+  /* Env var reference */
+  .env-block{{background:#0a0a0a;border:1px solid var(--border);padding:10px 12px;margin-top:6px}}
+  .env-row{{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid #ffffff08;gap:8px}}
+  .env-row:last-child{{border-bottom:none}}
+  .env-key{{font-family:'JetBrains Mono',monospace;font-size:.65rem;color:var(--acc);flex-shrink:0}}
+  .env-val{{font-family:'JetBrains Mono',monospace;font-size:.62rem;color:#888;text-align:right;word-break:break-all}}
+  .env-set{{color:#39ff14}}
+  .env-unset{{color:#ff006e}}
+  /* Buttons */
+  .btn{{display:block;width:100%;padding:12px;font-size:.78rem;font-weight:900;letter-spacing:.08em;text-transform:uppercase;border:2px solid var(--acc);background:var(--acc);color:#000;cursor:pointer;transition:all .15s;margin-top:8px;text-decoration:none;text-align:center}}
+  .btn:hover{{background:transparent;color:var(--acc)}}
+  .btn-ghost{{background:transparent;color:var(--acc)}}
+  .btn-ghost:hover{{background:var(--acc);color:#000}}
+  .result-msg{{font-size:.72rem;padding:8px 12px;margin-top:6px;display:none}}
+  .result-msg.ok{{background:#39ff1415;border:1px solid #39ff1440;color:#39ff14}}
+  .result-msg.err{{background:#ff006e15;border:1px solid #ff006e40;color:#ff006e}}
+  footer{{padding:14px 16px;text-align:center;font-size:.6rem;color:#444;border-top:1px solid var(--border)}}
+</style>
+</head>
+<body>
+<img src="/static/tankgirl.png" class="bg-art" alt="">
+<div class="wrap">
+  <nav>
+    <a href="/">HOME</a>
+    <a href="/live">LIVE</a>
+    <a href="/trades">TRADES</a>
+    <a href="/status">STATUS</a>
+    <a href="/learn">STRATEGY</a>
+    <a href="/setup" class="active">SETUP</a>
+  </nav>
+
+  <div class="page-title">SETUP</div>
+
+  <!-- Status Checklist -->
+  <div class="section accent">
+    <div class="section-hdr">Configuration Status</div>
+
+    <div class="check-row">
+      <span class="check-icon">{'✅' if not PAPER_MODE else '🟡'}</span>
+      <div class="check-body">
+        <div class="check-title">Trading Mode</div>
+        <div class="check-sub">{'Live trading active' if not PAPER_MODE else 'Paper mode — set WALLET + WALLET_PRIVATE_KEY to go live'}</div>
+      </div>
+      <span class="check-badge {'badge-ok' if not PAPER_MODE else 'badge-warn'}">{'LIVE' if not PAPER_MODE else 'PAPER'}</span>
+    </div>
+
+    <div class="check-row">
+      <span class="check-icon">{'✅' if wallet_ok else '❌'}</span>
+      <div class="check-body">
+        <div class="check-title">Phantom Wallet</div>
+        <div class="check-sub">{'Connected: ' + WALLET[:8] + '...' + WALLET[-4:] if wallet_ok else 'Set WALLET env var in Railway'}</div>
+      </div>
+      <span class="check-badge {'badge-ok' if wallet_ok else 'badge-err'}">{'SET' if wallet_ok else 'MISSING'}</span>
+    </div>
+
+    <div class="check-row">
+      <span class="check-icon">{'✅' if tg_ok else '❌'}</span>
+      <div class="check-body">
+        <div class="check-title">Telegram Notifications</div>
+        <div class="check-sub">{'Token + Chat ID configured' if tg_ok else 'Set TELEGRAM_TOKEN + TELEGRAM_CHAT_ID'}</div>
+      </div>
+      <span class="check-badge {'badge-ok' if tg_ok else 'badge-err'}">{'SET' if tg_ok else 'MISSING'}</span>
+    </div>
+
+    <div class="check-row">
+      <span class="check-icon">✅</span>
+      <div class="check-body">
+        <div class="check-title">Capital</div>
+        <div class="check-sub">Starting: ${STARTING_CAPITAL:.2f} · Current: ${cap:.2f} · Goal: ${PROFIT_GOAL:,.0f}</div>
+      </div>
+      <span class="check-badge badge-ok">SET</span>
+    </div>
+
+    <div class="check-row">
+      <span class="check-icon">✅</span>
+      <div class="check-body">
+        <div class="check-title">SOL Price</div>
+        <div class="check-sub">Live feed: {sol_display}</div>
+      </div>
+      <span class="check-badge badge-ok">LIVE</span>
+    </div>
+
+    {'<button class="btn" style="margin-top:12px" onclick="testTelegram()">📱 Test Telegram Connection</button><div class="result-msg" id="tg-result"></div>' if tg_ok else '<div style="font-size:.68rem;color:#888;margin-top:10px;padding:8px;border:1px solid var(--border)">Add TELEGRAM_TOKEN and TELEGRAM_CHAT_ID to Railway env vars to enable notifications.</div>'}
+  </div>
+
+  <!-- Risk Level -->
+  <div class="section">
+    <div class="section-hdr">Risk Level — currently <span style="color:var(--acc);text-transform:uppercase">{RISK_LEVEL}</span></div>
+    <div class="risk-grid">
+      <div class="risk-card {'selected' if RISK_LEVEL == 'conservative' else ''}">
+        <div class="risk-name" style="color:#39ff14">Conservative</div>
+        <div class="risk-detail">5–12% per trade<br>8–15 trades/day<br>Slower growth, lower risk</div>
+        <div class="risk-selected-label">▲ ACTIVE</div>
+      </div>
+      <div class="risk-card {'selected' if RISK_LEVEL == 'standard' else ''}">
+        <div class="risk-name" style="color:var(--acc)">Standard</div>
+        <div class="risk-detail">8–18% per trade<br>12–20 trades/day<br>Balanced default</div>
+        <div class="risk-selected-label">▲ ACTIVE</div>
+      </div>
+      <div class="risk-card {'selected' if RISK_LEVEL == 'aggressive' else ''}">
+        <div class="risk-name" style="color:#ff006e">Aggressive</div>
+        <div class="risk-detail">12–22% per trade<br>15–25 trades/day<br>Faster growth, higher risk</div>
+        <div class="risk-selected-label">▲ ACTIVE</div>
+      </div>
+    </div>
+    <div style="font-size:.62rem;color:#888;margin-top:8px">Change by setting <span style="color:var(--acc);font-family:monospace">RISK_LEVEL</span> env var to <code>conservative</code>, <code>standard</code>, or <code>aggressive</code> in Railway.</div>
+  </div>
+
+  <!-- Railway Env Var Reference -->
+  <div class="section">
+    <div class="section-hdr">Railway Environment Variables</div>
+    <div class="env-block">
+      <div class="env-row">
+        <span class="env-key">WALLET</span>
+        <span class="env-val {'env-set' if wallet_ok else 'env-unset'}">{'set ✓' if wallet_ok else 'not set'}</span>
+      </div>
+      <div class="env-row">
+        <span class="env-key">WALLET_PRIVATE_KEY</span>
+        <span class="env-val {'env-set' if WALLET_PRIVATE_KEY else 'env-unset'}">{'set ✓' if WALLET_PRIVATE_KEY else 'not set'}</span>
+      </div>
+      <div class="env-row">
+        <span class="env-key">PAPER_MODE</span>
+        <span class="env-val">{'true' if PAPER_MODE else 'false'}</span>
+      </div>
+      <div class="env-row">
+        <span class="env-key">STARTING_CAPITAL</span>
+        <span class="env-val">{STARTING_CAPITAL:.2f}</span>
+      </div>
+      <div class="env-row">
+        <span class="env-key">PROFIT_GOAL</span>
+        <span class="env-val">{PROFIT_GOAL:.0f}</span>
+      </div>
+      <div class="env-row">
+        <span class="env-key">RISK_LEVEL</span>
+        <span class="env-val">{RISK_LEVEL}</span>
+      </div>
+      <div class="env-row">
+        <span class="env-key">TELEGRAM_TOKEN</span>
+        <span class="env-val {'env-set' if TELEGRAM_TOKEN else 'env-unset'}">{'set ✓' if TELEGRAM_TOKEN else 'not set'}</span>
+      </div>
+      <div class="env-row">
+        <span class="env-key">TELEGRAM_CHAT_ID</span>
+        <span class="env-val {'env-set' if TELEGRAM_CHAT_ID else 'env-unset'}">{'set ✓' if TELEGRAM_CHAT_ID else 'not set'}</span>
+      </div>
+    </div>
+    <a href="https://railway.app" target="_blank" class="btn btn-ghost" style="margin-top:10px">Open Railway Dashboard →</a>
+  </div>
+
+  <!-- Quick Links -->
+  <div class="section">
+    <div class="section-hdr">Quick Links</div>
+    <a href="/" class="btn btn-ghost" style="margin-bottom:6px">Dashboard →</a>
+    <a href="/status" class="btn btn-ghost" style="margin-bottom:6px">Bot Status →</a>
+    <a href="/learn" class="btn btn-ghost">Strategy →</a>
+  </div>
+
+  <footer>{BOT_NAME} · Setup</footer>
+</div>
+<script>
+async function testTelegram() {{
+  const btn = document.querySelector('button');
+  const msg = document.getElementById('tg-result');
+  btn.disabled = true;
+  btn.textContent = 'Testing...';
+  try {{
+    const r = await fetch('/setup/test-telegram', {{method:'POST'}});
+    const d = await r.json();
+    msg.style.display = 'block';
+    if (d.ok) {{
+      msg.className = 'result-msg ok';
+      msg.textContent = '✅ Telegram connected! Check your chat for a test message.';
+    }} else {{
+      msg.className = 'result-msg err';
+      msg.textContent = '❌ ' + (d.error || 'Failed');
+    }}
+  }} catch(e) {{
+    msg.style.display = 'block';
+    msg.className = 'result-msg err';
+    msg.textContent = '❌ Request failed';
+  }}
+  btn.disabled = false;
+  btn.textContent = '📱 Test Telegram Connection';
+}}
 </script>
 </body></html>"""
     return html
