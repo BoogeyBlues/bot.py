@@ -13,7 +13,7 @@ DRIFT_MAX_OPEN     = int(os.environ.get("DRIFT_MAX_OPEN", "3"))
 DRIFT_TP_PCT       = float(os.environ.get("DRIFT_TP_PCT", "0.20"))
 DRIFT_SL_PCT       = float(os.environ.get("DRIFT_SL_PCT", "0.10"))
 DRIFT_TRAIL_PCT    = float(os.environ.get("DRIFT_TRAIL_PCT", "0.05"))
-DRIFT_MARKETS      = os.environ.get("DRIFT_MARKETS", "SOL,BTC,ETH")
+DRIFT_MARKETS      = os.environ.get("DRIFT_MARKETS", "SOL,BTC,ETH,DOGE,XRP,BONK,WIF,PEPE,HYPE,POPCAT,TRUMP")
 DRIFT_BOT_NAME     = os.environ.get("DRIFT_BOT_NAME", "Drift Sniper")
 DRIFT_PORT         = int(os.environ.get("DRIFT_PORT", "5001"))
 WALLET             = os.environ.get("WALLET", "")
@@ -82,9 +82,34 @@ def _notify_worker():
 
 # ── PRICE FEEDS ───────────────────────────────────────────────────
 _CG_ID_MAP = {
-    "SOL": "solana", "BTC": "bitcoin", "ETH": "ethereum",
-    "BONK": "bonk", "WIF": "dogwifhat", "JTO": "jito-governance",
-    "PYTH": "pyth-network", "JUP": "jupiter-exchange-solana",
+    # Large caps
+    "SOL":    "solana",
+    "BTC":    "bitcoin",
+    "ETH":    "ethereum",
+    "XRP":    "ripple",
+    "DOGE":   "dogecoin",
+    "AVAX":   "avalanche-2",
+    "SUI":    "sui",
+    "BNB":    "binancecoin",
+    # Meme coins
+    "BONK":   "bonk",
+    "WIF":    "dogwifhat",
+    "PEPE":   "pepe",
+    "POPCAT": "popcat",
+    "TRUMP":  "official-trump",
+    "SHIB":   "shiba-inu",      # price feed only — not on Drift (ETH token)
+    # Solana ecosystem
+    "JTO":    "jito-governance",
+    "JUP":    "jupiter-exchange-solana",
+    "PYTH":   "pyth-network",
+    "TIA":    "celestia",
+    "RNDR":   "render-token",
+    "WEN":    "wen-4",
+    # DeFi / perp platforms
+    "HYPE":   "hyperliquid",
+    "ARB":    "arbitrum",
+    "ONDO":   "ondo-finance",
+    "SEI":    "sei-network",
 }
 
 def get_market_price(market):
@@ -195,7 +220,15 @@ def _execute_drift_order(market, side, size_usd, leverage):
             client = DriftClient(conn, kp)
             await client.subscribe()
             direction = PositionDirection.Long() if side == "long" else PositionDirection.Short()
-            market_index_map = {"SOL": 0, "BTC": 1, "ETH": 2, "BONK": 4, "WIF": 5, "JTO": 6, "PYTH": 7}
+            market_index_map = {
+                "SOL": 0, "BTC": 1, "ETH": 2, "APT": 3,
+                "BONK": 4, "ARB": 5, "DOGE": 6, "BNB": 7,
+                "SUI": 8, "PEPE": 9, "OP": 10, "MATIC": 11,
+                "XRP": 12, "WIF": 13, "JTO": 14, "PYTH": 15,
+                "TIA": 16, "JUP": 17, "RNDR": 18, "W": 19,
+                "DRIFT": 21, "POPCAT": 24, "HYPE": 26,
+                "TRUMP": 27, "AVAX": 28, "SEI": 29,
+            }
             idx = market_index_map.get(market.upper(), 0)
             await client.place_perp_order(OrderParams(
                 order_type=OrderType.Market(),
