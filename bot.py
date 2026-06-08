@@ -1363,33 +1363,19 @@ _CURSOR = """<style>
   }
   .bg-art{display:none!important}
   .wrap{z-index:auto!important}
-}
-@media(pointer:fine){*{cursor:none!important}}
-#px-cur{position:fixed;pointer-events:none;z-index:99999;width:4px;height:4px;
-  background:#ff006e;transform:translate(-2px,-2px);
-  animation:px-walk .35s steps(1) infinite}
-@keyframes px-walk{
-  0%,100%{box-shadow:
-    8px 0 0 #ff006e,12px 0 0 #ff006e,
-    8px 4px 0 #ff006e,12px 4px 0 #ff006e,
-    4px 8px 0 #ff006e,8px 8px 0 #ff006e,12px 8px 0 #ff006e,16px 8px 0 #ff006e,
-    8px 12px 0 #ff006e,12px 12px 0 #ff006e,
-    8px 16px 0 #ff006e,12px 16px 0 #ff006e,
-    4px 20px 0 #ff006e,16px 20px 0 #ff006e,
-    0px 24px 0 #ff006e,20px 24px 0 #ff006e}
-  50%{box-shadow:
-    8px 0 0 #ff006e,12px 0 0 #ff006e,
-    8px 4px 0 #ff006e,12px 4px 0 #ff006e,
-    4px 8px 0 #ff006e,8px 8px 0 #ff006e,12px 8px 0 #ff006e,16px 8px 0 #ff006e,
-    8px 12px 0 #ff006e,12px 12px 0 #ff006e,
-    8px 16px 0 #ff006e,12px 16px 0 #ff006e,
-    8px 20px 0 #ff006e,12px 20px 0 #ff006e,
-    4px 24px 0 #ff006e,16px 24px 0 #ff006e}
+  *{cursor:none!important}
+  #px-cur{position:fixed;pointer-events:none;z-index:99999;
+    width:50px;height:37px;transform:translate(-4px,-4px);
+    image-rendering:pixelated}
 }
 </style>
 <script>
 (function(){
-  var c=document.createElement('div');c.id='px-cur';
+  if(!window.matchMedia('(pointer:fine)').matches) return;
+  var c=document.createElement('img');
+  c.id='px-cur';
+  c.src='/static/cursor_walk.gif';
+  c.style.cssText='position:fixed;pointer-events:none;z-index:99999;width:50px;height:37px;transform:translate(-4px,-4px);image-rendering:pixelated;top:0;left:0';
   document.body.appendChild(c);
   document.addEventListener('mousemove',function(e){
     c.style.left=e.clientX+'px';c.style.top=e.clientY+'px';
