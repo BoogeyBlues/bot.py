@@ -2011,147 +2011,146 @@ def status():
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <meta http-equiv="refresh" content="20">
 <title>Status — Boogey's Treasure Chest</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
   *{{box-sizing:border-box;margin:0;padding:0}}
-  :root{{--gold:#f5c542;--bg:#080810;--surface:#10101a;--surface2:#16162a;--border:#ffffff0d;--text:#e8e8f0;--muted:#5a5a7a}}
-  body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;padding:20px;min-height:100vh}}
-  .wrap{{max-width:900px;margin:0 auto}}
-  .page-hdr{{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:24px}}
-  .page-hdr h1{{font-size:1.4rem;font-weight:800;background:linear-gradient(135deg,var(--gold),#fff);
-    -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}}
-  .back{{color:var(--muted);text-decoration:none;font-size:.82rem;padding:6px 14px;border-radius:8px;
-    border:1px solid var(--border);background:var(--surface);transition:all .2s}}
-  .back:hover{{color:var(--gold);border-color:#f5c54244}}
-  .health{{border-radius:16px;padding:20px 24px;margin-bottom:20px;display:flex;align-items:center;gap:16px;
-    border:1px solid {health[0]}40;background:{health[0]}0d}}
-  .health-icon{{font-size:2rem}}
-  .health-title{{font-size:1.2rem;font-weight:800;color:{health[0]}}}
-  .health-sub{{font-size:.75rem;color:var(--muted);margin-top:3px}}
-  .health-dot{{width:12px;height:12px;border-radius:50%;background:{health[0]};
-    box-shadow:0 0 12px {health[0]};margin-left:auto;animation:pulse 1.5s infinite}}
-  @keyframes pulse{{0%,100%{{opacity:1;transform:scale(1)}}50%{{opacity:.5;transform:scale(.8)}}}}
-  .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-bottom:16px}}
-  .card{{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:16px 18px}}
-  .card .lbl{{font-size:.65rem;font-weight:700;color:var(--muted);text-transform:uppercase;
-    letter-spacing:.08em;display:flex;align-items:center;gap:6px}}
-  .card .val{{font-size:1.5rem;font-weight:800;margin-top:6px;font-family:'JetBrains Mono',monospace}}
-  .card .sub{{font-size:.7rem;color:var(--muted);margin-top:4px}}
-  .sdot{{width:8px;height:8px;border-radius:50%;flex-shrink:0}}
-  .section{{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:18px;margin-bottom:14px}}
-  .section h2{{font-size:.72rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:14px}}
-  .row{{display:flex;justify-content:space-between;align-items:center;padding:10px 0;
-    border-bottom:1px solid var(--border);font-size:.8rem}}
-  .row:last-child{{border-bottom:none}}
-  .row-key{{color:var(--muted);font-size:.75rem}}
-  .row-val{{font-weight:600;font-family:'JetBrains Mono',monospace;font-size:.75rem}}
-  .table-wrap{{overflow-x:auto;border-radius:10px;border:1px solid var(--border)}}
-  table{{width:100%;border-collapse:collapse;font-size:.78rem}}
-  thead{{background:var(--surface2)}}
-  th{{padding:9px 12px;color:var(--muted);font-size:.65rem;font-weight:700;text-transform:uppercase;
-    letter-spacing:.06em;text-align:left;border-bottom:1px solid var(--border)}}
-  td{{padding:9px 12px;border-bottom:1px solid #ffffff05}}
-  tr:last-child td{{border-bottom:none}}
-  .mono{{font-family:'JetBrains Mono',monospace;font-size:.8rem}}
-  .green{{color:#4ade80}} .red{{color:#f87171}} .gold{{color:var(--gold)}} .muted{{color:var(--muted)}}
-  .milestones{{display:flex;flex-wrap:wrap;gap:6px}}
-  .ms{{font-size:.7rem;padding:4px 12px;border-radius:6px;font-weight:600;
-    border:1px solid var(--border);color:var(--muted);background:var(--surface2)}}
-  .ms.hit{{color:var(--gold);border-color:#f5c54240;background:#f5c54215;box-shadow:0 0 8px #f5c54220}}
+  :root{{--acc:#ffee00;--bg:#0a0008;--card:#110010;--border:#ffffff15}}
+  body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
   .bg-art{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}}
-  .wrap{{max-width:900px;margin:0 auto;position:relative;z-index:1}}
+  .wrap{{position:relative;z-index:1}}
+  nav{{display:flex;gap:0;border-bottom:2px solid var(--acc);overflow-x:auto;scrollbar-width:none}}
+  nav::-webkit-scrollbar{{display:none}}
+  nav a{{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;border-right:1px solid var(--border);transition:all .15s}}
+  nav a:hover{{background:var(--acc);color:#000}}
+  nav a.active{{background:var(--acc);color:#000}}
+  .page-title{{font-family:'Bebas Neue',sans-serif;font-size:3rem;color:var(--acc);text-shadow:0 0 24px #ffee0088;padding:18px 16px 8px;line-height:1;letter-spacing:.04em}}
+  .health-banner{{margin:0 12px 12px;padding:16px;border-left:4px solid {health[0]};background:{health[0]}10;display:flex;align-items:center;gap:12px}}
+  .health-icon{{font-size:1.8rem}}
+  .health-title{{font-size:1rem;font-weight:900;color:{health[0]};letter-spacing:.04em;text-transform:uppercase}}
+  .health-sub{{font-size:.68rem;color:#aaa;margin-top:2px}}
+  .health-dot{{width:10px;height:10px;border-radius:50%;background:{health[0]};box-shadow:0 0 10px {health[0]};margin-left:auto;animation:pulse 1.5s infinite;flex-shrink:0}}
+  @keyframes pulse{{0%,100%{{opacity:1;transform:scale(1)}}50%{{opacity:.5;transform:scale(.8)}}}}
+  .grid{{display:grid;grid-template-columns:1fr 1fr;gap:2px;background:var(--acc);border:2px solid var(--acc);margin:0 12px 12px}}
+  .stat{{background:var(--card);padding:14px 16px}}
+  .stat .lbl{{font-size:.58rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em}}
+  .stat .val{{font-family:'Bebas Neue',sans-serif;font-size:2rem;margin-top:2px;line-height:1;color:var(--acc)}}
+  .stat .sub{{font-size:.62rem;color:#888;margin-top:3px}}
+  .section{{background:var(--card);border-top:2px solid var(--border);padding:14px;margin:0 12px 12px}}
+  .section-hdr{{font-size:.62rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em;margin-bottom:12px}}
+  .prog-track{{background:#ffffff10;height:6px;overflow:hidden;margin:8px 0 10px}}
+  .prog-fill{{background:linear-gradient(90deg,var(--acc),#fff);height:6px;width:{progress_pct}%;box-shadow:0 0 8px var(--acc)}}
+  .milestones{{display:flex;flex-wrap:wrap;gap:4px}}
+  .ms{{font-size:.58rem;padding:3px 8px;font-weight:700;letter-spacing:.04em;border:1px solid #ffffff15;color:#666;background:#ffffff05}}
+  .ms.hit{{color:var(--acc);border-color:var(--acc);background:#ffee0015;box-shadow:0 0 6px #ffee0040}}
+  .row{{display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid var(--border);font-size:.78rem}}
+  .row:last-child{{border-bottom:none}}
+  .row-key{{color:#888;font-size:.7rem}}
+  .row-val{{font-family:'JetBrains Mono',monospace;font-size:.72rem;font-weight:600;color:var(--acc)}}
+  .table-wrap{{overflow-x:auto;border:1px solid var(--border)}}
+  table{{width:100%;border-collapse:collapse;font-size:.72rem}}
+  th{{padding:8px 10px;font-size:.56rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.08em;text-align:left;border-bottom:1px solid var(--border);background:#0d000c}}
+  td{{padding:8px 10px;border-bottom:1px solid #ffffff05}}
+  .mono{{font-family:'JetBrains Mono',monospace;font-size:.68rem}}
+  .green{{color:#39ff14}} .red{{color:#ff006e}}
+  footer{{padding:14px 16px;text-align:center;font-size:.6rem;color:#444;border-top:1px solid var(--border)}}
 </style>
 </head>
 <body>
 <img src="/static/tankgirl.png" class="bg-art" alt="">
 <div class="wrap">
-  <div class="page-hdr">
-    <h1>📊 Bot Status</h1>
-    <a href="/" class="back">← Dashboard</a>
-  </div>
+  <nav>
+    <a href="/">HOME</a>
+    <a href="/live">LIVE</a>
+    <a href="/trades">TRADES</a>
+    <a href="/status" class="active">STATUS</a>
+  </nav>
 
-  <div class="health">
+  <div class="page-title">BOT STATUS</div>
+
+  <div class="health-banner">
     <div class="health-icon">{health[1]}</div>
     <div>
       <div class="health-title">{health[2]}</div>
-      <div class="health-sub">{health[3]} &nbsp;·&nbsp; Day {len(_week_day_logs)+1} &nbsp;·&nbsp; Refreshes every 20s</div>
+      <div class="health-sub">{health[3]} · Day {len(_week_day_logs)+1}</div>
     </div>
     <div class="health-dot"></div>
   </div>
 
   <div class="grid">
-    <div class="card" style="border-color:#f5c54230;background:linear-gradient(135deg,#1a140a,var(--surface))">
-      <div class="lbl"><span class="sdot" style="background:var(--gold)"></span>Capital</div>
-      <div class="val gold">${cap:.2f}</div>
-      <div class="sub">Started $39.67 · Goal $25,000</div>
+    <div class="stat">
+      <div class="lbl">Capital</div>
+      <div class="val">${cap:.2f}</div>
+      <div class="sub">Started $39.67</div>
     </div>
-    <div class="card" style="border-color:{pnl_c}25">
-      <div class="lbl"><span class="sdot" style="background:{pnl_c}"></span>Total PnL</div>
+    <div class="stat">
+      <div class="lbl">Total PnL</div>
       <div class="val" style="color:{pnl_c}">{'+' if pnl>=0 else ''}${pnl:.4f}</div>
-      <div class="sub">{total} trades · {len(wins)}W {len(losses)}L</div>
+      <div class="sub">{total} trades closed</div>
     </div>
-    <div class="card" style="border-color:{wr_c}25">
-      <div class="lbl"><span class="sdot" style="background:{wr_c}"></span>Win Rate</div>
+    <div class="stat">
+      <div class="lbl">Win Rate</div>
       <div class="val" style="color:{wr_c}">{wr}%</div>
-      <div class="sub">{'Strong ✓' if wr>=55 else 'Acceptable' if wr>=40 else 'Needs tuning ⚠'}</div>
+      <div class="sub">{len(wins)}W / {len(losses)}L</div>
     </div>
-    <div class="card" style="border-color:{scan_c}25">
-      <div class="lbl"><span class="sdot" style="background:{scan_c}"></span>Scanner</div>
-      <div class="val" style="color:{scan_c};font-size:1.1rem">{scan_t}</div>
+    <div class="stat">
+      <div class="lbl">Scanner</div>
+      <div class="val" style="color:{scan_c};font-size:1.4rem">{scan_t}</div>
       <div class="sub">{'Looking for entries' if scan_t=='SCANNING' else f'Resumes {time.strftime("%H:%M", time.localtime(_pause_until))}' if paused else 'Capital too low'}</div>
     </div>
-    <div class="card" style="border-color:{dl_c}25">
-      <div class="lbl"><span class="sdot" style="background:{dl_c}"></span>Daily Drawdown</div>
+    <div class="stat">
+      <div class="lbl">Daily Drawdown</div>
       <div class="val" style="color:{dl_c}">{daily_loss_pct:.1f}%</div>
-      <div class="sub">Max {MAX_DAILY_LOSS_PCT:.0f}% · {'Safe ✓' if daily_loss_pct<10 else 'Caution' if daily_loss_pct<18 else '⚠ Near limit'}</div>
+      <div class="sub">Max {MAX_DAILY_LOSS_PCT:.0f}%</div>
     </div>
-    <div class="card" style="border-color:#f5c54230">
-      <div class="lbl"><span class="sdot" style="background:#60a5fa"></span>Today</div>
-      <div class="val gold">{_daily_trades}<span style="font-size:1rem;color:var(--muted)">/{limit}</span></div>
-      <div class="sub">{_daily_wins}W &nbsp;{_daily_losses}L &nbsp;·&nbsp; {_daily_date or '—'}</div>
+    <div class="stat">
+      <div class="lbl">Today Trades</div>
+      <div class="val">{_daily_trades}<span style="font-size:1.1rem;color:#888">/{limit}</span></div>
+      <div class="sub">{_daily_wins}W {_daily_losses}L</div>
     </div>
   </div>
 
   <div class="section">
-    <h2>🏆 Milestone Progress — next ${next_m:,} ({progress_pct}%)</h2>
+    <div class="section-hdr">MILESTONE PROGRESS — next ${next_m:,} ({progress_pct}%)</div>
+    <div class="prog-track"><div class="prog-fill"></div></div>
     <div class="milestones">
-      {''.join(f'<span class="ms{chr(32)+chr(104)+chr(105)+chr(116) if cap>=m else ""}">${m:,}</span>' for m in MILESTONES)}
+      {''.join(f'<span class="ms{" hit" if cap >= m else ""}">${m:,}</span>' for m in MILESTONES)}
     </div>
   </div>
 
   <div class="section">
-    <h2>⚙️ Active Settings</h2>
+    <div class="section-hdr">ACTIVE SETTINGS</div>
     <div class="row"><span class="row-key">Mode</span>
-      <span class="row-val" style="color:{'#fbbf24' if PAPER_MODE else '#4ade80'}">{'PAPER' if PAPER_MODE else 'LIVE'}</span></div>
+      <span class="row-val" style="color:{'#ffee00' if PAPER_MODE else '#39ff14'}">{'PAPER' if PAPER_MODE else 'LIVE'}</span></div>
     <div class="row"><span class="row-key">Trade Size</span>
-      <span class="row-val gold">{pct*100:.0f}% = ${trade_size():.2f}</span></div>
+      <span class="row-val">{pct*100:.0f}% = ${trade_size():.2f}</span></div>
     <div class="row"><span class="row-key">Daily Cap</span>
       <span class="row-val">{limit} trades/day</span></div>
     <div class="row"><span class="row-key">Max Daily Loss</span>
-      <span class="row-val" style="color:#fbbf24">{MAX_DAILY_LOSS_PCT:.0f}% of open capital</span></div>
+      <span class="row-val" style="color:#ff006e">{MAX_DAILY_LOSS_PCT:.0f}% of open capital</span></div>
     <div class="row"><span class="row-key">Loss Cooldown</span>
       <span class="row-val">{DAILY_LOSS_MAX} losses → {LOSS_COOLDOWN_HRS}h pause + retune</span></div>
     <div class="row"><span class="row-key">Bond Entry Range</span>
-      <span class="row-val gold">{BOND_ENTRY_MIN}% – {BOND_ENTRY_MAX}%</span></div>
+      <span class="row-val">{BOND_ENTRY_MIN}% – {BOND_ENTRY_MAX}%</span></div>
     <div class="row"><span class="row-key">Bond Take Profit</span>
-      <span class="row-val" style="color:#4ade80">{BOND_TP}%</span></div>
+      <span class="row-val" style="color:#39ff14">{BOND_TP}%</span></div>
     <div class="row"><span class="row-key">Stop Loss</span>
-      <span class="row-val" style="color:#f87171">{BOND_SL_PCT}% · Trailing SL at +{TSL_ACTIVATE_PCT}%</span></div>
+      <span class="row-val" style="color:#ff006e">{BOND_SL_PCT}% · Trailing SL at +{TSL_ACTIVATE_PCT}%</span></div>
     <div class="row"><span class="row-key">Retune Interval</span>
       <span class="row-val">Every {ANALYZE_EVERY} trades</span></div>
   </div>
 
-  {"" if not _week_day_logs else f'''<div class="section">
-    <h2>📅 Day-by-Day Log</h2>
+  {"" if not _week_day_logs else f'''<div class="section" style="margin:0 12px 12px">
+    <div class="section-hdr" style="font-size:.62rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em;margin-bottom:12px">DAY-BY-DAY LOG</div>
     <div class="table-wrap"><table>
       <thead><tr><th>Date</th><th>Trades</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>Capital</th></tr></thead>
       <tbody>{day_rows}</tbody>
     </table></div>
   </div>'''}
 
+  <footer>Boogey's Treasure Chest · Refreshes every 20s</footer>
 </div></body></html>"""
     return html, 200
 
@@ -2222,161 +2221,119 @@ def trades():
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <meta http-equiv="refresh" content="30">
 <title>Trades — Boogey's Treasure Chest</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
   *{{box-sizing:border-box;margin:0;padding:0}}
-  :root{{--gold:#f5c542;--gold2:#e8a800;--bg:#080810;--surface:#10101a;
-    --surface2:#16162a;--border:#ffffff0d;--text:#e8e8f0;--muted:#5a5a7a}}
-  body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;padding:20px;min-height:100vh}}
-  .wrap{{max-width:1100px;margin:0 auto}}
-
-  /* HEADER */
-  .page-hdr{{display:flex;align-items:center;justify-content:space-between;
-    flex-wrap:wrap;gap:12px;margin-bottom:24px}}
-  .page-hdr h1{{font-size:1.4rem;font-weight:800;
-    background:linear-gradient(135deg,var(--gold),#fff);
-    -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}}
-  .back{{color:var(--muted);text-decoration:none;font-size:.82rem;
-    padding:6px 14px;border-radius:8px;border:1px solid var(--border);
-    background:var(--surface);transition:all .2s}}
-  .back:hover{{color:var(--gold);border-color:#f5c54244}}
-
-  /* STAT STRIP */
-  .stats{{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:20px}}
-  .stat{{background:var(--surface);border:1px solid var(--border);
-    border-radius:12px;padding:12px 16px;flex:1;min-width:120px}}
-  .stat .lbl{{font-size:.65rem;font-weight:700;color:var(--muted);
-    text-transform:uppercase;letter-spacing:.08em}}
-  .stat .val{{font-size:1.25rem;font-weight:800;margin-top:4px}}
-  .green{{color:#4ade80}} .red{{color:#f87171}} .gold{{color:var(--gold)}} .muted{{color:var(--muted)}}
-
-  /* OPEN TRADES */
-  .section{{background:var(--surface);border:1px solid var(--border);
-    border-radius:16px;padding:18px;margin-bottom:16px}}
-  .section h2{{font-size:.72rem;font-weight:700;color:var(--muted);
-    text-transform:uppercase;letter-spacing:.1em;margin-bottom:14px}}
-
-  /* TABLE */
-  .table-wrap{{overflow-x:auto;border-radius:12px;border:1px solid var(--border)}}
-  table{{width:100%;border-collapse:collapse;font-size:.78rem}}
-  thead{{background:var(--surface2)}}
-  th{{padding:10px 12px;color:var(--muted);font-size:.65rem;font-weight:700;
-    text-transform:uppercase;letter-spacing:.08em;text-align:left;
-    white-space:nowrap;border-bottom:1px solid var(--border)}}
-  td{{padding:10px 12px;border-bottom:1px solid #ffffff05;vertical-align:middle}}
+  :root{{--acc:#39ff14;--bg:#0a0008;--card:#110010;--border:#ffffff15}}
+  body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
+  .bg-art{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}}
+  .wrap{{position:relative;z-index:1}}
+  nav{{display:flex;gap:0;border-bottom:2px solid var(--acc);overflow-x:auto;scrollbar-width:none}}
+  nav::-webkit-scrollbar{{display:none}}
+  nav a{{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;border-right:1px solid var(--border);transition:all .15s}}
+  nav a:hover{{background:var(--acc);color:#000}}
+  nav a.active{{background:var(--acc);color:#000}}
+  .page-title{{font-family:'Bebas Neue',sans-serif;font-size:3rem;color:var(--acc);text-shadow:0 0 24px #39ff1488;padding:18px 16px 8px;line-height:1;letter-spacing:.04em}}
+  .stat-strip{{display:grid;grid-template-columns:1fr 1fr 1fr;gap:2px;background:var(--acc);border:2px solid var(--acc);margin:0 12px 12px}}
+  .stat{{background:var(--card);padding:12px 14px}}
+  .stat .lbl{{font-size:.58rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em}}
+  .stat .val{{font-family:'Bebas Neue',sans-serif;font-size:1.8rem;margin-top:2px;line-height:1;color:var(--acc)}}
+  .section{{background:var(--card);border-top:2px solid var(--border);padding:14px;margin:0 12px 12px}}
+  .section-hdr{{font-size:.62rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em;margin-bottom:12px}}
+  .table-wrap{{overflow-x:auto;border:1px solid var(--border)}}
+  table{{width:100%;border-collapse:collapse;font-size:.72rem}}
+  th{{padding:8px 10px;font-size:.56rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.08em;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap;background:#0d000c}}
+  td{{padding:9px 10px;border-bottom:1px solid #ffffff05;vertical-align:middle}}
   .trade-row{{cursor:pointer;transition:background .15s}}
-  .trade-row:hover td{{background:#f5c54208}}
-  .trade-row:last-child td{{border-bottom:none}}
-  .td-num{{color:var(--muted);font-size:.7rem}}
-  .sym{{font-weight:700;font-size:.85rem}}
-  .mono{{font-family:'SF Mono','Fira Code',monospace;font-size:.75rem}}
-  .pulse{{animation:pulse 2s infinite;color:var(--gold)}}
+  .trade-row:hover td{{background:#39ff1410}}
+  .td-num{{color:#888;font-size:.65rem}}
+  .sym{{font-weight:900;font-size:.8rem}}
+  .mono{{font-family:'JetBrains Mono',monospace;font-size:.68rem}}
+  .pulse{{animation:pulse 2s infinite;color:var(--acc)}}
   @keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.5}}}}
-
-  /* BADGES */
-  .badge{{display:inline-block;padding:2px 8px;border-radius:5px;
-    font-size:.62rem;font-weight:700;letter-spacing:.04em;white-space:nowrap}}
-  .badge.win{{background:#4ade8020;color:#4ade80;border:1px solid #4ade8040}}
-  .badge.loss{{background:#f8717120;color:#f87171;border:1px solid #f8717140}}
-  .badge.strat{{background:#60a5fa18;color:#60a5fa;border:1px solid #60a5fa30}}
-  .badge.exit{{background:#ffffff08;color:var(--muted);border:1px solid var(--border)}}
-
-  /* MODAL */
-  .overlay{{display:none;position:fixed;inset:0;background:#000000cc;
-    z-index:100;align-items:center;justify-content:center;padding:20px}}
+  .badge{{display:inline-block;padding:2px 6px;font-size:.56rem;font-weight:900;letter-spacing:.06em;border:1px solid}}
+  .badge.win{{color:#39ff14;border-color:#39ff14;background:#39ff1415}}
+  .badge.loss{{color:#ff006e;border-color:#ff006e;background:#ff006e15}}
+  .badge.strat{{color:#00f5ff;border-color:#00f5ff;background:#00f5ff12}}
+  .badge.exit{{color:#888;border-color:#444;background:#ffffff05}}
+  .green{{color:#39ff14}} .red{{color:#ff006e}} .muted{{color:#888}}
+  .overlay{{display:none;position:fixed;inset:0;background:#000000cc;z-index:100;align-items:center;justify-content:center;padding:20px}}
   .overlay.open{{display:flex}}
-  .modal{{background:#13131f;border:1px solid #f5c54230;border-radius:20px;
-    width:100%;max-width:480px;padding:24px;position:relative;
-    box-shadow:0 0 60px #f5c54220}}
-  .modal-close{{position:absolute;top:14px;right:16px;background:none;
-    border:none;color:var(--muted);font-size:1.3rem;cursor:pointer;
-    width:28px;height:28px;display:flex;align-items:center;justify-content:center;
-    border-radius:6px;transition:all .2s}}
+  .modal{{background:#0d0d14;border:1px solid #39ff1430;width:100%;max-width:480px;padding:24px;position:relative;box-shadow:0 0 60px #39ff1420}}
+  .modal-close{{position:absolute;top:14px;right:16px;background:none;border:none;color:#888;font-size:1.3rem;cursor:pointer;width:28px;height:28px;display:flex;align-items:center;justify-content:center;transition:all .2s}}
   .modal-close:hover{{background:#ffffff10;color:#fff}}
-  .modal h2{{font-size:1.1rem;font-weight:800;margin-bottom:4px}}
-  .modal .sub{{font-size:.75rem;color:var(--muted);margin-bottom:20px}}
+  .modal h2{{font-family:'Bebas Neue',sans-serif;font-size:1.6rem;margin-bottom:4px;color:var(--acc)}}
+  .modal .sub{{font-size:.72rem;color:#888;margin-bottom:20px}}
   .timeline{{position:relative;padding-left:20px;margin:20px 0}}
-  .timeline::before{{content:'';position:absolute;left:6px;top:8px;bottom:8px;
-    width:2px;background:linear-gradient(180deg,var(--gold),#f5c54250)}}
+  .timeline::before{{content:'';position:absolute;left:6px;top:8px;bottom:8px;width:2px;background:linear-gradient(180deg,var(--acc),#39ff1450)}}
   .tl-item{{position:relative;margin-bottom:16px}}
   .tl-item:last-child{{margin-bottom:0}}
-  .tl-dot{{position:absolute;left:-17px;top:4px;width:10px;height:10px;
-    border-radius:50%;border:2px solid var(--bg)}}
-  .tl-label{{font-size:.65rem;font-weight:700;color:var(--muted);
-    text-transform:uppercase;letter-spacing:.08em}}
-  .tl-val{{font-size:.9rem;font-weight:700;margin-top:2px}}
-  .tl-sub{{font-size:.72rem;color:var(--muted);margin-top:1px}}
-  .detail-grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:16px}}
-  .detail-box{{background:#ffffff06;border-radius:10px;padding:12px}}
-  .detail-box .lbl{{font-size:.62rem;color:var(--muted);text-transform:uppercase;
-    font-weight:700;letter-spacing:.06em}}
-  .detail-box .val{{font-size:.95rem;font-weight:700;margin-top:4px}}
-  .solscan-btn{{display:block;text-align:center;margin-top:16px;padding:10px;
-    border-radius:10px;background:#f5c54215;border:1px solid #f5c54230;
-    color:var(--gold);text-decoration:none;font-size:.78rem;font-weight:600;
-    transition:all .2s}}
-  .solscan-btn:hover{{background:#f5c54225}}
-  @media(max-width:600px){{.stats{{grid-template-columns:1fr 1fr}}th,td{{padding:8px 8px}}}}
-  .bg-art{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}}
-  .wrap{{max-width:1100px;margin:0 auto;position:relative;z-index:1}}
+  .tl-dot{{position:absolute;left:-17px;top:4px;width:10px;height:10px;border-radius:50%;border:2px solid var(--bg)}}
+  .tl-label{{font-size:.62rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.08em}}
+  .tl-val{{font-size:.9rem;font-weight:700;margin-top:2px;font-family:'JetBrains Mono',monospace}}
+  .tl-sub{{font-size:.68rem;color:#888;margin-top:1px}}
+  .detail-grid{{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:14px}}
+  .detail-box{{background:#ffffff06;padding:10px}}
+  .detail-box .lbl{{font-size:.58rem;color:#888;text-transform:uppercase;font-weight:700;letter-spacing:.06em}}
+  .detail-box .val{{font-size:.9rem;font-weight:700;margin-top:4px;font-family:'JetBrains Mono',monospace;color:var(--acc)}}
+  .solscan-btn{{display:block;text-align:center;margin-top:14px;padding:10px;background:#39ff1415;border:1px solid #39ff1430;color:var(--acc);text-decoration:none;font-size:.78rem;font-weight:700;letter-spacing:.06em;transition:all .2s}}
+  .solscan-btn:hover{{background:#39ff1425}}
+  footer{{padding:14px 16px;text-align:center;font-size:.6rem;color:#444;border-top:1px solid var(--border)}}
 </style>
 </head>
 <body>
 <img src="/static/tankgirl.png" class="bg-art" alt="">
 <div class="wrap">
+  <nav>
+    <a href="/">HOME</a>
+    <a href="/live">LIVE</a>
+    <a href="/trades" class="active">TRADES</a>
+    <a href="/status">STATUS</a>
+  </nav>
 
-  <div class="page-hdr">
-    <h1>💼 Trade History</h1>
-    <a href="/" class="back">← Dashboard</a>
-  </div>
+  <div class="page-title">TRADES</div>
 
-  <div class="stats">
-    <div class="stat"><div class="lbl">Total Trades</div>
-      <div class="val gold">{total}</div></div>
-    <div class="stat"><div class="lbl">Win Rate</div>
-      <div class="val {'green' if wr>=50 else 'red'}">{wr}%</div></div>
-    <div class="stat"><div class="lbl">Total PnL</div>
-      <div class="val {'green' if total_pnl>=0 else 'red'}">{'+' if total_pnl>=0 else ''}${total_pnl}</div></div>
-    <div class="stat"><div class="lbl">Avg Win</div>
-      <div class="val green">+${avg_win}</div></div>
-    <div class="stat"><div class="lbl">Avg Loss</div>
-      <div class="val red">${avg_loss}</div></div>
-    <div class="stat"><div class="lbl">Best Trade</div>
-      <div class="val green">{f'+${best["pnl"]:.4f}' if best else 'N/A'}</div></div>
-  </div>
-
-  {"" if not open_list else f'''
-  <div class="section">
-    <h2>⚡ Currently Open ({len(open_list)})</h2>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Symbol</th><th>Strategy</th><th>Size</th><th>Bond In</th><th>Move</th><th>Held</th></tr></thead>
-        <tbody>{open_rows}</tbody>
-      </table>
+  <div class="stat-strip">
+    <div class="stat">
+      <div class="lbl">Win Rate</div>
+      <div class="val" style="color:{'#39ff14' if wr>=50 else '#ff006e'}">{wr}%</div>
     </div>
+    <div class="stat">
+      <div class="lbl">Total PnL</div>
+      <div class="val" style="color:{'#39ff14' if total_pnl>=0 else '#ff006e'}">{'+' if total_pnl>=0 else ''}${total_pnl}</div>
+    </div>
+    <div class="stat">
+      <div class="lbl">Trades</div>
+      <div class="val">{total}</div>
+    </div>
+  </div>
+
+  {"" if not open_list else f'''<div class="section">
+    <div class="section-hdr">OPEN NOW ({len(open_list)})</div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Symbol</th><th>Strategy</th><th>Size</th><th>Bond In</th><th>Move</th><th>Held</th></tr></thead>
+      <tbody>{open_rows}</tbody>
+    </table></div>
   </div>'''}
 
   <div class="section">
-    <h2>📋 All Closed Trades — click any row for full breakdown</h2>
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>#</th><th>Date / Time</th><th>Symbol</th><th>Strategy</th>
-            <th>Entry</th><th>Exit</th><th>PnL %</th><th>PnL $</th>
-            <th>Hold</th><th>Exit Reason</th><th>Result</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows if rows else '<tr><td colspan="11" style="text-align:center;padding:32px;color:var(--muted)">No closed trades yet — bot is scanning...</td></tr>'}
-        </tbody>
-      </table>
-    </div>
+    <div class="section-hdr">CLOSED TRADES — tap row for full breakdown</div>
+    <div class="table-wrap"><table>
+      <thead><tr>
+        <th>#</th><th>Date / Time</th><th>Symbol</th><th>Strategy</th>
+        <th>Entry</th><th>Exit</th><th>PnL %</th><th>PnL $</th>
+        <th>Hold</th><th>Exit Reason</th><th>Result</th>
+      </tr></thead>
+      <tbody>
+        {rows if rows else '<tr><td colspan="11" style="text-align:center;padding:32px;color:#888">No closed trades yet — bot is scanning...</td></tr>'}
+      </tbody>
+    </table></div>
   </div>
 
+  <footer>Boogey's Treasure Chest · Refreshes every 30s</footer>
 </div>
 
 <!-- TRADE DETAIL MODAL -->
@@ -2394,13 +2351,13 @@ def trades():
         <div class="tl-sub" id="m-entry-sub"></div>
       </div>
       <div class="tl-item">
-        <div class="tl-dot" style="background:#f5c542"></div>
+        <div class="tl-dot" style="background:#39ff14"></div>
         <div class="tl-label">Peak</div>
         <div class="tl-val" id="m-peak"></div>
         <div class="tl-sub" id="m-peak-sub"></div>
       </div>
       <div class="tl-item">
-        <div class="tl-dot" id="m-exit-dot" style="background:#4ade80"></div>
+        <div class="tl-dot" id="m-exit-dot" style="background:#39ff14"></div>
         <div class="tl-label">Exit</div>
         <div class="tl-val" id="m-exit"></div>
         <div class="tl-sub" id="m-exit-sub"></div>
@@ -2435,7 +2392,7 @@ def trades():
     </div>
 
     <a id="m-solscan" href="#" target="_blank" class="solscan-btn">
-      🔍 View on Solscan →
+      VIEW ON SOLSCAN →
     </a>
   </div>
 </div>
@@ -2451,7 +2408,7 @@ function openModal(id) {{
   const peakPct = ((t.peak - t.entry) / Math.max(t.entry, 1e-12) * 100).toFixed(1);
 
   document.getElementById('m-symbol').textContent = t.symbol;
-  document.getElementById('m-symbol').style.color = won ? '#4ade80' : '#f87171';
+  document.getElementById('m-symbol').style.color = won ? '#39ff14' : '#ff006e';
   document.getElementById('m-sub').textContent =
     t.strategy.toUpperCase() + ' · ' + t.date + ' at ' + t.time;
 
@@ -2463,10 +2420,10 @@ function openModal(id) {{
 
   document.getElementById('m-exit').textContent = '$' + t.exit.toFixed(8);
   document.getElementById('m-exit-sub').textContent = t.result + ' · ' + sign + t.pnl_pct.toFixed(1) + '% move';
-  document.getElementById('m-exit-dot').style.background = won ? '#4ade80' : '#f87171';
+  document.getElementById('m-exit-dot').style.background = won ? '#39ff14' : '#ff006e';
 
   document.getElementById('m-pnl').textContent = sign + '$' + t.pnl.toFixed(4);
-  document.getElementById('m-pnl').style.color = won ? '#4ade80' : '#f87171';
+  document.getElementById('m-pnl').style.color = won ? '#39ff14' : '#ff006e';
   document.getElementById('m-hold').textContent = t.hold_m.toFixed(1) + ' min';
   document.getElementById('m-bond').textContent = (t.bond_entry||0).toFixed(1) + '%';
   document.getElementById('m-bond-high').textContent = (t.bond_high||0).toFixed(1) + '%';
@@ -2534,134 +2491,88 @@ def live():
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>Live Feed — Boogey's Treasure Chest</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
   *{box-sizing:border-box;margin:0;padding:0}
-  :root{--gold:#f5c542;--bg:#080810;--surface:#10101a;--surface2:#16162a;
-    --border:#ffffff0d;--text:#e8e8f0;--muted:#5a5a7a;
-    --green:#4ade80;--red:#f87171;--blue:#60a5fa}
-  body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;
-    padding:16px;min-height:100vh}
-  .wrap{max-width:1000px;margin:0 auto}
-
-  /* HEADER */
-  .hdr{display:flex;align-items:center;justify-content:space-between;
-    flex-wrap:wrap;gap:10px;margin-bottom:20px}
-  .hdr-left{display:flex;align-items:center;gap:12px}
-  .hdr h1{font-size:1.25rem;font-weight:800;
-    background:linear-gradient(135deg,var(--gold),#fff);
-    -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
-  .back{color:var(--muted);text-decoration:none;font-size:.78rem;padding:6px 12px;
-    border-radius:8px;border:1px solid var(--border);background:var(--surface);transition:all .2s}
-  .back:hover{color:var(--gold);border-color:#f5c54244}
-
-  /* STATUS BAR */
-  .status-bar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px}
-  .pill{padding:5px 14px;border-radius:999px;font-size:.72rem;font-weight:700;
-    border:1px solid var(--border);background:var(--surface);
-    display:inline-flex;align-items:center;gap:6px}
+  :root{--acc:#00f5ff;--bg:#0a0008;--card:#110010;--border:#ffffff15}
+  body{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}
+  .bg-art{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}
+  .wrap{position:relative;z-index:1}
+  nav{display:flex;gap:0;border-bottom:2px solid var(--acc);overflow-x:auto;scrollbar-width:none}
+  nav::-webkit-scrollbar{display:none}
+  nav a{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;border-right:1px solid var(--border);transition:all .15s}
+  nav a:hover{background:var(--acc);color:#000}
+  nav a.active{background:var(--acc);color:#000}
+  .page-title{font-family:'Bebas Neue',sans-serif;font-size:3rem;color:var(--acc);text-shadow:0 0 24px #00f5ff88;padding:18px 16px 8px;line-height:1;letter-spacing:.04em}
+  .status-bar{display:flex;flex-wrap:wrap;gap:6px;padding:0 12px 12px}
+  .pill{padding:5px 12px;font-size:.68rem;font-weight:700;border:1px solid var(--border);background:var(--card);display:inline-flex;align-items:center;gap:6px;letter-spacing:.04em}
   .dot{width:7px;height:7px;border-radius:50%}
-  .dot.green{background:var(--green);box-shadow:0 0 8px var(--green)}
-  .dot.red{background:var(--red);box-shadow:0 0 8px var(--red)}
-  .dot.gold{background:var(--gold);box-shadow:0 0 8px var(--gold)}
+  .dot.green{background:#39ff14;box-shadow:0 0 8px #39ff14}
+  .dot.red{background:#ff006e;box-shadow:0 0 8px #ff006e}
+  .dot.cyan{background:var(--acc);box-shadow:0 0 8px var(--acc)}
   .blink{animation:blink 1s infinite}
   @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
-
-  /* CAPITAL TICKER */
-  .cap-display{text-align:center;padding:20px;background:var(--surface);
-    border:1px solid #f5c54230;border-radius:16px;margin-bottom:20px;
-    background:linear-gradient(135deg,#1a140a,#10101a)}
-  .cap-display .lbl{font-size:.7rem;font-weight:700;color:var(--muted);
-    text-transform:uppercase;letter-spacing:.1em}
-  .cap-display .amount{font-size:2.8rem;font-weight:800;color:var(--gold);
-    font-family:'JetBrains Mono',monospace;letter-spacing:-.02em;
-    text-shadow:0 0 40px #f5c54250}
-  .cap-display .sub{font-size:.75rem;color:var(--muted);margin-top:4px}
-
-  /* OPEN TRADES */
-  .section{background:var(--surface);border:1px solid var(--border);
-    border-radius:16px;padding:16px;margin-bottom:16px}
-  .section-hdr{display:flex;align-items:center;justify-content:space-between;
-    margin-bottom:14px}
-  .section-hdr h2{font-size:.72rem;font-weight:700;color:var(--muted);
-    text-transform:uppercase;letter-spacing:.1em}
-  .count-badge{background:#f5c54220;color:var(--gold);border:1px solid #f5c54240;
-    border-radius:999px;font-size:.65rem;font-weight:700;padding:2px 8px}
-
-  /* TIMER */
-  .timer{font-family:'JetBrains Mono',monospace;font-size:.85rem;
-    color:var(--gold);font-weight:600}
-  .live-dot{display:inline-block;width:6px;height:6px;background:var(--green);
-    border-radius:50%;margin-right:4px;animation:blink 1s infinite;
-    box-shadow:0 0 6px var(--green)}
-
-  /* TABLE */
-  .table-wrap{overflow-x:auto;border-radius:10px;border:1px solid var(--border)}
-  table{width:100%;border-collapse:collapse;font-size:.78rem}
-  thead{background:var(--surface2)}
-  th{padding:9px 12px;color:var(--muted);font-size:.63rem;font-weight:700;
-    text-transform:uppercase;letter-spacing:.08em;text-align:left;
-    border-bottom:1px solid var(--border);white-space:nowrap}
-  td{padding:10px 12px;border-bottom:1px solid #ffffff05;vertical-align:middle}
+  .cap-display{text-align:center;padding:20px 16px;background:var(--card);border-top:2px solid var(--acc);border-bottom:2px solid var(--border);margin-bottom:12px}
+  .cap-display .lbl{font-size:.62rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.15em;margin-bottom:4px}
+  .cap-display .amount{font-family:'Bebas Neue',sans-serif;font-size:4rem;color:var(--acc);text-shadow:0 0 30px #00f5ff66;letter-spacing:.02em;line-height:1}
+  .cap-display .sub{font-size:.68rem;color:#888;margin-top:6px}
+  .section{background:var(--card);border-top:2px solid var(--border);padding:14px;margin:0 12px 12px}
+  .section-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+  .section-hdr h2{font-size:.62rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em}
+  .count-badge{background:#00f5ff20;color:var(--acc);border:1px solid #00f5ff40;font-size:.62rem;font-weight:700;padding:2px 8px;letter-spacing:.04em}
+  .live-dot{display:inline-block;width:6px;height:6px;background:#39ff14;border-radius:50%;margin-right:4px;animation:blink 1s infinite;box-shadow:0 0 6px #39ff14}
+  .table-wrap{overflow-x:auto;border:1px solid var(--border)}
+  table{width:100%;border-collapse:collapse;font-size:.72rem}
+  th{padding:8px 10px;font-size:.56rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.08em;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap;background:#0d000c}
+  td{padding:9px 10px;border-bottom:1px solid #ffffff05;vertical-align:middle}
   tr:last-child td{border-bottom:none}
   tr.new-row{animation:flash .8s ease-out}
-  @keyframes flash{0%{background:#f5c54218}100%{background:transparent}}
-
-  .mono{font-family:'JetBrains Mono',monospace;font-size:.75rem}
-  .sym{font-weight:700;font-size:.85rem}
-  .muted{color:var(--muted)}
-  .green{color:var(--green)} .red{color:var(--red)} .gold{color:var(--gold)}
-
-  /* BADGES */
-  .badge{display:inline-block;padding:2px 8px;border-radius:5px;
-    font-size:.62rem;font-weight:700;letter-spacing:.04em;white-space:nowrap}
-  .badge.win{background:#4ade8020;color:var(--green);border:1px solid #4ade8040}
-  .badge.loss{background:#f8717120;color:var(--red);border:1px solid #f8717140}
-  .badge.strat{background:#60a5fa18;color:var(--blue);border:1px solid #60a5fa30}
-  .badge.open{background:#f5c54218;color:var(--gold);border:1px solid #f5c54240}
-
-  /* FEED */
+  @keyframes flash{0%{background:#00f5ff18}100%{background:transparent}}
+  .timer{font-family:'JetBrains Mono',monospace;font-size:.8rem;color:var(--acc);font-weight:600}
+  .mono{font-family:'JetBrains Mono',monospace;font-size:.68rem}
+  .sym{font-weight:900;font-size:.8rem}
+  .muted{color:#888}
+  .green{color:#39ff14} .red{color:#ff006e} .cyan{color:var(--acc)}
+  .badge{display:inline-block;padding:2px 6px;font-size:.56rem;font-weight:900;letter-spacing:.06em;border:1px solid}
+  .badge.win{color:#39ff14;border-color:#39ff14;background:#39ff1415}
+  .badge.loss{color:#ff006e;border-color:#ff006e;background:#ff006e15}
+  .badge.strat{color:#00f5ff;border-color:#00f5ff;background:#00f5ff12}
+  .badge.open{color:var(--acc);border-color:var(--acc);background:#00f5ff15}
   .feed{display:flex;flex-direction:column;gap:6px;max-height:400px;overflow-y:auto}
-  .feed-item{display:flex;align-items:center;gap:10px;padding:10px 14px;
-    border-radius:10px;border:1px solid var(--border);background:var(--surface2);
-    font-size:.78rem;animation:flash .8s ease-out}
-  .feed-item.buy{border-color:#60a5fa30;background:#60a5fa08}
-  .feed-item.win{border-color:#4ade8030;background:#4ade8008}
-  .feed-item.loss{border-color:#f8717130;background:#f8717108}
-  .feed-ts{font-family:'JetBrains Mono',monospace;font-size:.65rem;
-    color:var(--muted);white-space:nowrap;min-width:60px}
+  .feed-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--border);background:#0d000c;font-size:.75rem;animation:flash .8s ease-out}
+  .feed-item.buy{border-color:#00f5ff30;background:#00f5ff08}
+  .feed-item.win{border-color:#39ff1430;background:#39ff1408}
+  .feed-item.loss{border-color:#ff006e30;background:#ff006e08}
+  .feed-ts{font-family:'JetBrains Mono',monospace;font-size:.62rem;color:#888;white-space:nowrap;min-width:56px}
   .feed-icon{font-size:1rem;width:20px;text-align:center}
   .feed-body{flex:1}
-  .feed-sym{font-weight:700;margin-right:6px}
-  .feed-detail{color:var(--muted);font-size:.72rem;margin-top:1px}
+  .feed-sym{font-weight:900;margin-right:6px}
+  .feed-detail{color:#888;font-size:.68rem;margin-top:1px}
   .feed-pnl{font-family:'JetBrains Mono',monospace;font-weight:700;white-space:nowrap}
-
-  .empty{text-align:center;padding:32px;color:var(--muted);font-size:.82rem}
-  #last-update{font-size:.65rem;color:var(--muted)}
-  .bg-art{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}
-  .wrap{max-width:1000px;margin:0 auto;position:relative;z-index:1}
+  .empty{text-align:center;padding:28px;color:#888;font-size:.78rem}
+  #last-update{font-size:.62rem;color:#888}
+  footer{padding:14px 16px;text-align:center;font-size:.6rem;color:#444;border-top:1px solid var(--border)}
 </style>
 </head>
 <body>
 <img src="/static/tankgirl.png" class="bg-art" alt="">
 <div class="wrap">
+  <nav>
+    <a href="/">HOME</a>
+    <a href="/live" class="active">LIVE</a>
+    <a href="/trades">TRADES</a>
+    <a href="/status">STATUS</a>
+  </nav>
 
-  <div class="hdr">
-    <div class="hdr-left">
-      <h1>⚡ Live Feed</h1>
-      <span id="last-update"></span>
-    </div>
-    <a href="/" class="back">← Dashboard</a>
-  </div>
+  <div class="page-title">LIVE FEED</div>
 
   <div class="status-bar">
-    <div class="pill"><span class="dot green blink" id="scan-dot"></span>
-      <span id="scan-label">Scanning</span></div>
-    <div class="pill">Capital: <strong id="cap-pill" class="gold">$--</strong></div>
+    <div class="pill"><span class="dot green blink" id="scan-dot"></span><span id="scan-label">Scanning</span></div>
+    <div class="pill">Capital: <strong id="cap-pill" class="cyan">$--</strong></div>
     <div class="pill">Today: <span id="today-pill">--</span></div>
-    <div class="pill">Open: <span id="open-count" class="gold">0</span></div>
+    <div class="pill">Open: <span id="open-count" class="cyan">0</span></div>
   </div>
 
   <div class="cap-display">
@@ -2690,15 +2601,16 @@ def live():
 
   <div class="section">
     <div class="section-hdr">
-      <h2>📡 Trade Events</h2>
-      <a href="/trades" style="font-size:.7rem;color:var(--gold);text-decoration:none">
-        Full History →</a>
+      <h2>TRADE EVENTS</h2>
+      <a href="/trades" style="font-size:.68rem;color:var(--acc);text-decoration:none;font-weight:700;letter-spacing:.06em">FULL HISTORY →</a>
     </div>
     <div class="feed" id="feed">
       <div class="empty">Waiting for trades...</div>
     </div>
   </div>
 
+  <div style="padding:0 12px 8px;text-align:right"><span id="last-update"></span></div>
+  <footer>Boogey's Treasure Chest · Live</footer>
 </div>
 <script>
 let seenIds = new Set();
@@ -2757,9 +2669,9 @@ async function poll() {
           <td><span class="sym">${t.symbol}</span><br>
             <span class="muted" style="font-size:.65rem">${t.strategy.toUpperCase()}</span></td>
           <td><span class="badge strat">${t.strategy.toUpperCase()}</span></td>
-          <td class="mono gold">$${t.amount.toFixed(2)}</td>
+          <td class="mono cyan">$${t.amount.toFixed(2)}</td>
           <td class="mono">${t.bond_entry.toFixed(1)}%</td>
-          <td class="mono gold">${t.bond_high.toFixed(1)}%</td>
+          <td class="mono cyan">${t.bond_high.toFixed(1)}%</td>
           <td class="timer elapsed-cell" data-start="${t.opened_at}">${elapsed(Date.now()/1000 - t.opened_at)}</td>
         </tr>`).join('');
     }
