@@ -187,7 +187,8 @@ _gmgn_backoff     = 0    # seconds to wait before retrying GMGN rank
 _sold_mints       = {}   # mint -> timestamp, cooldown after selling to prevent re-buy
 _gmgn_sm_signal_mints  = set()   # smart money buy signal mints (type 12)
 _gmgn_surge_mints      = set()   # price surge signal mints (type 6)
-_gmgn_kol_mints        = set()   # KOL buy mints
+_gmgn_kol_mints        = set()   # KOL buy mints (entry signal)
+_gmgn_sm_sell_mints    = set()   # smart money sell mints (exit/skip signal)
 _gmgn_signal_time      = 0.0     # last signal refresh time
 _signal_lock           = threading.Lock()
 
@@ -501,14 +502,12 @@ def _send_weekly_report():
         # Day-by-day capital
         cap_progression = " → ".join(f"${d['capital']:.0f}" for d in _week_day_logs) if _week_day_logs else "N/A"
 
-        # Apply best settings for week 2
+        # Apply best bond range from weekly bucket analysis, then let auto_tune refine further
+        global BOND_ENTRY_MIN, BOND_ENTRY_MAX
         if best_bucket:
             best_b = best_bucket[0]
-            BOND_ENTRY_MIN_new = max(50.0, best_b - 2)
-            BOND_ENTRY_MAX_new = min(78.0, best_b + 4)
-        else:
-            BOND_ENTRY_MIN_new = BOND_ENTRY_MIN
-            BOND_ENTRY_MAX_new = BOND_ENTRY_MAX
+            BOND_ENTRY_MIN = max(50.0, best_b - 2)
+            BOND_ENTRY_MAX = min(78.0, best_b + 4)
 
         auto_tune(history)
 
@@ -728,7 +727,10 @@ def get_bonding_details(mint):
         if res.status_code == 200:
             data  = res.json()
             vsol  = float(data.get("virtual_sol_reserves", 0) or 0)
+            vtok  = float(data.get("virtual_token_reserves", 0) or 0)
             bond  = min((vsol / 85_000_000_000) * 100, 99.9)
+            # price_sol: lamports/μtoken → SOL/token after adjusting decimals (÷1000)
+            price_sol = (vsol / vtok / 1000) if vtok > 0 else 0
             return {
                 "bond_pct":   round(bond, 1),
                 "complete":   data.get("complete", False),
@@ -736,6 +738,7 @@ def get_bonding_details(mint):
                 "twitter":    bool(data.get("twitter")),
                 "telegram":   bool(data.get("telegram")),
                 "created_at": int(data.get("created_timestamp", 0) or 0),
+                "price_sol":  price_sol,
             }
     except Exception:
         pass
@@ -839,7 +842,7 @@ def check_dev_history(dev_wallet) -> tuple:
 
 def _refresh_gmgn_signals():
     """Refresh smart-money / KOL signal mint sets. Runs periodically in background."""
-    global _gmgn_sm_signal_mints, _gmgn_surge_mints, _gmgn_kol_mints, _gmgn_signal_time
+    global _gmgn_sm_signal_mints, _gmgn_surge_mints, _gmgn_kol_mints, _gmgn_sm_sell_mints, _gmgn_signal_time
     try:
         hdrs = {"Referer":"https://gmgn.ai/","Origin":"https://gmgn.ai"}
         if GMGN_API_KEY:
@@ -874,7 +877,8 @@ def _refresh_gmgn_signals():
         with _signal_lock:
             _gmgn_sm_signal_mints = sm
             _gmgn_surge_mints     = srg
-            _gmgn_kol_mints       = kol | sm_sell  # kol_mints doubles as "smart money sell" set for exit
+            _gmgn_kol_mints       = kol
+            _gmgn_sm_sell_mints   = sm_sell
             _gmgn_signal_time     = time.time()
             if sm or srg or kol:
                 log("info", f"GMGN signals: sm_buy={len(sm)} surge={len(srg)} kol={len(kol)} sm_sell={len(sm_sell)}", "GMGN")
@@ -904,7 +908,7 @@ def gmgn_signal_score(mint) -> int:
 def gmgn_smart_money_selling(mint) -> bool:
     """Returns True if smart money is actively selling this mint."""
     with _signal_lock:
-        return mint in _gmgn_kol_mints  # kol_mints includes sm_sell mints
+        return mint in _gmgn_sm_sell_mints
 
 # ── USDC PROFIT LOCK ─────────────────────────────────────────────
 def lock_profit_to_usdc(profit_usd):
@@ -1096,8 +1100,13 @@ def exit_trade(mint, price, reason, bond=0):
     pnl    = max(-amount, min(pnl, amount * 5))
     hold_m = (time.time() - trade["opened_at"]) / 60
 
+    sig = execute_sell(trade["tokens"], mint, trade["symbol"])
     with capital_lock:
-        capital += amount + pnl
+        if sig:
+            capital += amount + pnl
+        else:
+            capital += amount  # sell failed — return stake only, no PnL credit
+            log("err", f"Sell tx failed — stake returned, PnL not credited. Check wallet.", trade["symbol"])
 
     sign = "+" if pnl >= 0 else ""
     log("ok" if pnl >= 0 else "err",
@@ -1106,8 +1115,6 @@ def exit_trade(mint, price, reason, bond=0):
     emoji = "✅" if pnl >= 0 else "❌"
     notify(f"{emoji} {'WIN' if pnl>=0 else 'LOSS'} {trade['symbol']}",
            f"Reason: {reason}\nPnL: {sign}${pnl:.4f}\nHeld: {hold_m:.1f} min\nCapital: ${capital:.2f}")
-
-    execute_sell(trade["tokens"], mint, trade["symbol"])
     with _copy_lock:
         _sold_mints[mint] = time.time()  # 30 min cooldown before re-buying
     record_daily_trade(won=(pnl > 0))
@@ -1443,6 +1450,7 @@ def scanner_loop():
                 log("warn", "No coins fetched")
                 time.sleep(30)
                 continue
+            _scan_sol_price = get_sol_price() or 0
 
             # Scan summary counters for diagnostics
             n_social = n_replies = n_bond_range = n_spike_range = 0
@@ -1540,11 +1548,15 @@ def scanner_loop():
                     sig_score = gmgn_signal_score(mint)
 
                     market = get_market_data(mint)
-                    if not market:
-                        log("info", f"BOND SKIP: no market data (DexScreener not indexed yet)", symbol)
-                        continue
-                    if market["price"] <= 0:
-                        log("info", f"BOND SKIP: price=0", symbol)
+                    if not market or market["price"] <= 0:
+                        # DexScreener hasn't indexed yet — derive price from pump.fun reserves
+                        if details and details.get("price_sol", 0) > 0 and _scan_sol_price > 0:
+                            fallback_usd = details["price_sol"] * _scan_sol_price
+                            if fallback_usd > 0:
+                                log("info", f"DexScreener cold — pump.fun price ${fallback_usd:.8f}", symbol)
+                                market = {"price": fallback_usd, "liq": 0, "change1h": 0, "age_h": 0}
+                    if not market or market["price"] <= 0:
+                        log("info", f"BOND SKIP: no price data", symbol)
                         continue
                     # Skip liquidity check for bond runner — bonding curve IS the liquidity
 
@@ -1593,12 +1605,12 @@ def scanner_loop():
 
             log("info",
                 f"Filter summary: {len(coins)} coins | "
-                f"{n_social} have-social | {n_replies} active<5m | "
+                f"{n_social} have-social | {n_replies} active<10m | "
                 f"{n_bond_range} in bond range | {n_spike_range} dormant")
             if n_social == 0:
                 log("warn", "0 coins have Twitter or Telegram — market may be slow")
             elif n_replies == 0:
-                log("warn", f"{n_social} coins have socials but none traded in last 5 min")
+                log("warn", f"{n_social} coins have socials but none traded in last 10 min")
 
         except Exception as e:
             log("err", f"Scanner: {e}")
@@ -2751,7 +2763,7 @@ def scan_debug():
             "social": has_social,
             "secs_since_trade": secs_since,
             "in_bond_range": in_bond_range,
-            "pass": has_social and secs_since <= 300 and in_bond_range,
+            "pass": secs_since <= 600 and in_bond_range,
         })
     passing = [r for r in results if r["pass"]]
     return jsonify({
