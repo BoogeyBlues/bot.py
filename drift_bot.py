@@ -601,10 +601,471 @@ def _inject_cursor(resp):
 
 @app.route("/", methods=["GET"])
 def home():
-    with _state_lock:
-        cap       = _capital
-        pos_list  = list(_positions.values())
-        trades    = list(_trades[:10])
+    mode       = "PAPER" if DRIFT_PAPER_MODE else "LIVE"
+    mode_color = "#ffee00" if DRIFT_PAPER_MODE else "#39ff14"
+    exch       = DRIFT_EXCHANGE.upper()
+    markets_list = [m.strip().upper() for m in DRIFT_MARKETS.split(",")]
+
+    manual_html = ""
+    for mk in markets_list:
+        manual_html += (
+            f'<div class="mkt-row">'
+            f'<span class="mkt-lbl">{mk}</span>'
+            f'<button class="btn btn-long" onclick="manualTrade(\'{mk}\',\'long\')">▲ LONG</button>'
+            f'<button class="btn btn-short" onclick="manualTrade(\'{mk}\',\'short\')">▼ SHORT</button>'
+            f'<button class="btn btn-x" onclick="closePos(\'{mk}\')">✕</button>'
+            f'</div>'
+        )
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>{DRIFT_BOT_NAME}</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
+*{{box-sizing:border-box;margin:0;padding:0}}
+:root{{--cyan:#00e5ff;--green:#00ff88;--red:#ff3355;--yellow:#ffee00;--bg:#050a14;--card:#0a1220;--border:#ffffff15}}
+body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
+.bg-art{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;opacity:.25;pointer-events:none;z-index:0}}
+.wrap{{position:relative;z-index:1}}
+
+/* NAV */
+nav{{display:flex;border-bottom:2px solid var(--cyan);overflow-x:auto;scrollbar-width:none}}
+nav::-webkit-scrollbar{{display:none}}
+nav a{{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;
+  white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;
+  border-right:1px solid var(--border);transition:all .2s}}
+nav a:hover,nav a.active{{background:var(--cyan);color:#000}}
+
+/* MODE STRIP */
+.strip{{background:var(--card);border-bottom:2px solid var(--border);padding:5px 16px;
+  display:flex;justify-content:space-between;align-items:center}}
+.strip-left{{font-size:.6rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em}}
+.mode-pill{{font-size:.65rem;font-weight:900;padding:3px 10px;background:{mode_color};color:#000;letter-spacing:.08em}}
+
+/* HERO */
+.hero{{padding:18px 16px 14px;background:linear-gradient(180deg,#020d1c,var(--bg));
+  border-bottom:3px solid var(--cyan);text-align:center}}
+.hero-title{{font-family:'Bebas Neue',sans-serif;font-size:1.6rem;color:var(--cyan);
+  letter-spacing:.1em;text-shadow:0 0 20px #00e5ff55}}
+.hero-cap{{font-family:'Bebas Neue',sans-serif;font-size:3.6rem;color:var(--cyan);
+  text-shadow:0 0 30px #00e5ff66,3px 3px 0 #ff3355;line-height:1.1;
+  animation:glow 3s ease-in-out infinite}}
+.hero-row{{display:flex;justify-content:center;gap:20px;margin-top:6px;font-size:.68rem;color:#666}}
+.hero-row span{{color:#aaa;font-family:'JetBrains Mono',monospace}}
+
+/* STATS */
+.stats{{display:grid;grid-template-columns:1fr 1fr 1fr;gap:2px;background:var(--cyan);
+  border:2px solid var(--cyan);margin-bottom:2px}}
+.stat{{background:var(--card);padding:12px 10px;text-align:center}}
+.stat .lbl{{font-size:.54rem;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.08em}}
+.stat .val{{font-family:'Bebas Neue',sans-serif;font-size:1.6rem;line-height:1.1;margin-top:2px}}
+
+/* SECTION */
+.sec{{background:var(--card);margin-bottom:2px}}
+.sec-hdr{{display:flex;align-items:center;justify-content:space-between;
+  padding:10px 16px;border-bottom:1px solid var(--border)}}
+.sec-hdr h2{{font-size:.6rem;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.1em}}
+.sec-hdr a{{font-size:.6rem;color:var(--cyan);text-decoration:none;font-weight:700}}
+.sec-hdr span{{font-size:.6rem;color:var(--cyan);font-weight:700}}
+
+/* POSITION CARDS — floating animated */
+.pos-card{{
+  margin:10px 12px;
+  padding:14px;
+  background:linear-gradient(135deg,#0d1825,#0a1520);
+  border:1px solid var(--border);
+  border-radius:2px;
+  animation:slideUp .4s ease forwards, float 4s ease-in-out infinite;
+  animation-delay:calc(var(--i,0) * .1s), calc(var(--i,0) * .5s);
+  opacity:0;
+  position:relative;
+  overflow:hidden;
+}}
+.pos-card::before{{
+  content:'';position:absolute;top:0;left:0;right:0;height:2px;
+  background:linear-gradient(90deg,transparent,var(--cyan),transparent);
+  animation:shimmer 2s ease-in-out infinite;
+}}
+.pos-card.profit{{border-color:#00ff8840;box-shadow:0 0 20px #00ff8810}}
+.pos-card.loss{{border-color:#ff335540;box-shadow:0 0 20px #ff335510}}
+.pos-top{{display:flex;align-items:center;gap:8px;margin-bottom:8px}}
+.pos-sym{{font-family:'Bebas Neue',sans-serif;font-size:1.3rem;color:var(--cyan)}}
+.pos-side{{font-size:.65rem;font-weight:900;padding:2px 7px;border:1px solid;letter-spacing:.06em}}
+.pos-pnl{{font-family:'JetBrains Mono',monospace;font-size:1rem;font-weight:700;margin-left:auto;
+  transition:color .4s ease}}
+.pos-meta{{display:grid;grid-template-columns:1fr 1fr;gap:3px 12px;
+  font-size:.6rem;color:#555;font-family:'JetBrains Mono',monospace;margin-bottom:10px}}
+.pos-meta b{{color:#888;font-weight:400}}
+canvas.mini{{width:100%!important;display:block;margin-bottom:8px;border-radius:2px}}
+.close-btn{{width:100%;padding:8px;background:transparent;border:1px solid var(--red);
+  color:var(--red);font-size:.62rem;font-weight:900;letter-spacing:.08em;cursor:pointer;
+  text-transform:uppercase;transition:all .2s;border-radius:1px}}
+.close-btn:hover{{background:var(--red);color:#fff;box-shadow:0 0 12px #ff335560}}
+.no-pos{{text-align:center;padding:28px 16px;color:#333;font-size:.75rem}}
+.no-pos-icon{{font-size:1.5rem;margin-bottom:6px;opacity:.3}}
+
+/* SPACER */
+.spacer{{height:10px;background:var(--bg)}}
+
+/* TRADES */
+.trade-row{{display:grid;grid-template-columns:1.8fr 1fr 1fr 1.4fr 1fr;gap:4px;
+  padding:9px 16px;border-bottom:1px solid #ffffff08;font-size:.65rem;align-items:center}}
+.trade-row.hdr{{font-size:.54rem;color:#444;font-weight:700;text-transform:uppercase;
+  letter-spacing:.06em;padding:7px 16px;background:#060d18;border-bottom:1px solid var(--border)}}
+.badge{{display:inline-block;padding:2px 5px;font-size:.52rem;font-weight:900;border:1px solid;letter-spacing:.04em}}
+.badge.win{{color:var(--green);border-color:var(--green);background:#00ff8810}}
+.badge.loss{{color:var(--red);border-color:var(--red);background:#ff335510}}
+.badge.sl{{color:#ff6600;border-color:#ff6600;background:#ff660010}}
+
+/* MANUAL */
+.mkt-row{{display:flex;align-items:center;gap:5px;padding:6px 12px;border-bottom:1px solid #ffffff08}}
+.mkt-lbl{{font-family:'Bebas Neue',sans-serif;font-size:.95rem;color:var(--cyan);width:58px;flex-shrink:0}}
+.btn{{padding:5px 11px;font-size:.58rem;font-weight:900;letter-spacing:.06em;border:none;cursor:pointer;text-transform:uppercase;transition:all .15s;flex-shrink:0}}
+.btn-long{{background:var(--green);color:#000}}.btn-long:hover{{box-shadow:0 0 8px var(--green)}}
+.btn-short{{background:var(--red);color:#fff}}.btn-short:hover{{box-shadow:0 0 8px var(--red)}}
+.btn-x{{background:#1a2535;color:#666;border:1px solid #333;padding:5px 9px}}
+.btn-x:hover{{color:#fff;border-color:#666}}
+
+/* LIVE FEED */
+.feed-item{{padding:8px 16px;border-bottom:1px solid #ffffff06;font-size:.62rem;
+  font-family:'JetBrains Mono',monospace;display:flex;gap:8px;align-items:flex-start}}
+.feed-time{{color:#333;font-size:.56rem;flex-shrink:0;margin-top:1px}}
+.feed-text{{color:#888;line-height:1.5}}
+.feed-text.open{{color:var(--cyan)}}.feed-text.win{{color:var(--green)}}.feed-text.loss{{color:var(--red)}}
+
+/* PROGRESS */
+.prog-wrap{{padding:12px 16px;background:var(--card)}}
+.prog-lbl{{font-size:.58rem;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.1em;
+  margin-bottom:6px;display:flex;justify-content:space-between}}
+.prog-track{{background:#ffffff08;height:4px;overflow:hidden}}
+.prog-fill{{background:linear-gradient(90deg,var(--cyan),var(--green),#ffee00);height:4px;
+  transition:width .6s ease;box-shadow:0 0 8px var(--cyan)}}
+.milestones{{display:flex;flex-wrap:wrap;gap:3px;margin-top:8px}}
+.ms{{font-size:.54rem;padding:2px 6px;font-weight:700;border:1px solid #ffffff10;color:#444;background:#ffffff04}}
+.ms.hit{{color:var(--cyan);border-color:var(--cyan);background:#00e5ff10;box-shadow:0 0 5px #00e5ff30}}
+
+footer{{padding:12px 16px;text-align:center;font-size:.58rem;color:#333;border-top:1px solid var(--border)}}
+footer a{{color:var(--cyan);text-decoration:none}}
+
+/* ANIMATIONS */
+@keyframes float{{
+  0%,100%{{transform:translateY(0)}}
+  50%{{transform:translateY(-5px)}}
+}}
+@keyframes slideUp{{
+  from{{opacity:0;transform:translateY(20px)}}
+  to{{opacity:1;transform:translateY(0)}}
+}}
+@keyframes glow{{
+  0%,100%{{text-shadow:0 0 30px #00e5ff66,3px 3px 0 #ff3355}}
+  50%{{text-shadow:0 0 50px #00e5ffaa,3px 3px 0 #ff3355,0 0 80px #00e5ff33}}
+}}
+@keyframes shimmer{{
+  0%{{transform:translateX(-100%)}}
+  100%{{transform:translateX(100%)}}
+}}
+@keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.3}}}}
+.dot{{display:inline-block;width:5px;height:5px;border-radius:50%;
+  background:{mode_color};margin-right:5px;animation:pulse 2s infinite}}
+</style>
+</head>
+<body>
+<img src="/static/tankgirl.png" class="bg-art" alt="">
+<div class="wrap">
+  <nav>
+    <a href="/" class="active">HOME</a>
+    <a href="/monitor">MONITOR</a>
+    <a href="/trades">TRADES</a>
+    <a href="/status/api" target="_blank">API ↗</a>
+    <a href="https://drift.trade" target="_blank">DRIFT ↗</a>
+  </nav>
+  <div class="strip">
+    <span class="strip-left"><span class="dot"></span>{exch} · ${PROFIT_GOAL:,.0f} goal</span>
+    <span class="mode-pill">{mode}</span>
+  </div>
+
+  <div class="hero">
+    <div class="hero-title">{DRIFT_BOT_NAME}</div>
+    <div id="hero-cap" class="hero-cap">${_capital:.2f}</div>
+    <div class="hero-row">
+      <span id="hero-pnl">+$0.00 PnL</span>
+      <span id="hero-trades">0 trades</span>
+      <span id="hero-secured">$0 secured</span>
+    </div>
+  </div>
+
+  <div class="stats">
+    <div class="stat">
+      <div class="lbl">Win Rate</div>
+      <div class="val" id="stat-wr" style="color:var(--green)">0%</div>
+    </div>
+    <div class="stat">
+      <div class="lbl">Open</div>
+      <div class="val cyan" id="stat-open">0/{DRIFT_MAX_OPEN}</div>
+    </div>
+    <div class="stat">
+      <div class="lbl">Daily PnL</div>
+      <div class="val" id="stat-dpnl" style="color:var(--green)">$0</div>
+    </div>
+  </div>
+
+  <!-- LIVE POSITIONS WIDGET -->
+  <div class="sec">
+    <div class="sec-hdr">
+      <h2>LIVE POSITIONS</h2>
+      <span id="pos-count">0</span>
+    </div>
+    <div id="pos-wrap">
+      <div class="no-pos" id="no-pos">
+        <div class="no-pos-icon">📡</div>
+        Scanning for signals...
+      </div>
+    </div>
+  </div>
+
+  <div class="spacer"></div>
+
+  <!-- RECENT TRADES -->
+  <div class="sec">
+    <div class="sec-hdr"><h2>RECENT TRADES</h2><a href="/trades">ALL TRADES →</a></div>
+    <div class="trade-row hdr"><span>MARKET</span><span>SIDE</span><span>PNL</span><span>RESULT</span><span>TIME</span></div>
+    <div id="trades-wrap"><div class="no-pos">No trades yet</div></div>
+  </div>
+
+  <!-- LIVE FEED -->
+  <div class="sec">
+    <div class="sec-hdr"><h2>LIVE FEED</h2><span id="feed-ts"></span></div>
+    <div id="feed-wrap"><div class="no-pos">Waiting for signals...</div></div>
+  </div>
+
+  <!-- PROGRESS -->
+  <div class="prog-wrap">
+    <div class="prog-lbl"><span>GOAL PROGRESS</span><span style="color:var(--cyan)" id="prog-pct">0%</span></div>
+    <div class="prog-track"><div class="prog-fill" id="prog-fill" style="width:0%"></div></div>
+    <div class="milestones">
+      {"".join(f'<span class="ms" id="ms-{m}">${m:,}</span>' for m in MILESTONES)}
+    </div>
+  </div>
+
+  <!-- MANUAL CONTROLS -->
+  <div class="sec">
+    <div class="sec-hdr"><h2>MANUAL CONTROLS</h2></div>
+    <div style="padding:4px 0">{manual_html}</div>
+  </div>
+
+  <footer>{DRIFT_BOT_NAME} · {exch} · <a href="/monitor">Monitor</a> · <a href="/trades">Trades</a> · <a href="/status/api" target="_blank">API ↗</a></footer>
+</div>
+
+<script>
+const charts = {{}}, pnlH = {{}};
+const MS = {json.dumps(MILESTONES)};
+const START_CAP = {STARTING_CAPITAL};
+const GOAL = {PROFIT_GOAL};
+const MAX_OPEN = {DRIFT_MAX_OPEN};
+
+async function poll() {{
+  try {{
+    const d = await fetch('/status/api').then(r => r.json());
+    updateHero(d);
+    updatePositions(d.positions || {{}});
+    updateProgress(d.capital);
+  }} catch(e) {{}}
+}}
+
+async function pollTrades() {{
+  try {{
+    const trades = await fetch('/trades/api').then(r => r.json());
+    const wrap = document.getElementById('trades-wrap');
+    if (!trades.length) {{ wrap.innerHTML = '<div class="no-pos">No trades yet</div>'; return; }}
+    wrap.innerHTML = trades.slice(0,8).map(t => {{
+      const sc = t.side==='long'?'#00ff88':'#ff3355';
+      const pc = t.pnl>=0?'#00ff88':'#ff3355';
+      const b = t.reason==='SL'?'sl':t.pnl>=0?'win':'loss';
+      return `<div class="trade-row">
+        <span style="color:var(--cyan);font-weight:900">${{t.market}}</span>
+        <span style="color:${{sc}}">${{t.side.toUpperCase()}}</span>
+        <span style="color:${{pc}};font-family:monospace">${{t.pnl>=0?'+':''}}$${{t.pnl.toFixed(2)}}</span>
+        <span><span class="badge ${{b}}">${{t.reason}}</span></span>
+        <span style="color:#444">${{t.ts.slice(-5)}}</span>
+      </div>`;
+    }}).join('');
+  }} catch(e) {{}}
+}}
+
+async function pollFeed() {{
+  try {{
+    const d = await fetch('/notify/api').then(r => r.json());
+    document.getElementById('feed-ts').textContent = new Date().toLocaleTimeString();
+    const wrap = document.getElementById('feed-wrap');
+    if (!d.length) {{ wrap.innerHTML = '<div class="no-pos">Waiting for signals...</div>'; return; }}
+    wrap.innerHTML = d.slice(0,5).map(n => {{
+      const txt = n.text || '';
+      const cls = txt.includes('OPEN')?'open':txt.includes('+$')&&txt.includes('CLOSE')?'win':txt.includes('CLOSE')?'loss':'';
+      const clean = txt.replace(/\*/g,'').replace(/\\n/g,' · ');
+      return `<div class="feed-item"><span class="feed-time">${{n.time}}</span><span class="feed-text ${{cls}}">${{clean}}</span></div>`;
+    }}).join('');
+  }} catch(e) {{}}
+}}
+
+function updateHero(d) {{
+  document.getElementById('hero-cap').textContent = '$' + d.capital.toFixed(2);
+  const pnl = d.total_pnl||0;
+  const pnlEl = document.getElementById('hero-pnl');
+  pnlEl.textContent = (pnl>=0?'+':'')+'$'+pnl.toFixed(2)+' PnL';
+  pnlEl.style.color = pnl>=0?'#00ff88':'#ff3355';
+  document.getElementById('hero-trades').textContent = d.total_trades+' trades';
+  document.getElementById('hero-secured').textContent = '$'+(d.profit_secured||0).toFixed(0)+' secured';
+  const wr = d.win_rate||0;
+  const wrEl = document.getElementById('stat-wr');
+  wrEl.textContent = wr+'%'; wrEl.style.color = wr>=50?'#00ff88':'#ff3355';
+  const keys = Object.keys(d.positions||{{}});
+  document.getElementById('stat-open').textContent = keys.length+'/'+MAX_OPEN;
+  const dp = d.daily_pnl||0;
+  const dpEl = document.getElementById('stat-dpnl');
+  dpEl.textContent = (dp>=0?'+':'')+'$'+dp.toFixed(2);
+  dpEl.style.color = dp>=0?'#00ff88':'#ff3355';
+}}
+
+function updatePositions(positions) {{
+  const wrap = document.getElementById('pos-wrap');
+  const noPos = document.getElementById('no-pos');
+  const keys = Object.keys(positions);
+  document.getElementById('pos-count').textContent = keys.length;
+  noPos.style.display = keys.length?'none':'block';
+
+  keys.forEach((market, i) => {{
+    const pos = positions[market];
+    const pnl = pos.pnl||0;
+    if (!pnlH[market]) pnlH[market] = [];
+    pnlH[market].push(pnl);
+    if (pnlH[market].length > 80) pnlH[market].shift();
+
+    let card = document.getElementById('pc-'+market);
+    if (!card) {{
+      card = document.createElement('div');
+      card.id = 'pc-'+market;
+      card.className = 'pos-card';
+      card.style.setProperty('--i', i);
+      card.innerHTML = buildCard(market, pos);
+      wrap.appendChild(card);
+      setTimeout(() => initChart(market), 80);
+    }} else {{
+      const pnlEl = document.getElementById('pp-'+market);
+      const c = pnl>=0?'#00ff88':'#ff3355';
+      const margin = (pos.size||0)/(pos.leverage||1);
+      const pct = margin>0?(pnl/margin*100).toFixed(1):'0.0';
+      if (pnlEl) {{ pnlEl.textContent=(pnl>=0?'+':'')+'$'+pnl.toFixed(2)+' ('+(pnl>=0?'+':'')+pct+'%)'; pnlEl.style.color=c; }}
+      card.className = 'pos-card '+(pnl>=0?'profit':'loss');
+      updateChart(market, pnl);
+    }}
+  }});
+
+  document.querySelectorAll('.pos-card').forEach(el => {{
+    const m = el.id.replace('pc-','');
+    if (!positions[m]) {{ if(charts[m]){{charts[m].destroy();delete charts[m];}} delete pnlH[m]; el.remove(); }}
+  }});
+}}
+
+function buildCard(market, pos) {{
+  const side = pos.side||'long';
+  const sc = side==='long'?'#00ff88':'#ff3355';
+  const pnl = pos.pnl||0; const pc = pnl>=0?'#00ff88':'#ff3355';
+  const margin = (pos.size||0)/(pos.leverage||1);
+  const pct = margin>0?(pnl/margin*100).toFixed(1):'0.0';
+  const cur = pos.current_price||pos.entry||0;
+  return `<div class="pos-top">
+    <span class="pos-sym">${{market}}-PERP</span>
+    <span class="pos-side" style="color:${{sc}};border-color:${{sc}}">${{side.toUpperCase()}}</span>
+    <span class="pos-pnl" id="pp-${{market}}" style="color:${{pc}}">${{pnl>=0?'+':''}}$${{pnl.toFixed(2)}} (${{pnl>=0?'+':''}}${{pct}}%)</span>
+  </div>
+  <div class="pos-meta">
+    <span><b>Entry</b> $${{(pos.entry||0).toFixed(4)}}</span>
+    <span><b>Now</b> $${{cur.toFixed(4)}}</span>
+    <span><b>TP</b> <span style="color:#00ff88">$${{(pos.tp||0).toFixed(4)}}</span></span>
+    <span><b>SL</b> <span style="color:#ff3355">$${{(pos.sl||0).toFixed(4)}}</span></span>
+  </div>
+  <canvas id="chart-${{market}}" class="mini" height="70"></canvas>
+  <button class="close-btn" onclick="closePos('${{market}}')">✕ CLOSE ${{market}}</button>`;
+}}
+
+function initChart(market) {{
+  const el = document.getElementById('chart-'+market);
+  if (!el||charts[market]) return;
+  charts[market] = new Chart(el.getContext('2d'), {{
+    type:'line',
+    data:{{ labels:[], datasets:[{{
+      data:[], borderColor:'#00e5ff',
+      backgroundColor: createGradient(el.getContext('2d'), '#00e5ff'),
+      borderWidth:2, pointRadius:0, tension:0.4, fill:true
+    }}]}},
+    options:{{
+      responsive:true, animation:{{duration:400}},
+      plugins:{{ legend:{{display:false}}, tooltip:{{ callbacks:{{ label: c=>(c.parsed.y>=0?'+':'')+'$'+c.parsed.y.toFixed(2) }} }} }},
+      scales:{{
+        x:{{display:false}},
+        y:{{ grid:{{color:'#ffffff08'}}, ticks:{{color:'#444',font:{{size:9}},callback:v=>'$'+v.toFixed(1)}} }}
+      }}
+    }}
+  }});
+  updateChart(market, pnlH[market]?.slice(-1)[0]||0);
+}}
+
+function createGradient(ctx, color) {{
+  const g = ctx.createLinearGradient(0,0,0,80);
+  g.addColorStop(0, color.replace(')',',0.25)').replace('rgb','rgba'));
+  g.addColorStop(1, color.replace(')',',0.0)').replace('rgb','rgba'));
+  return g;
+}}
+
+function updateChart(market, latestPnl) {{
+  const c = charts[market]; if(!c) return;
+  const hist = pnlH[market]||[];
+  const color = latestPnl>=0?'#00ff88':'#ff3355';
+  const ctx = c.canvas.getContext('2d');
+  const g = ctx.createLinearGradient(0,0,0,70);
+  g.addColorStop(0, latestPnl>=0?'rgba(0,255,136,0.2)':'rgba(255,51,85,0.2)');
+  g.addColorStop(1, 'rgba(0,0,0,0)');
+  c.data.labels = hist.map((_,i)=>i);
+  c.data.datasets[0].data = hist;
+  c.data.datasets[0].borderColor = color;
+  c.data.datasets[0].backgroundColor = g;
+  c.update('none');
+}}
+
+function updateProgress(cap) {{
+  const next = MS.find(m=>m>cap)||GOAL;
+  const pct = Math.max(0,Math.min(100,Math.round((cap-START_CAP)/Math.max(next-START_CAP,1)*100)));
+  document.getElementById('prog-fill').style.width = pct+'%';
+  document.getElementById('prog-pct').textContent = pct+'%';
+  MS.forEach(m => {{
+    const el = document.getElementById('ms-'+m);
+    if(el) el.className = cap>=m?'ms hit':'ms';
+  }});
+}}
+
+function manualTrade(market, side) {{
+  if (!confirm('Open '+side.toUpperCase()+' '+market+'?')) return;
+  fetch('/api/manual-'+side+'/'+market,{{method:'POST'}})
+    .then(r=>r.json()).then(d=>alert(d.msg||d.error)).catch(e=>alert(e));
+}}
+function closePos(market) {{
+  if (!confirm('Close '+market+'?')) return;
+  fetch('/api/close/'+market,{{method:'POST'}})
+    .then(r=>r.json()).then(d=>alert(d.msg||d.error)).catch(e=>alert(e));
+}}
+
+poll(); pollTrades(); pollFeed();
+setInterval(poll, 3000);
+setInterval(pollTrades, 5000);
+setInterval(pollFeed, 4000);
+</script>
+</body></html>"""
+
+
 
     wins   = [t for t in _trades if t["pnl"] >= 0]
     total  = len(_trades)
