@@ -607,16 +607,6 @@ def home():
     exch       = DRIFT_EXCHANGE.upper()
     markets_list = [m.strip().upper() for m in DRIFT_MARKETS.split(",")]
 
-    manual_html = ""
-    for mk in markets_list:
-        manual_html += (
-            f'<div class="mkt-row">'
-            f'<span class="mkt-lbl">{mk}</span>'
-            f'<button class="btn btn-long" onclick="manualTrade(\'{mk}\',\'long\')">▲ LONG</button>'
-            f'<button class="btn btn-short" onclick="manualTrade(\'{mk}\',\'short\')">▼ SHORT</button>'
-            f'<button class="btn btn-x" onclick="closePos(\'{mk}\')">✕</button>'
-            f'</div>'
-        )
     # SHOES + LIQUID redesign
 
     return f"""<!DOCTYPE html>
@@ -904,14 +894,35 @@ footer a{{color:#00e5ff60;text-decoration:none}}
   <!-- MANUAL CONTROLS -->
   <div class="sec">
     <div class="sec-hdr"><h2>MANUAL CONTROLS</h2></div>
-    <div style="padding:4px 0">{manual_html}</div>
-    <div style="padding:10px 12px 12px;border-top:1px solid #ffffff06">
+    <div style="padding:12px 12px 4px">
+      <select id="mkt-sel" style="
+        width:100%;padding:9px 12px;background:#0d1825;color:var(--cyan);
+        border:1px solid #00e5ff30;font-size:.8rem;font-weight:700;
+        font-family:'Bebas Neue',sans-serif;letter-spacing:.08em;
+        border-radius:2px;outline:none;margin-bottom:8px;
+        -webkit-appearance:none;cursor:pointer">
+        {"".join(f'<option value="{mk}">{mk}-PERP</option>' for mk in markets_list)}
+      </select>
+      <div style="display:flex;gap:6px">
+        <button onclick="manualTrade(document.getElementById('mkt-sel').value,'long')" style="
+          flex:1;padding:10px;background:var(--green);color:#000;border:none;
+          font-size:.65rem;font-weight:900;letter-spacing:.08em;cursor:pointer;
+          text-transform:uppercase;border-radius:2px">▲ LONG</button>
+        <button onclick="manualTrade(document.getElementById('mkt-sel').value,'short')" style="
+          flex:1;padding:10px;background:var(--red);color:#fff;border:none;
+          font-size:.65rem;font-weight:900;letter-spacing:.08em;cursor:pointer;
+          text-transform:uppercase;border-radius:2px">▼ SHORT</button>
+        <button onclick="closePos(document.getElementById('mkt-sel').value)" style="
+          padding:10px 14px;background:#0d1825;color:#555;border:1px solid #1a2535;
+          font-size:.65rem;font-weight:900;cursor:pointer;border-radius:2px">✕</button>
+      </div>
+    </div>
+    <div style="padding:10px 12px 12px;border-top:1px solid #ffffff06;margin-top:8px">
       <button onclick="resetCapital()" style="
         width:100%;padding:10px;background:transparent;
         border:1px solid #ff335540;color:#ff3355;
         font-size:.62rem;font-weight:900;letter-spacing:.1em;
-        cursor:pointer;text-transform:uppercase;border-radius:2px;
-        transition:all .2s">
+        cursor:pointer;text-transform:uppercase;border-radius:2px">
         ⟳ RESET CAPITAL TO ${STARTING_CAPITAL:.0f}
       </button>
     </div>
