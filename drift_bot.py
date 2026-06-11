@@ -24,15 +24,18 @@ TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
 GMGN_API_KEY       = os.environ.get("GMGN_API_KEY", "")
 STARTING_CAPITAL   = float(os.environ.get("DRIFT_STARTING_CAPITAL", "100"))
 PROFIT_GOAL        = float(os.environ.get("DRIFT_PROFIT_GOAL", "10000"))
+DRIFT_TP_USD       = float(os.environ.get("DRIFT_TP_USD", "100"))   # close when PnL hits this $
+DRIFT_COMPOUND_PCT = float(os.environ.get("DRIFT_COMPOUND_PCT", "0.10"))  # % of profit reinvested
 REDIS_URL          = os.environ.get("UPSTASH_REDIS_REST_URL", "")
 REDIS_TOKEN        = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
 
 MILESTONES = [250, 500, 1000, 2500, 5000, 10000, 25000]
 
 # ── STATE ─────────────────────────────────────────────────────────
-_positions     = {}
-_trades        = []
-_capital       = STARTING_CAPITAL
+_positions       = {}
+_trades          = []
+_capital         = STARTING_CAPITAL
+_profit_secured  = 0.0   # total profit taken out
 _daily_pnl     = 0.0
 _day_start     = ""
 _price_history = {}
@@ -74,6 +77,7 @@ def redis_load(key):
     return None
 
 def _save_state():
+    global _profit_secured
     with _state_lock:
         cap  = _capital
         pos  = {k: dict(v) for k, v in _positions.items()}
@@ -83,13 +87,15 @@ def _save_state():
     redis_save("drift_positions",  pos)
     redis_save("drift_trades",     trd[-200:])
     redis_save("drift_milestones", ms)
+    redis_save("drift_secured",    _profit_secured)
 
 def _load_state():
-    global _capital, _positions, _trades, _milestones_hit
+    global _capital, _positions, _trades, _milestones_hit, _profit_secured
     cap = redis_load("drift_capital")
     pos = redis_load("drift_positions")
     trd = redis_load("drift_trades")
     ms  = redis_load("drift_milestones")
+    sec = redis_load("drift_secured")
     with _state_lock:
         if cap is not None:
             _capital = float(cap)
@@ -99,6 +105,8 @@ def _load_state():
             _trades = trd
         if ms:
             _milestones_hit = set(ms)
+        if sec is not None:
+            _profit_secured = float(sec)
 
 # ── LOGGING ───────────────────────────────────────────────────────
 def log(level, msg, symbol=""):
@@ -378,15 +386,29 @@ def close_position(market, exit_price, reason=""):
     pnl_usd = pos["size"] * pnl_pct * pos["leverage"]
     margin   = pos["size"] / pos["leverage"]
 
+    # Dollar TP: compound 10% back, secure the rest
+    is_dollar_tp = reason.startswith("TP$") and pnl_usd > 0
+    compound_amt = round(pnl_usd * DRIFT_COMPOUND_PCT, 2) if is_dollar_tp else 0
+    secured_amt  = round(pnl_usd - compound_amt, 2) if is_dollar_tp else 0
+
+    global _profit_secured
     with _state_lock:
-        _capital += margin + pnl_usd
+        if is_dollar_tp:
+            _capital += margin + compound_amt   # return margin + 10% of profit
+            _profit_secured += secured_amt
+        else:
+            _capital += margin + pnl_usd
         _daily_pnl += pnl_usd
+
+    if is_dollar_tp:
+        log("ok", f"SECURED ${secured_amt:.2f} | COMPOUNDED +${compound_amt:.2f} → capital=${_capital:.2f}", market)
 
     trade = {
         "market": market, "side": pos["side"],
         "entry": pos["entry"], "exit": exit_price,
         "pnl": pnl_usd, "pnl_pct": pnl_pct * 100 * pos["leverage"],
         "reason": reason,
+        "secured": secured_amt, "compounded": compound_amt,
         "duration_s": time.time() - pos["opened_at"],
         "ts": time.strftime("%Y-%m-%d %H:%M"),
     }
@@ -400,12 +422,21 @@ def close_position(market, exit_price, reason=""):
     log("ok" if pnl_usd >= 0 else "err",
         f"CLOSE {pos['side'].upper()} {market} @ ${exit_price:.4f} "
         f"PnL={pnl_usd:+.2f} ({pnl_pct*100:+.1f}%) [{reason}]")
-    notify(
-        f"{emoji} *{DRIFT_BOT_NAME}*\n"
-        f"CLOSE {pos['side'].upper()} {market}\n"
-        f"Exit: ${exit_price:.4f}\n"
-        f"PnL: ${pnl_usd:+.2f} ({pnl_pct * 100 * pos['leverage']:+.1f}%) | {reason}"
-    )
+    if is_dollar_tp:
+        notify(
+            f"💰 *{DRIFT_BOT_NAME}*\n"
+            f"PROFIT TAKEN {market}\n"
+            f"Secured: ${secured_amt:.2f}\n"
+            f"Compounded: +${compound_amt:.2f} back into capital\n"
+            f"Capital now: ${_capital:.2f}"
+        )
+    else:
+        notify(
+            f"{emoji} *{DRIFT_BOT_NAME}*\n"
+            f"CLOSE {pos['side'].upper()} {market}\n"
+            f"Exit: ${exit_price:.4f}\n"
+            f"PnL: ${pnl_usd:+.2f} ({pnl_pct * 100 * pos['leverage']:+.1f}%) | {reason}"
+        )
     _save_state()
     _check_milestones()
 
@@ -438,9 +469,12 @@ def monitor_positions():
 
             updated_pos = dict(_positions[market])
 
-        # TP hit
-        if (updated_pos["side"] == "long" and price >= updated_pos["tp"]) or \
-           (updated_pos["side"] == "short" and price <= updated_pos["tp"]):
+        # Dollar TP — close when profit hits threshold
+        if DRIFT_TP_USD > 0 and updated_pos.get("pnl", 0) >= DRIFT_TP_USD:
+            close_position(market, price, f"TP${DRIFT_TP_USD:.0f}")
+        # Percentage TP hit
+        elif (updated_pos["side"] == "long" and price >= updated_pos["tp"]) or \
+             (updated_pos["side"] == "short" and price <= updated_pos["tp"]):
             close_position(market, price, "TP")
         # SL hit
         elif (updated_pos["side"] == "long" and price <= updated_pos["sl"]) or \
@@ -1026,6 +1060,9 @@ def status_api():
         "positions": pos_snap,
         "leverage": DRIFT_LEVERAGE,
         "sol_price": round(sol_price, 2) if sol_price else None,
+        "profit_secured": round(_profit_secured, 2),
+        "tp_usd": DRIFT_TP_USD,
+        "compound_pct": DRIFT_COMPOUND_PCT * 100,
         "markets": DRIFT_MARKETS,
     })
 
