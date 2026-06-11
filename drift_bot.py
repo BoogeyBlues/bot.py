@@ -1142,12 +1142,12 @@ def manual_close(market):
     with _state_lock:
         if market not in _positions:
             return jsonify({"error": f"No open position for {market}"}), 400
+        # Use live cached price first — always accurate
+        price = _positions[market].get("current_price") or _positions[market].get("entry")
 
-    price = get_market_price(market)
+    # Try fresh API price as override if cached is missing
     if not price:
-        # Use entry price as fallback
-        with _state_lock:
-            price = _positions[market]["entry"]
+        price = get_market_price(market)
 
     close_position(market, price, "MANUAL")
     return jsonify({"msg": f"Closed {market} position @ ${price:.4f}"})
