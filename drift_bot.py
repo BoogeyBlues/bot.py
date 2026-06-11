@@ -11,7 +11,7 @@ DRIFT_LEVERAGE     = float(os.environ.get("DRIFT_LEVERAGE", "3"))
 DRIFT_TRADE_PCT    = float(os.environ.get("DRIFT_TRADE_PCT", "0.10"))
 DRIFT_MAX_OPEN     = int(os.environ.get("DRIFT_MAX_OPEN", "3"))
 DRIFT_TP_PCT       = float(os.environ.get("DRIFT_TP_PCT", "0.20"))
-DRIFT_SL_PCT       = float(os.environ.get("DRIFT_SL_PCT", "0.10"))
+DRIFT_SL_PCT       = float(os.environ.get("DRIFT_SL_PCT", "0.05"))
 DRIFT_TRAIL_PCT    = float(os.environ.get("DRIFT_TRAIL_PCT", "0.05"))
 DRIFT_MARKETS      = os.environ.get("DRIFT_MARKETS", "SOL,BTC,ETH,DOGE,XRP,BONK,WIF,PEPE,HYPE,POPCAT,TRUMP")
 DRIFT_BOT_NAME     = os.environ.get("DRIFT_BOT_NAME", "Drift Sniper")
@@ -25,6 +25,7 @@ GMGN_API_KEY       = os.environ.get("GMGN_API_KEY", "")
 STARTING_CAPITAL   = float(os.environ.get("DRIFT_STARTING_CAPITAL", "100"))
 PROFIT_GOAL        = float(os.environ.get("DRIFT_PROFIT_GOAL", "10000"))
 DRIFT_TP_USD       = float(os.environ.get("DRIFT_TP_USD", "100"))   # close when PnL hits this $
+DRIFT_SL_USD       = float(os.environ.get("DRIFT_SL_USD", "2"))     # close when loss hits this $
 DRIFT_COMPOUND_PCT = float(os.environ.get("DRIFT_COMPOUND_PCT", "0.10"))  # % of profit reinvested
 REDIS_URL          = os.environ.get("UPSTASH_REDIS_REST_URL", "")
 REDIS_TOKEN        = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
@@ -473,11 +474,14 @@ def monitor_positions():
         # Dollar TP — close when profit hits threshold
         if DRIFT_TP_USD > 0 and updated_pos.get("pnl", 0) >= DRIFT_TP_USD:
             close_position(market, price, f"TP${DRIFT_TP_USD:.0f}")
+        # Dollar SL — close when loss hits threshold (most reliable stop)
+        elif DRIFT_SL_USD > 0 and updated_pos.get("pnl", 0) <= -DRIFT_SL_USD:
+            close_position(market, price, f"SL${DRIFT_SL_USD:.0f}")
         # Percentage TP hit
         elif (updated_pos["side"] == "long" and price >= updated_pos["tp"]) or \
              (updated_pos["side"] == "short" and price <= updated_pos["tp"]):
             close_position(market, price, "TP")
-        # SL hit
+        # Price-based SL hit
         elif (updated_pos["side"] == "long" and price <= updated_pos["sl"]) or \
              (updated_pos["side"] == "short" and price >= updated_pos["sl"]):
             close_position(market, price, "SL")
@@ -1483,10 +1487,12 @@ def run_position_price_updater():
                     _positions[market]["current_price"] = price
                     updated = dict(_positions[market])
 
-                # SL/TP checked every 5s here — not just every 60s in the trading loop
+                # SL/TP checked every 5s
                 pnl = updated.get("pnl", 0)
                 if DRIFT_TP_USD > 0 and pnl >= DRIFT_TP_USD:
                     close_position(market, price, f"TP${DRIFT_TP_USD:.0f}")
+                elif DRIFT_SL_USD > 0 and pnl <= -DRIFT_SL_USD:
+                    close_position(market, price, f"SL${DRIFT_SL_USD:.0f}")
                 elif (updated["side"] == "long" and price >= updated["tp"]) or \
                      (updated["side"] == "short" and price <= updated["tp"]):
                     close_position(market, price, "TP")
