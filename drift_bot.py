@@ -383,8 +383,8 @@ def close_position(market, exit_price, reason=""):
     else:
         pnl_pct = (pos["entry"] - exit_price) / pos["entry"]
 
-    pnl_usd = pos["size"] * pnl_pct * pos["leverage"]
     margin   = pos["size"] / pos["leverage"]
+    pnl_usd  = margin * pnl_pct * pos["leverage"]   # = notional * pnl_pct
 
     # Dollar TP: compound 10% back, secure the rest
     is_dollar_tp = reason.startswith("TP$") and pnl_usd > 0
@@ -454,10 +454,11 @@ def monitor_positions():
             continue
 
         raw_pct = (price - pos["entry"]) / pos["entry"] * (1 if pos["side"] == "long" else -1)
+        notional = pos["size"]   # size is already notional (margin * leverage)
         with _state_lock:
             if market not in _positions:
                 continue
-            _positions[market]["pnl"] = raw_pct * pos["size"] * pos["leverage"]
+            _positions[market]["pnl"] = raw_pct * notional
 
             # Update trailing peak
             if pos["side"] == "long" and price > _positions[market]["peak_price"]:
@@ -1422,6 +1423,21 @@ def manual_close(market):
     return jsonify({"msg": f"Closed {market} position @ ${price:.4f}"})
 
 
+@app.route("/api/reset-capital", methods=["POST"])
+def reset_capital():
+    global _capital, _trades, _daily_pnl, _profit_secured, _positions
+    with _state_lock:
+        _capital         = STARTING_CAPITAL
+        _trades          = []
+        _daily_pnl       = 0.0
+        _profit_secured  = 0.0
+        _positions       = {}
+    _save_state()
+    log("ok", f"Capital reset to ${STARTING_CAPITAL:.2f} — all trades/positions cleared")
+    notify(f"*{DRIFT_BOT_NAME}* CAPITAL RESET\nCapital: ${STARTING_CAPITAL:.2f}")
+    return jsonify({"msg": f"Reset to ${STARTING_CAPITAL:.2f}", "capital": STARTING_CAPITAL})
+
+
 def run_position_price_updater():
     while True:
         try:
@@ -1429,13 +1445,27 @@ def run_position_price_updater():
                 markets = list(_positions.keys())
             for market in markets:
                 price = get_market_price(market)
-                if price:
-                    with _state_lock:
-                        if market in _positions:
-                            pos = _positions[market]
-                            raw_pct = (price - pos["entry"]) / pos["entry"] * (1 if pos["side"] == "long" else -1)
-                            _positions[market]["pnl"] = raw_pct * pos["size"] * pos["leverage"]
-                            _positions[market]["current_price"] = price
+                if not price:
+                    continue
+                with _state_lock:
+                    if market not in _positions:
+                        continue
+                    pos = _positions[market]
+                    raw_pct = (price - pos["entry"]) / pos["entry"] * (1 if pos["side"] == "long" else -1)
+                    _positions[market]["pnl"] = raw_pct * pos["size"]   # size is already notional
+                    _positions[market]["current_price"] = price
+                    updated = dict(_positions[market])
+
+                # SL/TP checked every 5s here — not just every 60s in the trading loop
+                pnl = updated.get("pnl", 0)
+                if DRIFT_TP_USD > 0 and pnl >= DRIFT_TP_USD:
+                    close_position(market, price, f"TP${DRIFT_TP_USD:.0f}")
+                elif (updated["side"] == "long" and price >= updated["tp"]) or \
+                     (updated["side"] == "short" and price <= updated["tp"]):
+                    close_position(market, price, "TP")
+                elif (updated["side"] == "long" and price <= updated["sl"]) or \
+                     (updated["side"] == "short" and price >= updated["sl"]):
+                    close_position(market, price, "SL")
         except Exception as e:
             log("warn", f"Price updater error: {e}")
         time.sleep(5)
