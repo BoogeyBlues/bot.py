@@ -905,6 +905,16 @@ footer a{{color:#00e5ff60;text-decoration:none}}
   <div class="sec">
     <div class="sec-hdr"><h2>MANUAL CONTROLS</h2></div>
     <div style="padding:4px 0">{manual_html}</div>
+    <div style="padding:10px 12px 12px;border-top:1px solid #ffffff06">
+      <button onclick="resetCapital()" style="
+        width:100%;padding:10px;background:transparent;
+        border:1px solid #ff335540;color:#ff3355;
+        font-size:.62rem;font-weight:900;letter-spacing:.1em;
+        cursor:pointer;text-transform:uppercase;border-radius:2px;
+        transition:all .2s">
+        ⟳ RESET CAPITAL TO ${STARTING_CAPITAL:.0f}
+      </button>
+    </div>
   </div>
 
   <footer>{DRIFT_BOT_NAME} · {exch} · <a href="/monitor">Monitor</a> · <a href="/trades">All Trades</a></footer>
@@ -1178,6 +1188,12 @@ function closePos(market) {{
   if (!confirm('Close ' + market + '?')) return;
   fetch('/api/close/' + market, {{ method: 'POST' }})
     .then(r => r.json()).then(d => alert(d.msg || d.error)).catch(e => alert(e));
+}}
+function resetCapital() {{
+  if (!confirm('Reset capital to ${STARTING_CAPITAL:.0f} and clear all trade history?\\nThis cannot be undone.')) return;
+  fetch('/api/reset-capital', {{ method: 'POST' }})
+    .then(r => r.json()).then(d => {{ alert(d.msg || d.error); poll(); pollTrades(); }})
+    .catch(e => alert(e));
 }}
 
 poll(); pollTrades(); pollFeed();
