@@ -616,6 +616,7 @@ def home():
             f'<button class="btn btn-x" onclick="closePos(\'{mk}\')">✕</button>'
             f'</div>'
         )
+    # SHOES + LIQUID redesign
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -628,12 +629,22 @@ def home():
 @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
 *{{box-sizing:border-box;margin:0;padding:0}}
 :root{{--cyan:#00e5ff;--green:#00ff88;--red:#ff3355;--yellow:#ffee00;--bg:#050a14;--card:#0a1220;--border:#ffffff15}}
-body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
-.bg-art{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;opacity:.25;pointer-events:none;z-index:0}}
+
+/* LIQUID BACKGROUND */
+body{{
+  background:var(--bg);
+  background-image:
+    radial-gradient(ellipse 70% 50% at 15% 15%,#00e5ff09 0%,transparent 60%),
+    radial-gradient(ellipse 50% 70% at 85% 85%,#ff335508 0%,transparent 60%);
+  color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;
+  min-height:100vh;overflow-x:hidden
+}}
+.bg-art{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;opacity:.22;pointer-events:none;z-index:0}}
 .wrap{{position:relative;z-index:1}}
 
 /* NAV */
-nav{{display:flex;border-bottom:2px solid var(--cyan);overflow-x:auto;scrollbar-width:none}}
+nav{{display:flex;border-bottom:2px solid var(--cyan);overflow-x:auto;scrollbar-width:none;
+  background:linear-gradient(90deg,#020d1c,#030f1e)}}
 nav::-webkit-scrollbar{{display:none}}
 nav a{{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;
   white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;
@@ -647,127 +658,156 @@ nav a:hover,nav a.active{{background:var(--cyan);color:#000}}
 .mode-pill{{font-size:.65rem;font-weight:900;padding:3px 10px;background:{mode_color};color:#000;letter-spacing:.08em}}
 
 /* HERO */
-.hero{{padding:18px 16px 14px;background:linear-gradient(180deg,#020d1c,var(--bg));
-  border-bottom:3px solid var(--cyan);text-align:center}}
-.hero-title{{font-family:'Bebas Neue',sans-serif;font-size:1.6rem;color:var(--cyan);
-  letter-spacing:.1em;text-shadow:0 0 20px #00e5ff55}}
-.hero-cap{{font-family:'Bebas Neue',sans-serif;font-size:3.6rem;color:var(--cyan);
-  text-shadow:0 0 30px #00e5ff66,3px 3px 0 #ff3355;line-height:1.1;
-  animation:glow 3s ease-in-out infinite}}
-.hero-row{{display:flex;justify-content:center;gap:20px;margin-top:6px;font-size:.68rem;color:#666}}
-.hero-row span{{color:#aaa;font-family:'JetBrains Mono',monospace}}
+.hero{{padding:18px 16px 20px;
+  background:linear-gradient(180deg,#020d1c 0%,rgba(0,229,255,.04) 60%,var(--bg) 100%);
+  text-align:center;position:relative;overflow:hidden}}
+.hero::after{{content:'';position:absolute;bottom:0;left:0;right:0;height:2px;
+  background:linear-gradient(90deg,transparent,var(--cyan),var(--green),transparent);
+  animation:liquidWave 3s ease-in-out infinite}}
+@keyframes liquidWave{{0%,100%{{opacity:.6;transform:scaleX(1)}}50%{{opacity:1;transform:scaleX(1.05)}}}}
+.hero-title{{font-family:'Bebas Neue',sans-serif;font-size:1.6rem;color:var(--cyan);letter-spacing:.12em;text-shadow:0 0 20px #00e5ff55}}
+.hero-cap{{font-family:'Bebas Neue',sans-serif;font-size:3.8rem;color:var(--cyan);
+  text-shadow:0 0 40px #00e5ff66,4px 4px 0 #ff3355;line-height:1.05;animation:glow 3s ease-in-out infinite}}
+.hero-row{{display:flex;justify-content:center;gap:18px;margin-top:8px;font-size:.68rem;color:#555}}
+.hero-row span{{color:#888;font-family:'JetBrains Mono',monospace}}
+
+/* WAVE DIVIDER */
+.wave-div{{overflow:hidden;line-height:0}}
+.wave-div svg{{display:block;width:100%}}
 
 /* STATS */
-.stats{{display:grid;grid-template-columns:1fr 1fr 1fr;gap:2px;background:var(--cyan);
-  border:2px solid var(--cyan);margin-bottom:2px}}
-.stat{{background:var(--card);padding:12px 10px;text-align:center}}
-.stat .lbl{{font-size:.54rem;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.08em}}
-.stat .val{{font-family:'Bebas Neue',sans-serif;font-size:1.6rem;line-height:1.1;margin-top:2px}}
+.stats{{display:grid;grid-template-columns:1fr 1fr 1fr;gap:1px;
+  background:linear-gradient(90deg,var(--cyan),var(--green))}}
+.stat{{background:#0a1220;padding:12px 10px;text-align:center}}
+.stat .lbl{{font-size:.54rem;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:.08em}}
+.stat .val{{font-family:'Bebas Neue',sans-serif;font-size:1.55rem;line-height:1.1;margin-top:2px}}
 
-/* SECTION */
-.sec{{background:var(--card);margin-bottom:2px}}
+/* LIQUID SECTION */
+.sec{{background:linear-gradient(180deg,#0a1220 0%,#07101e 100%);margin-bottom:1px;position:relative}}
 .sec-hdr{{display:flex;align-items:center;justify-content:space-between;
-  padding:10px 16px;border-bottom:1px solid var(--border)}}
-.sec-hdr h2{{font-size:.6rem;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.1em}}
+  padding:10px 16px;border-bottom:1px solid #ffffff0a}}
+.sec-hdr h2{{font-size:.6rem;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:.12em}}
 .sec-hdr a{{font-size:.6rem;color:var(--cyan);text-decoration:none;font-weight:700}}
 .sec-hdr span{{font-size:.6rem;color:var(--cyan);font-weight:700}}
 
-/* POSITION CARDS — floating animated */
+/* POSITION CARDS — tap to reveal timestamp */
 .pos-card{{
   margin:10px 12px;
-  padding:14px;
-  background:linear-gradient(135deg,#0d1825,#0a1520);
-  border:1px solid var(--border);
-  border-radius:2px;
-  animation:slideUp .4s ease forwards, float 4s ease-in-out infinite;
-  animation-delay:calc(var(--i,0) * .1s), calc(var(--i,0) * .5s);
-  opacity:0;
-  position:relative;
-  overflow:hidden;
+  background:linear-gradient(135deg,#0d1825,#091420);
+  border:1px solid #ffffff12;border-radius:4px;
+  position:relative;overflow:hidden;cursor:pointer;
+  transition:box-shadow .3s ease
 }}
-.pos-card::before{{
-  content:'';position:absolute;top:0;left:0;right:0;height:2px;
+.pos-card::before{{content:'';position:absolute;top:0;left:0;right:0;height:2px;
   background:linear-gradient(90deg,transparent,var(--cyan),transparent);
-  animation:shimmer 2s ease-in-out infinite;
-}}
-.pos-card.profit{{border-color:#00ff8840;box-shadow:0 0 20px #00ff8810}}
-.pos-card.loss{{border-color:#ff335540;box-shadow:0 0 20px #ff335510}}
+  animation:shimmer 2.5s ease-in-out infinite}}
+.pos-card.profit{{border-color:#00ff8828;box-shadow:0 0 16px #00ff8806}}
+.pos-card.profit::before{{background:linear-gradient(90deg,transparent,var(--green),transparent)}}
+.pos-card.loss{{border-color:#ff335528;box-shadow:0 0 16px #ff335506}}
+.pos-card.loss::before{{background:linear-gradient(90deg,transparent,var(--red),transparent)}}
+.pos-card:active{{transform:scale(.99)}}
+.pos-body{{padding:12px 14px 4px}}
 .pos-top{{display:flex;align-items:center;gap:8px;margin-bottom:8px}}
 .pos-sym{{font-family:'Bebas Neue',sans-serif;font-size:1.3rem;color:var(--cyan)}}
-.pos-side{{font-size:.65rem;font-weight:900;padding:2px 7px;border:1px solid;letter-spacing:.06em}}
-.pos-pnl{{font-family:'JetBrains Mono',monospace;font-size:1rem;font-weight:700;margin-left:auto;
-  transition:color .4s ease}}
-.pos-meta{{display:grid;grid-template-columns:1fr 1fr;gap:3px 12px;
-  font-size:.6rem;color:#555;font-family:'JetBrains Mono',monospace;margin-bottom:10px}}
-.pos-meta b{{color:#888;font-weight:400}}
-canvas.mini{{width:100%!important;display:block;margin-bottom:8px;border-radius:2px}}
-.close-btn{{width:100%;padding:8px;background:transparent;border:1px solid var(--red);
-  color:var(--red);font-size:.62rem;font-weight:900;letter-spacing:.08em;cursor:pointer;
-  text-transform:uppercase;transition:all .2s;border-radius:1px}}
-.close-btn:hover{{background:var(--red);color:#fff;box-shadow:0 0 12px #ff335560}}
-.no-pos{{text-align:center;padding:28px 16px;color:#333;font-size:.75rem}}
-.no-pos-icon{{font-size:1.5rem;margin-bottom:6px;opacity:.3}}
+.pos-side{{font-size:.63rem;font-weight:900;padding:2px 7px;border:1px solid;letter-spacing:.06em}}
+.pos-pnl{{font-family:'JetBrains Mono',monospace;font-size:.95rem;font-weight:700;margin-left:auto;transition:color .4s}}
+.pos-meta{{display:grid;grid-template-columns:1fr 1fr;gap:3px 10px;
+  font-size:.6rem;color:#444;font-family:'JetBrains Mono',monospace;margin-bottom:8px}}
+.pos-meta b{{color:#666;font-weight:400}}
+canvas.mini{{width:100%!important;display:block;border-radius:2px}}
+/* expandable timestamp detail */
+.pos-detail{{max-height:0;overflow:hidden;transition:max-height .35s cubic-bezier(.4,0,.2,1),padding .35s ease;
+  background:linear-gradient(180deg,transparent,#00e5ff05);padding:0 14px}}
+.pos-card.expanded .pos-detail{{max-height:72px;padding:8px 14px 10px}}
+.pos-ts-row{{font-size:.58rem;font-family:'JetBrains Mono',monospace;color:#444;
+  display:flex;justify-content:space-between;margin-bottom:4px}}
+.pos-ts-row span:last-child{{color:#666}}
+.pos-notional{{font-size:.56rem;color:#2a3a4a;font-family:'JetBrains Mono',monospace}}
+.pos-hint{{display:flex;justify-content:center;align-items:center;gap:4px;
+  padding:5px 0 6px;font-size:.48rem;color:#1e2d3a;letter-spacing:.12em;text-transform:uppercase}}
+.pos-chevron{{display:inline-block;transition:transform .35s ease;font-size:.6rem;line-height:1}}
+.pos-card.expanded .pos-chevron{{transform:rotate(180deg)}}
+.close-btn{{width:calc(100% - 28px);margin:0 14px 12px;display:block;padding:7px;background:transparent;
+  border:1px solid #ff335530;color:#ff3355;font-size:.6rem;font-weight:900;
+  letter-spacing:.08em;cursor:pointer;text-transform:uppercase;transition:all .2s;border-radius:2px}}
+.close-btn:hover,.close-btn:active{{background:var(--red);color:#fff}}
+.no-pos{{text-align:center;padding:28px 16px;color:#1e2d3a;font-size:.72rem}}
+.no-pos-icon{{font-size:1.4rem;margin-bottom:6px;opacity:.4}}
 
-/* SPACER */
-.spacer{{height:10px;background:var(--bg)}}
+/* WAVE SPACER */
+.wave-spacer{{height:18px;background:var(--bg);position:relative;overflow:hidden}}
+.wave-spacer::after{{content:'';position:absolute;bottom:0;left:-10%;width:120%;height:100%;
+  background:linear-gradient(180deg,transparent,#00e5ff07);
+  clip-path:ellipse(60% 100% at 50% 100%)}}
 
-/* TRADES */
-.trade-row{{display:grid;grid-template-columns:1.8fr 1fr 1fr 1.4fr 1fr;gap:4px;
-  padding:9px 16px;border-bottom:1px solid #ffffff08;font-size:.65rem;align-items:center}}
-.trade-row.hdr{{font-size:.54rem;color:#444;font-weight:700;text-transform:uppercase;
-  letter-spacing:.06em;padding:7px 16px;background:#060d18;border-bottom:1px solid var(--border)}}
-.badge{{display:inline-block;padding:2px 5px;font-size:.52rem;font-weight:900;border:1px solid;letter-spacing:.04em}}
-.badge.win{{color:var(--green);border-color:var(--green);background:#00ff8810}}
-.badge.loss{{color:var(--red);border-color:var(--red);background:#ff335510}}
-.badge.sl{{color:#ff6600;border-color:#ff6600;background:#ff660010}}
-
-/* MANUAL */
-.mkt-row{{display:flex;align-items:center;gap:5px;padding:6px 12px;border-bottom:1px solid #ffffff08}}
-.mkt-lbl{{font-family:'Bebas Neue',sans-serif;font-size:.95rem;color:var(--cyan);width:58px;flex-shrink:0}}
-.btn{{padding:5px 11px;font-size:.58rem;font-weight:900;letter-spacing:.06em;border:none;cursor:pointer;text-transform:uppercase;transition:all .15s;flex-shrink:0}}
-.btn-long{{background:var(--green);color:#000}}.btn-long:hover{{box-shadow:0 0 8px var(--green)}}
-.btn-short{{background:var(--red);color:#fff}}.btn-short:hover{{box-shadow:0 0 8px var(--red)}}
-.btn-x{{background:#1a2535;color:#666;border:1px solid #333;padding:5px 9px}}
-.btn-x:hover{{color:#fff;border-color:#666}}
+/* SHOES PINWHEEL */
+.pinwheel-wrap{{perspective:700px;height:160px;position:relative;margin:14px 16px 4px;cursor:pointer}}
+.pw-card{{
+  position:absolute;top:0;left:0;right:0;
+  padding:12px 14px;
+  background:linear-gradient(135deg,#0d1825,#0a1520);
+  border:1px solid #ffffff0e;border-radius:3px;
+  transform-origin:top center;
+  transition:transform .5s cubic-bezier(.34,1.56,.64,1),opacity .4s ease;
+  backface-visibility:hidden;will-change:transform,opacity
+}}
+.pw-card[data-idx="0"]{{transform:rotateX(0deg) translateZ(0) scale(1);z-index:5;opacity:1}}
+.pw-card[data-idx="1"]{{transform:rotateX(5deg) translateZ(-18px) scale(.96);z-index:4;opacity:.78}}
+.pw-card[data-idx="2"]{{transform:rotateX(10deg) translateZ(-34px) scale(.92);z-index:3;opacity:.58}}
+.pw-card[data-idx="3"]{{transform:rotateX(14deg) translateZ(-46px) scale(.88);z-index:2;opacity:.40}}
+.pw-card[data-idx="4"]{{transform:rotateX(18deg) translateZ(-56px) scale(.84);z-index:1;opacity:.24}}
+.pw-card.fly-off{{
+  transform:rotateX(-45deg) translateZ(60px) translateY(-50px) scale(.75)!important;
+  opacity:0!important;
+  transition:transform .3s ease-in,opacity .25s ease-in!important;
+  z-index:10!important
+}}
+.pw-top{{display:flex;align-items:center;gap:8px;margin-bottom:5px}}
+.pw-sym{{font-family:'Bebas Neue',sans-serif;font-size:1.25rem;color:var(--cyan)}}
+.pw-side{{font-size:.6rem;font-weight:900;padding:1px 6px;border:1px solid;letter-spacing:.05em}}
+.pw-pnl{{font-family:'JetBrains Mono',monospace;font-size:.88rem;font-weight:700;margin-left:auto}}
+.pw-detail{{font-size:.56rem;color:#2a3a4a;font-family:'JetBrains Mono',monospace}}
+.pw-hint{{text-align:center;font-size:.48rem;color:#1a2535;letter-spacing:.14em;
+  text-transform:uppercase;padding:4px 0 10px}}
 
 /* LIVE FEED */
-.feed-item{{padding:8px 16px;border-bottom:1px solid #ffffff06;font-size:.62rem;
+.feed-item{{padding:7px 16px;border-bottom:1px solid #ffffff04;font-size:.6rem;
   font-family:'JetBrains Mono',monospace;display:flex;gap:8px;align-items:flex-start}}
-.feed-time{{color:#333;font-size:.56rem;flex-shrink:0;margin-top:1px}}
-.feed-text{{color:#888;line-height:1.5}}
+.feed-time{{color:#1e2d3a;font-size:.54rem;flex-shrink:0;margin-top:1px}}
+.feed-text{{color:#555;line-height:1.5}}
 .feed-text.open{{color:var(--cyan)}}.feed-text.win{{color:var(--green)}}.feed-text.loss{{color:var(--red)}}
 
 /* PROGRESS */
-.prog-wrap{{padding:12px 16px;background:var(--card)}}
-.prog-lbl{{font-size:.58rem;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.1em;
+.prog-wrap{{padding:12px 16px;background:linear-gradient(180deg,#0a1220,#07101e)}}
+.prog-lbl{{font-size:.56rem;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:.1em;
   margin-bottom:6px;display:flex;justify-content:space-between}}
-.prog-track{{background:#ffffff08;height:4px;overflow:hidden}}
-.prog-fill{{background:linear-gradient(90deg,var(--cyan),var(--green),#ffee00);height:4px;
-  transition:width .6s ease;box-shadow:0 0 8px var(--cyan)}}
+.prog-track{{background:#ffffff07;height:3px;overflow:hidden;border-radius:2px}}
+.prog-fill{{background:linear-gradient(90deg,var(--cyan),var(--green),#ffee00);height:3px;
+  transition:width .8s ease;box-shadow:0 0 8px var(--cyan)}}
 .milestones{{display:flex;flex-wrap:wrap;gap:3px;margin-top:8px}}
-.ms{{font-size:.54rem;padding:2px 6px;font-weight:700;border:1px solid #ffffff10;color:#444;background:#ffffff04}}
-.ms.hit{{color:var(--cyan);border-color:var(--cyan);background:#00e5ff10;box-shadow:0 0 5px #00e5ff30}}
+.ms{{font-size:.52rem;padding:2px 6px;font-weight:700;border:1px solid #ffffff08;color:#2a3a4a;background:#ffffff02}}
+.ms.hit{{color:var(--cyan);border-color:#00e5ff35;background:#00e5ff0a;box-shadow:0 0 5px #00e5ff20}}
 
-footer{{padding:12px 16px;text-align:center;font-size:.58rem;color:#333;border-top:1px solid var(--border)}}
-footer a{{color:var(--cyan);text-decoration:none}}
+/* MANUAL */
+.mkt-row{{display:flex;align-items:center;gap:5px;padding:6px 12px;border-bottom:1px solid #ffffff05}}
+.mkt-lbl{{font-family:'Bebas Neue',sans-serif;font-size:.95rem;color:var(--cyan);width:58px;flex-shrink:0}}
+.btn{{padding:5px 11px;font-size:.58rem;font-weight:900;letter-spacing:.06em;border:none;cursor:pointer;
+  text-transform:uppercase;transition:all .15s;flex-shrink:0}}
+.btn-long{{background:var(--green);color:#000}}.btn-short{{background:var(--red);color:#fff}}
+.btn-x{{background:#0d1825;color:#444;border:1px solid #1a2535;padding:5px 9px}}
+.btn-x:active{{color:#fff}}
+
+footer{{padding:12px 16px;text-align:center;font-size:.56rem;color:#1e2d3a;
+  border-top:1px solid #ffffff07;background:#050a14}}
+footer a{{color:#00e5ff60;text-decoration:none}}
 
 /* ANIMATIONS */
-@keyframes float{{
-  0%,100%{{transform:translateY(0)}}
-  50%{{transform:translateY(-5px)}}
-}}
-@keyframes slideUp{{
-  from{{opacity:0;transform:translateY(20px)}}
-  to{{opacity:1;transform:translateY(0)}}
-}}
 @keyframes glow{{
-  0%,100%{{text-shadow:0 0 30px #00e5ff66,3px 3px 0 #ff3355}}
-  50%{{text-shadow:0 0 50px #00e5ffaa,3px 3px 0 #ff3355,0 0 80px #00e5ff33}}
+  0%,100%{{text-shadow:0 0 30px #00e5ff55,4px 4px 0 #ff3355}}
+  50%{{text-shadow:0 0 60px #00e5ffaa,4px 4px 0 #ff3355,0 0 100px #00e5ff22}}
 }}
-@keyframes shimmer{{
-  0%{{transform:translateX(-100%)}}
-  100%{{transform:translateX(100%)}}
-}}
+@keyframes shimmer{{0%{{transform:translateX(-100%)}}100%{{transform:translateX(100%)}}}}
+@keyframes slideUp{{from{{opacity:0;transform:translateY(16px)}}to{{opacity:1;transform:translateY(0)}}}}
 @keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.3}}}}
 .dot{{display:inline-block;width:5px;height:5px;border-radius:50%;
   background:{mode_color};margin-right:5px;animation:pulse 2s infinite}}
@@ -776,6 +816,7 @@ footer a{{color:var(--cyan);text-decoration:none}}
 <body>
 <img src="/static/tankgirl.png" class="bg-art" alt="">
 <div class="wrap">
+
   <nav>
     <a href="/" class="active">HOME</a>
     <a href="/monitor">MONITOR</a>
@@ -792,10 +833,16 @@ footer a{{color:var(--cyan);text-decoration:none}}
     <div class="hero-title">{DRIFT_BOT_NAME}</div>
     <div id="hero-cap" class="hero-cap">${_capital:.2f}</div>
     <div class="hero-row">
-      <span id="hero-pnl">+$0.00 PnL</span>
+      <span id="hero-pnl">$0.00 PnL</span>
       <span id="hero-trades">0 trades</span>
       <span id="hero-secured">$0 secured</span>
     </div>
+  </div>
+
+  <div class="wave-div" style="background:#0a1220">
+    <svg viewBox="0 0 430 16" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="none">
+      <path d="M0,16 C80,2 180,12 260,5 C340,-2 400,10 430,6 L430,16 Z" fill="#050a14"/>
+    </svg>
   </div>
 
   <div class="stats">
@@ -805,7 +852,7 @@ footer a{{color:var(--cyan);text-decoration:none}}
     </div>
     <div class="stat">
       <div class="lbl">Open</div>
-      <div class="val cyan" id="stat-open">0/{DRIFT_MAX_OPEN}</div>
+      <div class="val" id="stat-open" style="color:var(--cyan)">0/{DRIFT_MAX_OPEN}</div>
     </div>
     <div class="stat">
       <div class="lbl">Daily PnL</div>
@@ -813,7 +860,7 @@ footer a{{color:var(--cyan);text-decoration:none}}
     </div>
   </div>
 
-  <!-- LIVE POSITIONS WIDGET -->
+  <!-- LIVE POSITIONS -->
   <div class="sec">
     <div class="sec-hdr">
       <h2>LIVE POSITIONS</h2>
@@ -827,13 +874,15 @@ footer a{{color:var(--cyan);text-decoration:none}}
     </div>
   </div>
 
-  <div class="spacer"></div>
+  <div class="wave-spacer"></div>
 
-  <!-- RECENT TRADES -->
+  <!-- RECENT TRADES — SHOES PINWHEEL -->
   <div class="sec">
-    <div class="sec-hdr"><h2>RECENT TRADES</h2><a href="/trades">ALL TRADES →</a></div>
-    <div class="trade-row hdr"><span>MARKET</span><span>SIDE</span><span>PNL</span><span>RESULT</span><span>TIME</span></div>
-    <div id="trades-wrap"><div class="no-pos">No trades yet</div></div>
+    <div class="sec-hdr"><h2>RECENT TRADES</h2><a href="/trades">ALL →</a></div>
+    <div id="pinwheel" class="pinwheel-wrap" onclick="cyclePinwheel()">
+      <div class="no-pos">No trades yet</div>
+    </div>
+    <div class="pw-hint" id="pw-hint"></div>
   </div>
 
   <!-- LIVE FEED -->
@@ -857,7 +906,7 @@ footer a{{color:var(--cyan);text-decoration:none}}
     <div style="padding:4px 0">{manual_html}</div>
   </div>
 
-  <footer>{DRIFT_BOT_NAME} · {exch} · <a href="/monitor">Monitor</a> · <a href="/trades">Trades</a> · <a href="/status/api" target="_blank">API ↗</a></footer>
+  <footer>{DRIFT_BOT_NAME} · {exch} · <a href="/monitor">Monitor</a> · <a href="/trades">All Trades</a></footer>
 </div>
 
 <script>
@@ -867,6 +916,62 @@ const START_CAP = {STARTING_CAPITAL};
 const GOAL = {PROFIT_GOAL};
 const MAX_OPEN = {DRIFT_MAX_OPEN};
 
+// ── SHOES PINWHEEL ──
+let _allTrades = [], _tradeOffset = 0;
+
+function buildPinwheel(tradeList) {{
+  _allTrades = tradeList;
+  renderPinwheel();
+}}
+
+function renderPinwheel() {{
+  const wrap = document.getElementById('pinwheel');
+  const hint = document.getElementById('pw-hint');
+  if (!_allTrades.length) {{
+    wrap.innerHTML = '<div class="no-pos">No trades yet</div>';
+    if (hint) hint.textContent = '';
+    return;
+  }}
+  const total = _allTrades.length;
+  const shown = Math.min(5, total);
+  let html = '';
+  for (let i = 0; i < shown; i++) {{
+    const t = _allTrades[(_tradeOffset + i) % total];
+    const sc = t.side === 'long' ? '#00ff88' : '#ff3355';
+    const pc = t.pnl >= 0 ? '#00ff88' : '#ff3355';
+    const dur = t.duration_s ? Math.floor(t.duration_s / 60) + 'm' : '';
+    html += `<div class="pw-card" data-idx="${{i}}">
+      <div class="pw-top">
+        <span class="pw-sym">${{t.market}}</span>
+        <span class="pw-side" style="color:${{sc}};border-color:${{sc}}">${{t.side.toUpperCase()}}</span>
+        <span class="pw-pnl" style="color:${{pc}}">${{t.pnl>=0?'+':''}}$${{t.pnl.toFixed(2)}}</span>
+      </div>
+      <div class="pw-detail">$${{t.entry.toFixed(4)}} → $${{t.exit.toFixed(4)}} · ${{t.reason}}</div>
+      <div class="pw-detail" style="color:#1a2535;margin-top:2px">${{t.ts}}${{dur?' · '+dur:''}}</div>
+    </div>`;
+  }}
+  wrap.innerHTML = html;
+  if (hint) hint.textContent = total > 1 ? '▸ TAP TO CYCLE · ' + total + ' TRADES' : '';
+}}
+
+function cyclePinwheel() {{
+  if (_allTrades.length <= 1) return;
+  const top = document.querySelector('#pinwheel .pw-card[data-idx="0"]');
+  if (!top) return;
+  top.classList.add('fly-off');
+  setTimeout(() => {{
+    _tradeOffset = (_tradeOffset + 1) % _allTrades.length;
+    renderPinwheel();
+  }}, 300);
+}}
+
+// ── POSITION CARD TAP TO EXPAND ──
+function toggleCard(el, event) {{
+  if (event.target.classList.contains('close-btn')) return;
+  el.classList.toggle('expanded');
+}}
+
+// ── POLLS ──
 async function poll() {{
   try {{
     const d = await fetch('/status/api').then(r => r.json());
@@ -879,20 +984,7 @@ async function poll() {{
 async function pollTrades() {{
   try {{
     const trades = await fetch('/trades/api').then(r => r.json());
-    const wrap = document.getElementById('trades-wrap');
-    if (!trades.length) {{ wrap.innerHTML = '<div class="no-pos">No trades yet</div>'; return; }}
-    wrap.innerHTML = trades.slice(0,8).map(t => {{
-      const sc = t.side==='long'?'#00ff88':'#ff3355';
-      const pc = t.pnl>=0?'#00ff88':'#ff3355';
-      const b = t.reason==='SL'?'sl':t.pnl>=0?'win':'loss';
-      return `<div class="trade-row">
-        <span style="color:var(--cyan);font-weight:900">${{t.market}}</span>
-        <span style="color:${{sc}}">${{t.side.toUpperCase()}}</span>
-        <span style="color:${{pc}};font-family:monospace">${{t.pnl>=0?'+':''}}$${{t.pnl.toFixed(2)}}</span>
-        <span><span class="badge ${{b}}">${{t.reason}}</span></span>
-        <span style="color:#444">${{t.ts.slice(-5)}}</span>
-      </div>`;
-    }}).join('');
+    buildPinwheel(trades);
   }} catch(e) {{}}
 }}
 
@@ -904,30 +996,35 @@ async function pollFeed() {{
     if (!d.length) {{ wrap.innerHTML = '<div class="no-pos">Waiting for signals...</div>'; return; }}
     wrap.innerHTML = d.slice(0,5).map(n => {{
       const txt = n.text || '';
-      const cls = txt.includes('OPEN')?'open':txt.includes('+$')&&txt.includes('CLOSE')?'win':txt.includes('CLOSE')?'loss':'';
+      const cls = txt.includes('OPEN') ? 'open'
+        : txt.includes('+$') && txt.includes('CLOSE') ? 'win'
+        : txt.includes('CLOSE') ? 'loss' : '';
       const clean = txt.replace(/\*/g,'').replace(/\\n/g,' · ');
-      return `<div class="feed-item"><span class="feed-time">${{n.time}}</span><span class="feed-text ${{cls}}">${{clean}}</span></div>`;
+      return `<div class="feed-item">
+        <span class="feed-time">${{n.time}}</span>
+        <span class="feed-text ${{cls}}">${{clean}}</span>
+      </div>`;
     }}).join('');
   }} catch(e) {{}}
 }}
 
 function updateHero(d) {{
   document.getElementById('hero-cap').textContent = '$' + d.capital.toFixed(2);
-  const pnl = d.total_pnl||0;
+  const pnl = d.total_pnl || 0;
   const pnlEl = document.getElementById('hero-pnl');
-  pnlEl.textContent = (pnl>=0?'+':'')+'$'+pnl.toFixed(2)+' PnL';
-  pnlEl.style.color = pnl>=0?'#00ff88':'#ff3355';
-  document.getElementById('hero-trades').textContent = d.total_trades+' trades';
-  document.getElementById('hero-secured').textContent = '$'+(d.profit_secured||0).toFixed(0)+' secured';
-  const wr = d.win_rate||0;
+  pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2) + ' PnL';
+  pnlEl.style.color = pnl >= 0 ? '#00ff88' : '#ff3355';
+  document.getElementById('hero-trades').textContent = d.total_trades + ' trades';
+  document.getElementById('hero-secured').textContent = '$' + (d.profit_secured || 0).toFixed(0) + ' secured';
+  const wr = d.win_rate || 0;
   const wrEl = document.getElementById('stat-wr');
-  wrEl.textContent = wr+'%'; wrEl.style.color = wr>=50?'#00ff88':'#ff3355';
-  const keys = Object.keys(d.positions||{{}});
-  document.getElementById('stat-open').textContent = keys.length+'/'+MAX_OPEN;
-  const dp = d.daily_pnl||0;
+  wrEl.textContent = wr + '%';
+  wrEl.style.color = wr >= 50 ? '#00ff88' : '#ff3355';
+  document.getElementById('stat-open').textContent = Object.keys(d.positions || {{}}).length + '/' + MAX_OPEN;
+  const dp = d.daily_pnl || 0;
   const dpEl = document.getElementById('stat-dpnl');
-  dpEl.textContent = (dp>=0?'+':'')+'$'+dp.toFixed(2);
-  dpEl.style.color = dp>=0?'#00ff88':'#ff3355';
+  dpEl.textContent = (dp >= 0 ? '+' : '') + '$' + dp.toFixed(2);
+  dpEl.style.color = dp >= 0 ? '#00ff88' : '#ff3355';
 }}
 
 function updatePositions(positions) {{
@@ -935,127 +1032,151 @@ function updatePositions(positions) {{
   const noPos = document.getElementById('no-pos');
   const keys = Object.keys(positions);
   document.getElementById('pos-count').textContent = keys.length;
-  noPos.style.display = keys.length?'none':'block';
+  noPos.style.display = keys.length ? 'none' : 'block';
 
   keys.forEach((market, i) => {{
     const pos = positions[market];
-    const pnl = pos.pnl||0;
+    const pnl = pos.pnl || 0;
     if (!pnlH[market]) pnlH[market] = [];
     pnlH[market].push(pnl);
     if (pnlH[market].length > 80) pnlH[market].shift();
 
-    let card = document.getElementById('pc-'+market);
+    let card = document.getElementById('pc-' + market);
     if (!card) {{
       card = document.createElement('div');
-      card.id = 'pc-'+market;
+      card.id = 'pc-' + market;
       card.className = 'pos-card';
-      card.style.setProperty('--i', i);
+      card.setAttribute('onclick', 'toggleCard(this, event)');
       card.innerHTML = buildCard(market, pos);
+      card.style.animation = 'slideUp .4s ease ' + (i * 0.08) + 's both';
       wrap.appendChild(card);
       setTimeout(() => initChart(market), 80);
     }} else {{
-      const pnlEl = document.getElementById('pp-'+market);
-      const c = pnl>=0?'#00ff88':'#ff3355';
-      const margin = (pos.size||0)/(pos.leverage||1);
-      const pct = margin>0?(pnl/margin*100).toFixed(1):'0.0';
-      if (pnlEl) {{ pnlEl.textContent=(pnl>=0?'+':'')+'$'+pnl.toFixed(2)+' ('+(pnl>=0?'+':'')+pct+'%)'; pnlEl.style.color=c; }}
-      card.className = 'pos-card '+(pnl>=0?'profit':'loss');
+      const pnlEl = document.getElementById('pp-' + market);
+      const c = pnl >= 0 ? '#00ff88' : '#ff3355';
+      const margin = (pos.size || 0) / (pos.leverage || 1);
+      const pct = margin > 0 ? (pnl / margin * 100).toFixed(1) : '0.0';
+      if (pnlEl) {{
+        pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2) + ' (' + (pnl >= 0 ? '+' : '') + pct + '%)';
+        pnlEl.style.color = c;
+      }}
+      const curEl = document.getElementById('cur-' + market);
+      if (curEl) curEl.textContent = '$' + (pos.current_price || pos.entry || 0).toFixed(4);
+      const durEl = document.getElementById('dur-' + market);
+      if (durEl && pos.opened_at) {{
+        durEl.textContent = Math.floor((Date.now() / 1000 - pos.opened_at) / 60) + 'm open';
+      }}
+      const isExpanded = card.classList.contains('expanded');
+      card.className = 'pos-card' + (isExpanded ? ' expanded' : '') + (pnl >= 0 ? ' profit' : ' loss');
       updateChart(market, pnl);
     }}
   }});
 
   document.querySelectorAll('.pos-card').forEach(el => {{
-    const m = el.id.replace('pc-','');
-    if (!positions[m]) {{ if(charts[m]){{charts[m].destroy();delete charts[m];}} delete pnlH[m]; el.remove(); }}
+    const m = el.id.replace('pc-', '');
+    if (!positions[m]) {{
+      if (charts[m]) {{ charts[m].destroy(); delete charts[m]; }}
+      delete pnlH[m];
+      el.remove();
+    }}
   }});
 }}
 
 function buildCard(market, pos) {{
-  const side = pos.side||'long';
-  const sc = side==='long'?'#00ff88':'#ff3355';
-  const pnl = pos.pnl||0; const pc = pnl>=0?'#00ff88':'#ff3355';
-  const margin = (pos.size||0)/(pos.leverage||1);
-  const pct = margin>0?(pnl/margin*100).toFixed(1):'0.0';
-  const cur = pos.current_price||pos.entry||0;
-  return `<div class="pos-top">
-    <span class="pos-sym">${{market}}-PERP</span>
-    <span class="pos-side" style="color:${{sc}};border-color:${{sc}}">${{side.toUpperCase()}}</span>
-    <span class="pos-pnl" id="pp-${{market}}" style="color:${{pc}}">${{pnl>=0?'+':''}}$${{pnl.toFixed(2)}} (${{pnl>=0?'+':''}}${{pct}}%)</span>
+  const side = pos.side || 'long';
+  const sc = side === 'long' ? '#00ff88' : '#ff3355';
+  const pnl = pos.pnl || 0;
+  const pc = pnl >= 0 ? '#00ff88' : '#ff3355';
+  const margin = (pos.size || 0) / (pos.leverage || 1);
+  const pct = margin > 0 ? (pnl / margin * 100).toFixed(1) : '0.0';
+  const cur = pos.current_price || pos.entry || 0;
+  const openedAt = pos.opened_at || 0;
+  const openedStr = openedAt ? new Date(openedAt * 1000).toLocaleTimeString() : '—';
+  const mins = openedAt ? Math.floor((Date.now() / 1000 - openedAt) / 60) : 0;
+  return `
+  <div class="pos-body">
+    <div class="pos-top">
+      <span class="pos-sym">${{market}}-PERP</span>
+      <span class="pos-side" style="color:${{sc}};border-color:${{sc}}">${{side.toUpperCase()}}</span>
+      <span class="pos-pnl" id="pp-${{market}}" style="color:${{pc}}">${{pnl>=0?'+':''}}$${{pnl.toFixed(2)}} (${{pnl>=0?'+':''}}${{pct}}%)</span>
+    </div>
+    <div class="pos-meta">
+      <span><b>Entry</b> $${{(pos.entry||0).toFixed(4)}}</span>
+      <span><b>Now</b> <span id="cur-${{market}}">$${{cur.toFixed(4)}}</span></span>
+      <span><b>TP</b> <span style="color:#00ff8870">$${{(pos.tp||0).toFixed(4)}}</span></span>
+      <span><b>SL</b> <span style="color:#ff335570">$${{(pos.sl||0).toFixed(4)}}</span></span>
+    </div>
+    <canvas id="chart-${{market}}" class="mini" height="60"></canvas>
   </div>
-  <div class="pos-meta">
-    <span><b>Entry</b> $${{(pos.entry||0).toFixed(4)}}</span>
-    <span><b>Now</b> $${{cur.toFixed(4)}}</span>
-    <span><b>TP</b> <span style="color:#00ff88">$${{(pos.tp||0).toFixed(4)}}</span></span>
-    <span><b>SL</b> <span style="color:#ff3355">$${{(pos.sl||0).toFixed(4)}}</span></span>
+  <div class="pos-detail">
+    <div class="pos-ts-row">
+      <span>Opened ${{openedStr}}</span>
+      <span id="dur-${{market}}">${{mins}}m open</span>
+    </div>
+    <div class="pos-notional">$${{(pos.size||0).toFixed(2)}} @ ${{pos.leverage||1}}x leverage</div>
   </div>
-  <canvas id="chart-${{market}}" class="mini" height="70"></canvas>
+  <div class="pos-hint">TAP FOR DETAILS <span class="pos-chevron">▾</span></div>
   <button class="close-btn" onclick="closePos('${{market}}')">✕ CLOSE ${{market}}</button>`;
 }}
 
 function initChart(market) {{
-  const el = document.getElementById('chart-'+market);
-  if (!el||charts[market]) return;
+  const el = document.getElementById('chart-' + market);
+  if (!el || charts[market]) return;
   charts[market] = new Chart(el.getContext('2d'), {{
-    type:'line',
-    data:{{ labels:[], datasets:[{{
-      data:[], borderColor:'#00e5ff',
-      backgroundColor: createGradient(el.getContext('2d'), '#00e5ff'),
-      borderWidth:2, pointRadius:0, tension:0.4, fill:true
+    type: 'line',
+    data: {{ labels: [], datasets: [{{
+      data: [], borderColor: '#00e5ff',
+      backgroundColor: 'rgba(0,229,255,0.1)',
+      borderWidth: 1.5, pointRadius: 0, tension: 0.45, fill: true
     }}]}},
-    options:{{
-      responsive:true, animation:{{duration:400}},
-      plugins:{{ legend:{{display:false}}, tooltip:{{ callbacks:{{ label: c=>(c.parsed.y>=0?'+':'')+'$'+c.parsed.y.toFixed(2) }} }} }},
-      scales:{{
-        x:{{display:false}},
-        y:{{ grid:{{color:'#ffffff08'}}, ticks:{{color:'#444',font:{{size:9}},callback:v=>'$'+v.toFixed(1)}} }}
+    options: {{
+      responsive: true, animation: {{ duration: 350 }},
+      plugins: {{ legend: {{ display: false }},
+        tooltip: {{ callbacks: {{ label: c => (c.parsed.y>=0?'+':'')+'$'+c.parsed.y.toFixed(2) }} }} }},
+      scales: {{
+        x: {{ display: false }},
+        y: {{ grid: {{ color: '#ffffff06' }}, ticks: {{ color: '#333', font: {{ size: 8 }}, callback: v => '$'+v.toFixed(1) }} }}
       }}
     }}
   }});
-  updateChart(market, pnlH[market]?.slice(-1)[0]||0);
-}}
-
-function createGradient(ctx, color) {{
-  const g = ctx.createLinearGradient(0,0,0,80);
-  g.addColorStop(0, color.replace(')',',0.25)').replace('rgb','rgba'));
-  g.addColorStop(1, color.replace(')',',0.0)').replace('rgb','rgba'));
-  return g;
+  updateChart(market, pnlH[market]?.[pnlH[market].length-1] || 0);
 }}
 
 function updateChart(market, latestPnl) {{
-  const c = charts[market]; if(!c) return;
-  const hist = pnlH[market]||[];
-  const color = latestPnl>=0?'#00ff88':'#ff3355';
+  const c = charts[market]; if (!c) return;
+  const hist = pnlH[market] || [];
+  const col = latestPnl >= 0 ? '#00ff88' : '#ff3355';
   const ctx = c.canvas.getContext('2d');
-  const g = ctx.createLinearGradient(0,0,0,70);
-  g.addColorStop(0, latestPnl>=0?'rgba(0,255,136,0.2)':'rgba(255,51,85,0.2)');
+  const g = ctx.createLinearGradient(0, 0, 0, 60);
+  g.addColorStop(0, latestPnl >= 0 ? 'rgba(0,255,136,0.22)' : 'rgba(255,51,85,0.22)');
   g.addColorStop(1, 'rgba(0,0,0,0)');
-  c.data.labels = hist.map((_,i)=>i);
+  c.data.labels = hist.map((_,i) => i);
   c.data.datasets[0].data = hist;
-  c.data.datasets[0].borderColor = color;
+  c.data.datasets[0].borderColor = col;
   c.data.datasets[0].backgroundColor = g;
   c.update('none');
 }}
 
 function updateProgress(cap) {{
-  const next = MS.find(m=>m>cap)||GOAL;
-  const pct = Math.max(0,Math.min(100,Math.round((cap-START_CAP)/Math.max(next-START_CAP,1)*100)));
-  document.getElementById('prog-fill').style.width = pct+'%';
-  document.getElementById('prog-pct').textContent = pct+'%';
+  const next = MS.find(m => m > cap) || GOAL;
+  const pct = Math.max(0, Math.min(100, Math.round((cap - START_CAP) / Math.max(next - START_CAP, 1) * 100)));
+  document.getElementById('prog-fill').style.width = pct + '%';
+  document.getElementById('prog-pct').textContent = pct + '%';
   MS.forEach(m => {{
-    const el = document.getElementById('ms-'+m);
-    if(el) el.className = cap>=m?'ms hit':'ms';
+    const el = document.getElementById('ms-' + m);
+    if (el) el.className = cap >= m ? 'ms hit' : 'ms';
   }});
 }}
 
 function manualTrade(market, side) {{
-  if (!confirm('Open '+side.toUpperCase()+' '+market+'?')) return;
-  fetch('/api/manual-'+side+'/'+market,{{method:'POST'}})
-    .then(r=>r.json()).then(d=>alert(d.msg||d.error)).catch(e=>alert(e));
+  if (!confirm('Open ' + side.toUpperCase() + ' ' + market + '?')) return;
+  fetch('/api/manual-' + side + '/' + market, {{ method: 'POST' }})
+    .then(r => r.json()).then(d => alert(d.msg || d.error)).catch(e => alert(e));
 }}
 function closePos(market) {{
-  if (!confirm('Close '+market+'?')) return;
-  fetch('/api/close/'+market,{{method:'POST'}})
-    .then(r=>r.json()).then(d=>alert(d.msg||d.error)).catch(e=>alert(e));
+  if (!confirm('Close ' + market + '?')) return;
+  fetch('/api/close/' + market, {{ method: 'POST' }})
+    .then(r => r.json()).then(d => alert(d.msg || d.error)).catch(e => alert(e));
 }}
 
 poll(); pollTrades(); pollFeed();
@@ -1064,319 +1185,6 @@ setInterval(pollTrades, 5000);
 setInterval(pollFeed, 4000);
 </script>
 </body></html>"""
-
-
-
-    wins   = [t for t in _trades if t["pnl"] >= 0]
-    total  = len(_trades)
-    wr     = round(len(wins) / max(total, 1) * 100, 1)
-    total_pnl = sum(t["pnl"] for t in _trades)
-    mode   = "PAPER" if DRIFT_PAPER_MODE else "LIVE"
-    exch   = DRIFT_EXCHANGE.upper()
-    next_m = next((m for m in MILESTONES if m > cap), None)
-    progress_pct = min(round((cap - STARTING_CAPITAL) / max((next_m or PROFIT_GOAL) - STARTING_CAPITAL, 1) * 100, 1), 100) if next_m else 100
-    mode_color  = "#ffee00" if DRIFT_PAPER_MODE else "#39ff14"
-    pnl_color   = "#00ff88" if total_pnl >= 0 else "#ff3355"
-    sign        = "+" if total_pnl >= 0 else ""
-    wr_color    = "#00ff88" if wr >= 50 else "#ff3355"
-    dpnl_color  = "#00ff88" if _daily_pnl >= 0 else "#ff3355"
-    open_cls    = "green" if pos_list else "yellow"
-    open_status = "active" if pos_list else "scanning"
-    next_m_str  = f"${next_m:,}" if next_m else "DONE"
-    ms_html     = "".join(
-        '<span class="ms{}">${:,}</span>'.format(" hit" if cap >= m else "", m)
-        for m in MILESTONES
-    )
-    open_tbl    = (
-        '<div class="tbl-wrap"><table>'
-        '<thead><tr><th>Market</th><th>Side</th><th>Entry</th><th>Current</th>'
-        '<th>PnL%</th><th>TP</th><th>SL</th><th>Held</th></tr></thead>'
-        '<tbody>' + (pos_rows if pos_list else "") + '</tbody>'
-        '</table></div>'
-        if pos_list else
-        '<div class="empty">No open positions — scanning for signals...</div>'
-    )
-    sig_fallback   = '<tr><td colspan="4" class="empty">Warming up price history...</td></tr>'
-    trade_fallback = '<tr><td colspan="7" class="empty">No trades yet</td></tr>'
-    today_str      = time.strftime("%Y-%m-%d")
-    manual_btns_html = "".join(
-        '<button class="btn btn-long" onclick="manualTrade(\'{mk}\',\'long\')">LONG {mk}</button>'
-        '<button class="btn btn-short" onclick="manualTrade(\'{mk}\',\'short\')">SHORT {mk}</button>'
-        '<button class="btn btn-close" onclick="closePos(\'{mk}\')">CLOSE {mk}</button>'.format(mk=m.strip().upper())
-        for m in DRIFT_MARKETS.split(",")
-    )
-
-    # Build positions table rows
-    pos_rows = ""
-    for p in pos_list:
-        cur_price = get_market_price(p["market"])
-        if cur_price:
-            if p["side"] == "long":
-                live_pct = (cur_price - p["entry"]) / p["entry"] * 100 * p["leverage"]
-            else:
-                live_pct = (p["entry"] - cur_price) / p["entry"] * 100 * p["leverage"]
-            live_pnl = p["size"] * (live_pct / 100)
-        else:
-            cur_price = p["entry"]
-            live_pct  = 0.0
-            live_pnl  = p.get("pnl", 0.0)
-
-        side_color = "#00ff88" if p["side"] == "long" else "#ff3355"
-        pct_color  = "#00ff88" if live_pct >= 0 else "#ff3355"
-        elapsed    = round((time.time() - p["opened_at"]) / 60, 1)
-        pos_rows += (
-            f'<tr>'
-            f'<td class="sym">{p["market"]}-PERP</td>'
-            f'<td style="color:{side_color};font-weight:900">{p["side"].upper()}</td>'
-            f'<td class="mono">${p["entry"]:.4f}</td>'
-            f'<td class="mono">${cur_price:.4f}</td>'
-            f'<td class="mono" style="color:{pct_color}">{live_pct:+.2f}%</td>'
-            f'<td class="mono">${p["tp"]:.4f}</td>'
-            f'<td class="mono">${p["sl"]:.4f}</td>'
-            f'<td class="muted">{elapsed}m</td>'
-            f'</tr>'
-        )
-
-    # Build signals rows
-    sig_rows = ""
-    for market in [m.strip().upper() for m in DRIFT_MARKETS.split(",")]:
-        sig_info = _signals_cache.get(market, {})
-        sig      = sig_info.get("signal", "—")
-        sig_ts   = sig_info.get("ts", "—")
-        hist     = list(_price_history.get(market, []))
-        if len(hist) >= 21:
-            vals = [p for _, p in hist]
-            ema8  = sum(vals[-8:]) / 8
-            ema21 = sum(vals[-21:]) / 21
-            strength = round(abs(ema8 - ema21) / ema21 * 100, 3) if ema21 else 0
-        else:
-            strength = 0
-        sig_color = "#00ff88" if sig == "long" else ("#ff3355" if sig == "short" else "#888")
-        sig_rows += (
-            f'<tr>'
-            f'<td class="sym">{market}</td>'
-            f'<td style="color:{sig_color};font-weight:900">{sig.upper() if sig != "—" else sig}</td>'
-            f'<td class="mono">{strength:.3f}%</td>'
-            f'<td class="muted">{sig_ts}</td>'
-            f'</tr>'
-        )
-
-    # Build recent trades rows
-    trade_rows = ""
-    for t in trades:
-        t_color    = "#00ff88" if t["pnl"] >= 0 else "#ff3355"
-        t_icon     = "▲" if t["pnl"] >= 0 else "▼"
-        t_sign     = "+" if t["pnl"] >= 0 else ""
-        t_side_clr = "#00ff88" if t["side"] == "long" else "#ff3355"
-        t_badge    = "win" if t["pnl"] >= 0 else "loss"
-        trade_rows += (
-            f'<tr>'
-            f'<td class="sym">{t["market"]}</td>'
-            f'<td style="color:{t_side_clr};font-weight:900">{t["side"].upper()}</td>'
-            f'<td class="mono">${t["entry"]:.4f}</td>'
-            f'<td class="mono">${t["exit"]:.4f}</td>'
-            f'<td class="mono" style="color:{t_color}">{t_icon} {t_sign}${t["pnl"]:.2f}</td>'
-            f'<td><span class="badge {t_badge}">{t["reason"]}</span></td>'
-            f'<td class="muted">{t["ts"]}</td>'
-            f'</tr>'
-        )
-
-    html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<meta http-equiv="refresh" content="30">
-<title>{DRIFT_BOT_NAME}</title>
-<style>
-  @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
-  *{{box-sizing:border-box;margin:0;padding:0}}
-  :root{{
-    --cyan:#00e5ff;--green:#00ff88;--red:#ff3355;--yellow:#ffee00;
-    --bg:#050a14;--card:#0a1220;--border:#ffffff15;
-  }}
-  body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;
-    max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
-  .bg-art{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;
-    object-position:center;opacity:.30;pointer-events:none;z-index:0}}
-  .wrap{{position:relative;z-index:1}}
-  nav{{display:flex;gap:0;border-bottom:2px solid var(--cyan);overflow-x:auto;scrollbar-width:none}}
-  nav::-webkit-scrollbar{{display:none}}
-  nav a{{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;
-    padding:10px 14px;white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;
-    border-right:1px solid var(--border);transition:all .15s}}
-  nav a:hover{{background:var(--cyan);color:#000}}
-  .mode-strip{{background:var(--card);border-bottom:2px solid var(--border);
-    padding:6px 16px;display:flex;align-items:center;justify-content:space-between}}
-  .mode-strip .left{{font-size:.62rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em}}
-  .mode-pill{{font-size:.68rem;font-weight:900;padding:3px 12px;letter-spacing:.08em;
-    background:{mode_color};color:#000}}
-  .hero{{padding:20px 16px 16px;background:linear-gradient(180deg,#020d1c,var(--bg));
-    border-bottom:3px solid var(--cyan);text-align:center}}
-  .hero-lbl{{font-size:.62rem;font-weight:700;color:#888;text-transform:uppercase;
-    letter-spacing:.15em;margin-bottom:4px}}
-  .hero-title{{font-family:'Bebas Neue',sans-serif;font-size:2rem;color:var(--cyan);
-    letter-spacing:.08em;text-shadow:0 0 20px #00e5ff66;margin-bottom:4px}}
-  .hero-cap{{font-family:'Bebas Neue',sans-serif;font-size:4rem;letter-spacing:.02em;
-    color:var(--cyan);text-shadow:0 0 30px #00e5ff66,3px 3px 0 #ff3355;line-height:1}}
-  .hero-pnl{{font-family:'JetBrains Mono',monospace;font-size:1rem;font-weight:600;
-    margin-top:8px;color:{pnl_color}}}
-  .hero-sub{{font-size:.7rem;color:#888;margin-top:6px}}
-  .grid{{display:grid;grid-template-columns:1fr 1fr;gap:2px;background:var(--cyan);border:2px solid var(--cyan)}}
-  .stat{{background:var(--card);padding:14px 16px}}
-  .stat .lbl{{font-size:.58rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em}}
-  .stat .val{{font-family:'Bebas Neue',sans-serif;font-size:2rem;margin-top:2px;line-height:1}}
-  .stat .sub{{font-size:.62rem;color:#888;margin-top:3px}}
-  .cyan{{color:var(--cyan)}} .green{{color:var(--green)}} .red{{color:var(--red)}}
-  .yellow{{color:var(--yellow)}} .muted{{color:#888}}
-  .prog-wrap{{padding:14px 16px;background:var(--card);border-bottom:2px solid var(--border)}}
-  .prog-lbl{{font-size:.62rem;font-weight:700;color:#888;text-transform:uppercase;
-    letter-spacing:.1em;margin-bottom:8px;display:flex;justify-content:space-between}}
-  .prog-track{{background:#ffffff10;height:6px;overflow:hidden}}
-  .prog-fill{{background:linear-gradient(90deg,var(--cyan),var(--green),#ffee00);
-    height:6px;width:{progress_pct}%;box-shadow:0 0 10px var(--cyan)}}
-  .milestones{{display:flex;flex-wrap:wrap;gap:4px;margin-top:10px}}
-  .ms{{font-size:.58rem;padding:3px 8px;font-weight:700;letter-spacing:.04em;
-    border:1px solid #ffffff15;color:#666;background:#ffffff05}}
-  .ms.hit{{color:var(--cyan);border-color:var(--cyan);background:#00e5ff15;box-shadow:0 0 6px #00e5ff40}}
-  .section{{background:var(--card);border-bottom:2px solid var(--border)}}
-  .section-hdr{{display:flex;align-items:center;justify-content:space-between;
-    padding:12px 16px;border-bottom:1px solid var(--border)}}
-  .section-hdr h2{{font-size:.62rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em}}
-  .section-hdr a{{font-size:.62rem;color:var(--cyan);text-decoration:none;font-weight:700;letter-spacing:.06em}}
-  .tbl-wrap{{overflow-x:auto}}
-  table{{width:100%;border-collapse:collapse;font-size:.72rem}}
-  th{{padding:8px 10px;font-size:.56rem;font-weight:700;color:#888;text-transform:uppercase;
-    letter-spacing:.08em;text-align:left;border-bottom:1px solid var(--border);
-    white-space:nowrap;background:#080f1a}}
-  td{{padding:9px 10px;border-bottom:1px solid #ffffff05;vertical-align:middle}}
-  .sym{{font-weight:900;font-size:.8rem}}
-  .mono{{font-family:'JetBrains Mono',monospace;font-size:.68rem}}
-  .badge{{display:inline-block;padding:2px 6px;font-size:.56rem;font-weight:900;letter-spacing:.06em;border:1px solid}}
-  .badge.win{{color:var(--green);border-color:var(--green);background:#00ff8815}}
-  .badge.loss{{color:var(--red);border-color:var(--red);background:#ff335515}}
-  .manual-btns{{display:flex;gap:6px;padding:10px 16px;background:var(--card);
-    border-bottom:1px solid var(--border);flex-wrap:wrap}}
-  .btn{{padding:7px 13px;font-size:.65rem;font-weight:900;letter-spacing:.06em;border:none;
-    cursor:pointer;text-transform:uppercase;transition:all .15s}}
-  .btn-long{{background:var(--green);color:#000}}
-  .btn-long:hover{{box-shadow:0 0 12px var(--green)}}
-  .btn-short{{background:var(--red);color:#fff}}
-  .btn-short:hover{{box-shadow:0 0 12px var(--red)}}
-  .btn-close{{background:#333;color:#fff;border:1px solid #666}}
-  .btn-close:hover{{background:#555}}
-  .empty{{text-align:center;padding:24px;color:#444;font-size:.75rem}}
-  footer{{padding:14px 16px;text-align:center;font-size:.6rem;color:#444;border-top:1px solid var(--border)}}
-  footer a{{color:var(--cyan);text-decoration:none}}
-  @keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.4}}}}
-  .dot{{display:inline-block;width:6px;height:6px;border-radius:50%;
-    background:{mode_color};box-shadow:0 0 6px {mode_color};animation:pulse 2s infinite;margin-right:6px}}
-</style>
-</head>
-<body>
-<img src="/static/tankgirl.png" class="bg-art" alt="">
-<div class="wrap">
-  <nav>
-    <a href="/">HOME</a>
-    <a href="/trades">TRADES</a>
-    <a href="/status/api">API</a>
-    <a href="https://drift.trade" target="_blank">DRIFT</a>
-    <a href="https://solscan.io" target="_blank">SCAN</a>
-  </nav>
-  <div class="mode-strip">
-    <span class="left"><span class="dot"></span>{exch} · Goal ${PROFIT_GOAL:,.0f}</span>
-    <span class="mode-pill">{mode}</span>
-  </div>
-  <div class="hero">
-    <div class="hero-title">DRIFT SNIPER</div>
-    <div class="hero-lbl">Current Capital</div>
-    <div class="hero-cap">${cap:.2f}</div>
-    <div class="hero-pnl">{sign}${total_pnl:.2f} total PnL</div>
-    <div class="hero-sub">Started ${STARTING_CAPITAL:.2f} &nbsp;·&nbsp; {total} trades closed</div>
-  </div>
-  <div class="grid">
-    <div class="stat">
-      <div class="lbl">Win Rate</div>
-      <div class="val" style="color:{wr_color}">{wr}%</div>
-      <div class="sub">{len(wins)}W / {total-len(wins)}L</div>
-    </div>
-    <div class="stat">
-      <div class="lbl">Open Positions</div>
-      <div class="val {open_cls}">{len(pos_list)}<span style="font-size:1.1rem;color:#888">/{DRIFT_MAX_OPEN}</span></div>
-      <div class="sub">{open_status}</div>
-    </div>
-    <div class="stat">
-      <div class="lbl">Leverage</div>
-      <div class="val cyan">{DRIFT_LEVERAGE}x</div>
-      <div class="sub">{DRIFT_TRADE_PCT*100:.0f}% per trade</div>
-    </div>
-    <div class="stat">
-      <div class="lbl">Daily PnL</div>
-      <div class="val" style="color:{dpnl_color}">${_daily_pnl:+.2f}</div>
-      <div class="sub">{today_str}</div>
-    </div>
-    <div class="stat">
-      <div class="lbl">TP / SL</div>
-      <div class="val green">{DRIFT_TP_PCT*100:.0f}%</div>
-      <div class="sub">SL {DRIFT_SL_PCT*100:.0f}% · Trail {DRIFT_TRAIL_PCT*100:.0f}%</div>
-    </div>
-    <div class="stat">
-      <div class="lbl">Next Target</div>
-      <div class="val cyan">${next_m:,}</div>
-      <div class="sub">{progress_pct:.0f}% there</div>
-    </div>
-  </div>
-  <div class="prog-wrap">
-    <div class="prog-lbl"><span>GOAL PROGRESS</span><span style="color:var(--cyan)">{progress_pct:.0f}%</span></div>
-    <div class="prog-track"><div class="prog-fill"></div></div>
-    <div class="milestones">
-      {ms_html}
-    </div>
-  </div>
-  <div class="section">
-    <div class="section-hdr"><h2>OPEN POSITIONS ({len(pos_list)})</h2></div>
-    {open_tbl}
-  </div>
-  <div class="section">
-    <div class="section-hdr"><h2>SIGNAL STATUS</h2></div>
-    <div class="tbl-wrap"><table>
-      <thead><tr><th>Market</th><th>Signal</th><th>Strength</th><th>Updated</th></tr></thead>
-      <tbody>{sig_rows if sig_rows else sig_fallback}</tbody>
-    </table></div>
-  </div>
-  <div class="section">
-    <div class="section-hdr"><h2>MANUAL CONTROLS</h2></div>
-    <div class="manual-btns">
-      {manual_btns_html}
-    </div>
-  </div>
-  <div class="section">
-    <div class="section-hdr"><h2>RECENT TRADES</h2><a href="/trades">ALL →</a></div>
-    <div class="tbl-wrap"><table>
-      <thead><tr><th>Market</th><th>Side</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Reason</th><th>Time</th></tr></thead>
-      <tbody>{trade_rows if trade_rows else trade_fallback}</tbody>
-    </table></div>
-  </div>
-  <footer>{DRIFT_BOT_NAME} &nbsp;·&nbsp; {exch} &nbsp;·&nbsp;
-    <a href="/status/api">API →</a>
-  </footer>
-</div>
-<script>
-function manualTrade(market, side) {{
-  if (!confirm('Open ' + side.toUpperCase() + ' ' + market + '?')) return;
-  fetch('/api/manual-' + side + '/' + market, {{method:'POST'}})
-    .then(r => r.json()).then(d => {{ alert(d.msg || d.error); location.reload(); }})
-    .catch(e => alert('Error: ' + e));
-}}
-function closePos(market) {{
-  if (!confirm('Close ' + market + ' position?')) return;
-  fetch('/api/close/' + market, {{method:'POST'}})
-    .then(r => r.json()).then(d => {{ alert(d.msg || d.error); location.reload(); }})
-    .catch(e => alert('Error: ' + e));
-}}
-</script>
-</body></html>"""
-    return html, 200
 
 
 @app.route("/trades", methods=["GET"])
