@@ -89,6 +89,16 @@ SPIKE_TP_PCT    = float(os.environ.get("SPIKE_TP_PCT",    "40"))
 SPIKE_SL_PCT    = float(os.environ.get("SPIKE_SL_PCT",    "15"))
 SPIKE_MAX_SECS  = int(os.environ.get("SPIKE_MAX_SECS",    "180"))   # 3 min hard cap
 
+# Raydium Runner strategy (post-graduation tokens on Raydium)
+GRAD_MODE        = os.environ.get("GRAD_MODE", "true").lower() == "true"
+GRAD_MAX_AGE_H   = float(os.environ.get("GRAD_MAX_AGE_H",   "4"))     # only tokens graduated in last 4h
+GRAD_MIN_LIQ     = float(os.environ.get("GRAD_MIN_LIQ",     "15000")) # min $15k liquidity
+GRAD_MIN_1H_PCT  = float(os.environ.get("GRAD_MIN_1H_PCT",  "10"))    # min +10% 1h momentum
+GRAD_MIN_VOL_LIQ = float(os.environ.get("GRAD_MIN_VOL_LIQ", "0.5"))   # min volume/liq ratio
+GRAD_TP_PCT      = float(os.environ.get("GRAD_TP_PCT",      "30"))
+GRAD_SL_PCT      = float(os.environ.get("GRAD_SL_PCT",      "12"))
+GRAD_MAX_SECS    = int(os.environ.get("GRAD_MAX_SECS",      "300"))   # 5 min hard cap
+
 # Exit protection
 SLIP_TRIGGER   = float(os.environ.get("SLIP_TRIGGER",  "90"))
 SLIP_DROP_TO   = float(os.environ.get("SLIP_DROP_TO",  "85"))
@@ -717,6 +727,48 @@ def get_pumpfun_coins():
             log("warn", f"Endpoint failed: {e}")
     return []
 
+def get_graduated_coins():
+    """Return recently graduated pump.fun tokens now trading on Raydium."""
+    endpoints = [
+        "https://frontend-api-v3.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false",
+        "https://frontend-api-v2.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false",
+    ]
+    headers = {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
+        "Accept": "application/json",
+        "Referer": "https://pump.fun/",
+        "Origin": "https://pump.fun",
+    }
+    for url in endpoints:
+        try:
+            res = _session.get(url, headers=headers, timeout=10)
+            if res.status_code != 200:
+                continue
+            data  = res.json()
+            items = data if isinstance(data, list) else data.get("coins", [])
+            if not items:
+                continue
+            coins = []
+            for coin in items[:50]:
+                mint = coin.get("mint", "")
+                if mint and coin.get("complete", False):
+                    coins.append({
+                        "mint":       mint,
+                        "symbol":     coin.get("symbol", mint[:8]),
+                        "twitter":    bool(coin.get("twitter")),
+                        "telegram":   bool(coin.get("telegram")),
+                        "dev":        coin.get("creator", ""),
+                        "created_at": int(coin.get("created_timestamp", 0) or 0),
+                        "last_trade": int(coin.get("last_trade_timestamp", 0) or 0),
+                        "complete":   True,
+                    })
+            if coins:
+                log("info", f"pump.fun API: {len(coins)} graduated coins")
+                return coins
+        except Exception as e:
+            log("warn", f"Graduated coins endpoint failed: {e}")
+    return []
+
 def get_bonding_details(mint):
     try:
         res = _session.get(
@@ -972,9 +1024,9 @@ def lock_profit_to_usdc(profit_usd):
         log("warn", f"USDC lock error: {e}", "USDC")
 
 # ── TRADE EXECUTION ──────────────────────────────────────────────
-def execute_buy(mint, symbol, amount):
+def execute_buy(mint, symbol, amount, pool="pump"):
     if PAPER_MODE:
-        log("ok", f"[PAPER] Buy ${amount:.2f} -> {symbol}", symbol)
+        log("ok", f"[PAPER] Buy ${amount:.2f} -> {symbol} [{pool}]", symbol)
         return "PAPER_TX"
     try:
         sol_price = get_sol_price()
@@ -988,7 +1040,7 @@ def execute_buy(mint, symbol, amount):
             headers={"Content-Type": "application/json"},
             json={"publicKey": WALLET, "action": "buy", "mint": mint,
                   "denominatedInSol": "true", "amount": sol_amount,
-                  "slippage": 20, "priorityFee": 0.001, "pool": "pump"},
+                  "slippage": 20, "priorityFee": 0.001, "pool": pool},
             timeout=15
         )
         if res.status_code != 200:
@@ -1009,9 +1061,9 @@ def execute_buy(mint, symbol, amount):
         log("err", f"Buy error: {e}", symbol)
         return None
 
-def execute_sell(tokens, mint, symbol):
+def execute_sell(tokens, mint, symbol, pool="pump"):
     if PAPER_MODE:
-        log("ok", f"[PAPER] Sell {symbol}", symbol)
+        log("ok", f"[PAPER] Sell {symbol} [{pool}]", symbol)
         return "PAPER_TX"
     try:
         res = _session.post(
@@ -1019,7 +1071,7 @@ def execute_sell(tokens, mint, symbol):
             headers={"Content-Type": "application/json"},
             json={"publicKey": WALLET, "action": "sell", "mint": mint,
                   "denominatedInSol": "false", "amount": tokens,
-                  "slippage": 20, "priorityFee": 0.001, "pool": "pump"},
+                  "slippage": 20, "priorityFee": 0.001, "pool": pool},
             timeout=15
         )
         if res.status_code != 200:
@@ -1039,7 +1091,7 @@ def execute_sell(tokens, mint, symbol):
         return None
 
 # ── ENTER / EXIT ─────────────────────────────────────────────────
-def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, replies=0):
+def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, replies=0, pool="pump"):
     global capital, _daily_trades
     if daily_limit_reached():
         return False
@@ -1055,7 +1107,7 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
         if capital < amount:
             return False
 
-    tx = execute_buy(mint, symbol, amount)
+    tx = execute_buy(mint, symbol, amount, pool)
     if not tx:
         return False
 
@@ -1081,9 +1133,10 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
             "bond_slip_start":   None,
             "price_high":        entry_price,   # trailing SL tracks peak price
             "replies":           replies,
+            "pool":              pool,
         }
 
-    log("ok", f"ENTER [{strategy.upper()}] ${amount:.2f} | bond={bond_entry:.1f}%", symbol)
+    log("ok", f"ENTER [{strategy.upper()}] ${amount:.2f} | bond={bond_entry:.1f}% | pool={pool}", symbol)
     notify(f"🟢 BUY {symbol}",
            f"Strategy: {strategy.upper()}\nAmount: ${amount:.2f}\nBond: {bond_entry:.1f}%\nReplies: {replies}")
     return True
@@ -1100,7 +1153,7 @@ def exit_trade(mint, price, reason, bond=0):
     pnl    = max(-amount, min(pnl, amount * 5))
     hold_m = (time.time() - trade["opened_at"]) / 60
 
-    sig = execute_sell(trade["tokens"], mint, trade["symbol"])
+    sig = execute_sell(trade["tokens"], mint, trade["symbol"], trade.get("pool", "pump"))
     with capital_lock:
         if sig:
             capital += amount + pnl
@@ -1284,6 +1337,21 @@ def monitor_loop():
                     exit_trade(mint, price, "COPY_TIME", bond)
                     continue
 
+            # Raydium Runner exits (graduated tokens)
+            if strategy == "grad":
+                grad_tsl = price_high * (1 - GRAD_SL_PCT / 100) if entry_gain_pct >= TSL_ACTIVATE_PCT else trade["entry"] * (1 - GRAD_SL_PCT / 100)
+                move = ((price - trade["entry"]) / trade["entry"]) * 100
+                if move >= GRAD_TP_PCT:
+                    exit_trade(mint, price, "GRAD_TP", bond)
+                    continue
+                if price <= grad_tsl:
+                    reason = "GRAD_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "GRAD_SL"
+                    exit_trade(mint, price, reason, bond)
+                    continue
+                if elapsed >= GRAD_MAX_SECS:
+                    exit_trade(mint, price, "GRAD_TIME", bond)
+                    continue
+
             pct = ((price - trade["entry"]) / trade["entry"]) * 100
             tsl_info = f" TSL@{tsl_price:.6f}" if entry_gain_pct >= TSL_ACTIVATE_PCT else ""
             log("info", f"[{strategy}] bond={bond:.1f}% price={pct:+.1f}% peak={entry_gain_pct:+.1f}%{tsl_info} {elapsed/60:.1f}m", symbol)
@@ -1429,10 +1497,11 @@ def copy_trade_loop():
 # ── SCANNER LOOP ─────────────────────────────────────────────────
 def scanner_loop():
     log("ok", "=" * 55)
-    log("ok", "PumpFun Sniper — Bond Runner + Dormant Spike")
+    log("ok", "PumpFun Sniper — Bond Runner + Dormant Spike + Raydium Runner")
     log("ok", f"Bond entry: {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% | TP: {BOND_TP}%")
     log("ok", f"Spike: {SPIKE_MIN_AGE_H}h+ dormant, {SPIKE_MIN_1H}%+ 1h move")
-    log("ok", f"Trade size: {TRADE_PCT}% of capital (min ${MIN_TRADE} max ${MAX_TRADE})")
+    log("ok", f"Raydium Runner: {'ON' if GRAD_MODE else 'OFF'} | liq>${GRAD_MIN_LIQ/1000:.0f}k | 1h>{GRAD_MIN_1H_PCT:.0f}%")
+    log("ok", f"Trade size: min ${MIN_TRADE} max ${MAX_TRADE}")
     log("ok", f"Mode: {'PAPER' if PAPER_MODE else 'LIVE'}")
     log("ok", "=" * 55)
 
@@ -1611,6 +1680,86 @@ def scanner_loop():
                 log("warn", "0 coins have Twitter or Telegram — market may be slow")
             elif n_replies == 0:
                 log("warn", f"{n_social} coins have socials but none traded in last 10 min")
+
+            # ── Raydium Runner — graduated tokens ──────────────────
+            if GRAD_MODE:
+                with trades_lock:
+                    num_open = len(open_trades)
+                if num_open < MAX_OPEN:
+                    grad_coins = get_graduated_coins()
+                    n_grad = 0
+                    for coin in grad_coins:
+                        with trades_lock:
+                            if len(open_trades) >= MAX_OPEN:
+                                break
+                        mint   = coin["mint"]
+                        symbol = coin["symbol"]
+
+                        if mint in blacklisted_mints:
+                            continue
+                        with trades_lock:
+                            if mint in open_trades:
+                                continue
+                        with _copy_lock:
+                            if _sold_mints.get(mint, 0) and time.time() - _sold_mints[mint] < 1800:
+                                continue
+
+                        # Age filter: only tokens graduated in last GRAD_MAX_AGE_H hours
+                        created_at = coin.get("created_at", 0)
+                        age_h = (time.time() - created_at / 1000) / 3600 if created_at > 0 else 9999
+                        if age_h > GRAD_MAX_AGE_H:
+                            continue
+
+                        # DexScreener for Raydium pair data (price, liq, volume)
+                        market = get_market_data(mint)
+                        if not market or market["price"] <= 0:
+                            continue
+                        if market["liq"] < GRAD_MIN_LIQ:
+                            continue
+                        if market["change1h"] < GRAD_MIN_1H_PCT:
+                            continue
+
+                        # Volume/liquidity ratio filter (avoids thin illiquid pairs)
+                        try:
+                            res_ds = _session.get(
+                                f"https://api.dexscreener.com/latest/dex/tokens/{mint}",
+                                timeout=8
+                            )
+                            pairs = [p for p in res_ds.json().get("pairs", []) if p.get("chainId") == "solana"]
+                            if pairs:
+                                best = max(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
+                                vol24h = float(best.get("volume", {}).get("h24", 0) or 0)
+                                liq    = float(best.get("liquidity", {}).get("usd", 1) or 1)
+                                if liq > 0 and (vol24h / liq) < GRAD_MIN_VOL_LIQ:
+                                    continue
+                        except Exception:
+                            pass
+
+                        if gmgn_smart_money_selling(mint):
+                            log("warn", "SKIP: smart money selling", symbol)
+                            continue
+
+                        rug = run_rugcheck(mint)
+                        if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
+                            log("warn", "Mint/freeze auth — skip", symbol)
+                            blacklisted_mints.add(mint)
+                            continue
+
+                        holder_ok, holder_reason = check_holder_concentration(mint)
+                        if not holder_ok:
+                            log("warn", f"SKIP: {holder_reason}", symbol)
+                            continue
+
+                        sig_score = gmgn_signal_score(mint)
+                        amt = trade_size()
+                        log("ok",
+                            f"RAYDIUM RUNNER | age={age_h:.1f}h liq=${market['liq']/1000:.0f}k "
+                            f"1h={market['change1h']:+.0f}% | sig={sig_score}", symbol)
+                        enter_trade(mint, symbol, market["price"], amt, "grad", 100, 0, pool="raydium")
+                        n_grad += 1
+                        time.sleep(0.5)
+                    if n_grad:
+                        log("info", f"Raydium Runner: {n_grad} entries this scan")
 
         except Exception as e:
             log("err", f"Scanner: {e}")
