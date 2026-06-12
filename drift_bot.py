@@ -26,6 +26,7 @@ STARTING_CAPITAL   = float(os.environ.get("DRIFT_STARTING_CAPITAL", "100"))
 PROFIT_GOAL        = float(os.environ.get("DRIFT_PROFIT_GOAL", "10000"))
 DRIFT_TP_USD       = float(os.environ.get("DRIFT_TP_USD", "100"))   # close when PnL hits this $
 DRIFT_SL_USD       = float(os.environ.get("DRIFT_SL_USD", "2"))     # close when loss hits this $
+DRIFT_TUNE_EVERY   = int(os.environ.get("DRIFT_TUNE_EVERY",   "3")) # retune after every N closed trades
 DRIFT_COMPOUND_PCT = float(os.environ.get("DRIFT_COMPOUND_PCT", "0.10"))  # % of profit reinvested
 REDIS_URL          = os.environ.get("UPSTASH_REDIS_REST_URL", "")
 REDIS_TOKEN        = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
@@ -48,6 +49,8 @@ _notify_queue  = []
 _notify_q_lock = threading.Lock()
 _notify_log    = []   # last 50 messages sent (same text as Telegram)
 _signals_cache = {}   # market -> {signal, ts}
+_market_stats  = {}   # market -> {wins, losses, long_wins, short_wins, long_total, short_total}
+_market_params = {}   # tuned per-market: {leverage, bias, paused_until, last_result}
 
 _session = requests.Session()
 _session.trust_env = False
@@ -84,19 +87,26 @@ def _save_state():
         pos  = {k: dict(v) for k, v in _positions.items()}
         trd  = list(_trades)
         ms   = list(_milestones_hit)
-    redis_save("drift_capital",    cap)
-    redis_save("drift_positions",  pos)
-    redis_save("drift_trades",     trd[-200:])
-    redis_save("drift_milestones", ms)
-    redis_save("drift_secured",    _profit_secured)
+        mst  = dict(_market_stats)
+        mpr  = dict(_market_params)
+    redis_save("drift_capital",       cap)
+    redis_save("drift_positions",     pos)
+    redis_save("drift_trades",        trd[-200:])
+    redis_save("drift_milestones",    ms)
+    redis_save("drift_secured",       _profit_secured)
+    redis_save("drift_market_stats",  mst)
+    redis_save("drift_market_params", mpr)
 
 def _load_state():
     global _capital, _positions, _trades, _milestones_hit, _profit_secured
-    cap = redis_load("drift_capital")
-    pos = redis_load("drift_positions")
-    trd = redis_load("drift_trades")
-    ms  = redis_load("drift_milestones")
-    sec = redis_load("drift_secured")
+    global _market_stats, _market_params
+    cap    = redis_load("drift_capital")
+    pos    = redis_load("drift_positions")
+    trd    = redis_load("drift_trades")
+    ms     = redis_load("drift_milestones")
+    sec    = redis_load("drift_secured")
+    mst    = redis_load("drift_market_stats")
+    mpr    = redis_load("drift_market_params")
     with _state_lock:
         if cap is not None:
             _capital = float(cap)
@@ -108,6 +118,10 @@ def _load_state():
             _milestones_hit = set(ms)
         if sec is not None:
             _profit_secured = float(sec)
+        if mst:
+            _market_stats = mst
+        if mpr:
+            _market_params = mpr
 
 # ── LOGGING ───────────────────────────────────────────────────────
 def log(level, msg, symbol=""):
@@ -243,33 +257,56 @@ def _get_gmgn_signal(market):
     return None
 
 def get_signal(market):
-    """Returns 'long', 'short', or None. EMA crossover + optional GMGN smart money bias."""
+    """
+    Multi-factor signal engine — returns ('long'|'short', confidence 1-3) or (None, 0).
+
+    Factors (each adds 1 point of confidence):
+      1. EMA-8/21 crossover with meaningful gap (>=0.5%) AND gap is widening (momentum)
+      2. Price above/below the 21-period simple MA (trend filter — no counter-trend entries)
+      3. GMGN smart money agrees with the EMA direction
+
+    Minimum confidence to enter: 2 of 3 factors. Confidence 3 = max size, 2 = normal size.
+    """
     prices = list(_price_history.get(market, []))
-    if len(prices) < 10:
-        return None
+    if len(prices) < 22:
+        return None, 0
     vals = [p for _, p in prices]
 
-    ema8  = sum(vals[-8:]) / 8
-    ema21 = sum(vals[-21:]) / 21 if len(vals) >= 21 else None
-    if ema21 is None:
-        return None
+    ema8  = sum(vals[-8:])  / 8
+    ema21 = sum(vals[-21:]) / 21
+    sma21 = ema21  # approximate — same window
+    cur   = vals[-1]
+    prev8 = sum(vals[-9:-1]) / 8   # ema8 one bar ago
 
-    trend = None
-    if ema8 > ema21 * 1.002:
-        trend = "long"
-    elif ema8 < ema21 * 0.998:
-        trend = "short"
+    gap_pct = (ema8 - ema21) / ema21  # positive = bullish, negative = bearish
 
-    if trend is None:
-        return None
+    # Factor 1: EMA gap >= 0.5% AND widening
+    prev_gap = (prev8 - sum(vals[-22:-1]) / 21) / (sum(vals[-22:-1]) / 21)
+    gap_big    = abs(gap_pct) >= 0.005
+    gap_growing = abs(gap_pct) > abs(prev_gap)
+    f1 = gap_big and gap_growing
 
-    # GMGN override: if smart money is going opposite direction, suppress signal
+    if not f1:
+        return None, 0  # no signal without a real, accelerating crossover
+
+    trend = "long" if gap_pct > 0 else "short"
+
+    # Factor 2: price on the correct side of the 21-MA (no counter-trend)
+    f2 = (trend == "long"  and cur > sma21) or \
+         (trend == "short" and cur < sma21)
+
+    # Factor 3: GMGN smart money agrees (or is silent)
     gmgn_bias = _get_gmgn_signal(market)
     if gmgn_bias and gmgn_bias != trend:
-        log("info", f"{market} EMA={trend} but GMGN bias={gmgn_bias} — skipping")
-        return None
+        log("info", f"{market} EMA={trend} but GMGN says {gmgn_bias} — skip", "SIG")
+        return None, 0
+    f3 = gmgn_bias == trend  # True only if GMGN actively confirms
 
-    return trend
+    confidence = 1 + int(f2) + int(f3)  # 1-3
+    if confidence < 2:
+        return None, 0  # require at least 2 factors
+
+    return trend, confidence
 
 # ── LIVE EXECUTION STUBS ──────────────────────────────────────────
 def _execute_drift_order(market, side, size_usd, leverage):
@@ -441,6 +478,27 @@ def close_position(market, exit_price, reason=""):
     _save_state()
     _check_milestones()
 
+    # ── Record market stats for adaptive learning ──────────────────
+    won = pnl_usd > 0
+    with _state_lock:
+        s = _market_stats.setdefault(market, {
+            "wins": 0, "losses": 0,
+            "long_wins": 0, "short_wins": 0,
+            "long_total": 0, "short_total": 0,
+        })
+        if won:
+            s["wins"] += 1
+            s["long_wins" if pos["side"] == "long" else "short_wins"] += 1
+        else:
+            s["losses"] += 1
+        s["long_total" if pos["side"] == "long" else "short_total"] += 1
+        if market in _market_params:
+            _market_params[market]["last_result"] = "win" if won else "loss"
+        trade_count = len(_trades)
+
+    if trade_count > 0 and trade_count % DRIFT_TUNE_EVERY == 0:
+        threading.Thread(target=drift_auto_tune, daemon=True).start()
+
 def monitor_positions():
     with _state_lock:
         markets = list(_positions.keys())
@@ -495,6 +553,78 @@ def _check_milestones():
             log("ok", f"MILESTONE ${m:,} REACHED! Capital: ${cap:.2f}")
             notify(f"*{DRIFT_BOT_NAME}*\nMILESTONE ${m:,} REACHED!\nCapital: ${cap:.2f}")
 
+# ── ADAPTIVE LEARNING ─────────────────────────────────────────────
+def drift_auto_tune():
+    """Retune per-market leverage, long/short bias, and market pausing from trade history."""
+    global _market_params
+    changes = []
+    with _state_lock:
+        stats  = dict(_market_stats)
+        params = dict(_market_params)
+        total  = len(_trades)
+
+    for market, s in stats.items():
+        n = s.get("wins", 0) + s.get("losses", 0)
+        if n < 3:
+            continue
+
+        wr          = s["wins"] / n
+        cur         = params.get(market, {})
+        cur_lev     = cur.get("leverage", DRIFT_LEVERAGE)
+        long_total  = s.get("long_total",  0)
+        short_total = s.get("short_total", 0)
+        long_wins   = s.get("long_wins",   0)
+        short_wins  = s.get("short_wins",  0)
+        long_wr     = long_wins  / max(long_total,  1)
+        short_wr    = short_wins / max(short_total, 1)
+
+        # Leverage: pull back on losers, push up on winners
+        if wr < 0.30:
+            new_lev = round(max(1.0, cur_lev - 1.0), 1)
+        elif wr > 0.65:
+            new_lev = round(min(DRIFT_LEVERAGE * 2, cur_lev + 0.5), 1)
+        else:
+            new_lev = cur_lev
+
+        # Long/short bias: if one side wins 70%+ AND has at least 3 trades, lock to it
+        if long_total >= 3 and long_wr >= 0.70 and long_wr > short_wr + 0.20:
+            bias = "long"
+        elif short_total >= 3 and short_wr >= 0.70 and short_wr > long_wr + 0.20:
+            bias = "short"
+        else:
+            bias = None
+
+        # Pause market for 4h if win rate is very poor after 5+ trades
+        paused_until = cur.get("paused_until", 0)
+        if wr < 0.20 and n >= 5 and paused_until < time.time():
+            paused_until = time.time() + 4 * 3600
+            log("warn", f"Pausing {market} (WR={wr*100:.0f}% / {n} trades) for 4h", "TUNE")
+
+        new = {"leverage": new_lev, "bias": bias,
+               "paused_until": paused_until, "last_result": cur.get("last_result", "")}
+        with _state_lock:
+            _market_params[market] = new
+
+        changed = new_lev != cur_lev or bias != cur.get("bias")
+        if changed:
+            changes.append(
+                f"{market}: lev {cur_lev}x→{new_lev}x | "
+                f"bias={bias or 'both'} | WR={wr*100:.0f}% ({n}t)"
+            )
+
+    _save_state()
+
+    if changes:
+        log("ok", f"Drift tuned {len(changes)} market(s): {'; '.join(changes)}", "TUNE")
+        notify(
+            f"🧠 *{DRIFT_BOT_NAME}* Trend Machine\n"
+            f"{'—'*22}\n"
+            f"Tuned after {total} trades:\n" +
+            "\n".join(f"• {c}" for c in changes)
+        )
+    else:
+        log("info", f"Drift tune check: no param changes ({total} trades)", "TUNE")
+
 # ── TRADING LOOP ──────────────────────────────────────────────────
 def run_trading_loop():
     markets = [m.strip().upper() for m in DRIFT_MARKETS.split(",")]
@@ -529,31 +659,50 @@ def run_trading_loop():
                 for market in markets:
                     with _state_lock:
                         already_open = market in _positions
+                        mparams = dict(_market_params.get(market, {}))
                     if already_open:
                         continue
 
-                    signal = get_signal(market)
+                    # Respect learned market pause
+                    if mparams.get("paused_until", 0) > time.time():
+                        resume = time.strftime("%H:%M", time.localtime(mparams["paused_until"]))
+                        log("info", f"{market} paused until {resume} — skipping", "TUNE")
+                        continue
+
+                    signal, confidence = get_signal(market)
                     if not signal:
+                        continue
+
+                    # Respect learned long/short bias
+                    bias = mparams.get("bias")
+                    if bias and bias != signal:
+                        log("info", f"{market} bias={bias} but signal={signal} — skip", "TUNE")
                         continue
 
                     price = get_market_price(market)
                     if not price:
                         continue
 
-                    size_usd = cap * DRIFT_TRADE_PCT * DRIFT_LEVERAGE
-                    margin   = cap * DRIFT_TRADE_PCT
+                    # Use tuned per-market leverage; confidence 3 gets +25% size
+                    market_lev  = mparams.get("leverage", DRIFT_LEVERAGE)
+                    conf_mult   = 1.25 if confidence == 3 else 1.0
+                    size_usd    = cap * DRIFT_TRADE_PCT * market_lev * conf_mult
+                    margin      = size_usd / market_lev
                     if margin < 1.0:
-                        log("warn", f"Insufficient capital for trade: margin=${margin:.2f}")
+                        log("warn", f"Insufficient capital: margin=${margin:.2f}")
                         continue
+
+                    log("ok",
+                        f"SIGNAL {signal.upper()} conf={confidence}/3 lev={market_lev}x "
+                        f"size=${size_usd:.2f}", market)
 
                     # Cache signal for display
                     _signals_cache[market] = {
-                        "signal": signal,
-                        "ts": time.strftime("%H:%M:%S"),
-                        "price": price,
+                        "signal": signal, "confidence": confidence,
+                        "ts": time.strftime("%H:%M:%S"), "price": price,
                     }
 
-                    open_position(market, signal, price, size_usd, DRIFT_LEVERAGE)
+                    open_position(market, signal, price, size_usd, market_lev)
                     break  # one new position per cycle
 
         except Exception as e:
@@ -1467,6 +1616,36 @@ def reset_capital():
     log("ok", f"Capital reset to ${STARTING_CAPITAL:.2f} — all trades/positions cleared")
     notify(f"*{DRIFT_BOT_NAME}* CAPITAL RESET\nCapital: ${STARTING_CAPITAL:.2f}")
     return jsonify({"msg": f"Reset to ${STARTING_CAPITAL:.2f}", "capital": STARTING_CAPITAL})
+
+
+@app.route("/api/tune-stats", methods=["GET"])
+def tune_stats():
+    with _state_lock:
+        stats  = dict(_market_stats)
+        params = dict(_market_params)
+    out = {}
+    for market in sorted(set(list(stats.keys()) + list(params.keys()))):
+        s = stats.get(market, {})
+        p = params.get(market, {})
+        n = s.get("wins", 0) + s.get("losses", 0)
+        paused = p.get("paused_until", 0) > time.time()
+        out[market] = {
+            "trades":       n,
+            "wins":         s.get("wins", 0),
+            "losses":       s.get("losses", 0),
+            "win_rate":     round(s["wins"] / n * 100, 1) if n else None,
+            "long_wr":      round(s.get("long_wins", 0) / max(s.get("long_total", 0), 1) * 100, 1),
+            "short_wr":     round(s.get("short_wins", 0) / max(s.get("short_total", 0), 1) * 100, 1),
+            "leverage":     p.get("leverage", DRIFT_LEVERAGE),
+            "bias":         p.get("bias"),
+            "paused":       paused,
+            "last_result":  p.get("last_result", ""),
+        }
+    return jsonify({
+        "tune_every":   DRIFT_TUNE_EVERY,
+        "total_trades": len(_trades),
+        "markets":      out,
+    })
 
 
 def run_position_price_updater():
