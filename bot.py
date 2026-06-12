@@ -98,6 +98,8 @@ GRAD_MIN_VOL_LIQ = float(os.environ.get("GRAD_MIN_VOL_LIQ", "0.5"))   # min volu
 GRAD_TP_PCT      = float(os.environ.get("GRAD_TP_PCT",      "30"))
 GRAD_SL_PCT      = float(os.environ.get("GRAD_SL_PCT",      "12"))
 GRAD_MAX_SECS    = int(os.environ.get("GRAD_MAX_SECS",      "300"))   # 5 min hard cap
+# PumpPortal pool name for graduated tokens (pumpswap since March 2025)
+GRAD_POOL        = os.environ.get("GRAD_POOL", "pumpswap")
 
 # Exit protection
 SLIP_TRIGGER   = float(os.environ.get("SLIP_TRIGGER",  "90"))
@@ -1429,9 +1431,21 @@ def fetch_smart_wallets():
             wr_raw = float(w.get("winrate", 0) or 0)
             wr     = wr_raw * 100 if wr_raw <= 1 else wr_raw  # handle 0-1 or 0-100 format
             addr   = w.get("address", "")
-            if addr and COPY_WINRATE_MIN <= wr < COPY_WINRATE_MAX:
-                qualified.append({"address": addr, "winrate": round(wr, 1)})
-        qualified = sorted(qualified, key=lambda x: x["winrate"], reverse=True)[:COPY_MAX_WALLETS]
+            if not addr or not (COPY_WINRATE_MIN <= wr < COPY_WINRATE_MAX):
+                continue
+            # Require minimum trade history — single-hit flukes not useful
+            total_trades = int(w.get("txs_count", 0) or w.get("buy_count", 0) or 0)
+            if total_trades > 0 and total_trades < 15:
+                continue
+            # Prefer realized profit over paper gains (research finding)
+            realized   = float(w.get("realized_profit", 0) or 0)
+            unrealized = float(w.get("unrealized_profit", 0) or 0)
+            total_pnl  = realized + unrealized
+            if total_pnl > 0 and realized / total_pnl < 0.5:
+                continue  # less than 50% of gains are closed — could be bagholding
+            qualified.append({"address": addr, "winrate": round(wr, 1), "realized": round(realized, 2)})
+        # Sort by realized profit (not just winrate) — consistent closers beat lucky holders
+        qualified = sorted(qualified, key=lambda x: x.get("realized", 0), reverse=True)[:COPY_MAX_WALLETS]
         with _copy_lock:
             _copy_wallets     = qualified
             _copy_wallet_time = time.time()
@@ -1795,9 +1809,9 @@ def scanner_loop():
                         sig_score = gmgn_signal_score(mint)
                         amt = trade_size()
                         log("ok",
-                            f"RAYDIUM RUNNER | age={age_h:.1f}h liq=${market['liq']/1000:.0f}k "
-                            f"1h={market['change1h']:+.0f}% | sig={sig_score}", symbol)
-                        enter_trade(mint, symbol, market["price"], amt, "grad", 100, 0, pool="raydium")
+                            f"GRAD RUNNER | age={age_h:.1f}h liq=${market['liq']/1000:.0f}k "
+                            f"1h={market['change1h']:+.0f}% | pool={GRAD_POOL} | sig={sig_score}", symbol)
+                        enter_trade(mint, symbol, market["price"], amt, "grad", 100, 0, pool=GRAD_POOL)
                         n_grad += 1
                         time.sleep(0.5)
                     if n_grad:
