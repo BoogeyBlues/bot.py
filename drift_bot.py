@@ -49,6 +49,7 @@ _notify_queue  = []
 _notify_q_lock = threading.Lock()
 _notify_log    = []   # last 50 messages sent (same text as Telegram)
 _signals_cache = {}   # market -> {signal, ts}
+_st_prev       = {}   # market -> previous supertrend bullish state (for flip detection)
 _market_stats  = {}   # market -> {wins, losses, long_wins, short_wins, long_total, short_total}
 _market_params = {}   # tuned per-market: {leverage, bias, paused_until, last_result}
 
@@ -224,6 +225,60 @@ def get_market_price(market):
 def get_sol_price():
     return get_market_price("SOL")
 
+# ── INDICATOR HELPERS ─────────────────────────────────────────────
+def _calc_atr(vals, period=14):
+    """Average True Range using |close[i] - close[i-1]| as proxy for True Range."""
+    if len(vals) < period + 1:
+        return None
+    trs = [abs(vals[i] - vals[i-1]) for i in range(len(vals) - period, len(vals))]
+    return sum(trs) / period
+
+def _calc_rsi(vals, period=14):
+    """RSI from closing prices."""
+    if len(vals) < period + 1:
+        return None
+    deltas = [vals[i] - vals[i-1] for i in range(len(vals) - period, len(vals))]
+    gains  = sum(max(0,  d) for d in deltas) / period
+    losses = sum(max(0, -d) for d in deltas) / period
+    if losses == 0:
+        return 100.0
+    return 100 - (100 / (1 + gains / losses))
+
+def _supertrend(vals, period=10, mult=3.0):
+    """
+    Supertrend indicator (ATR-based).
+    Returns (is_bullish: bool, level: float) or (None, None).
+    Uses closing price as HL2 approximation since we have no OHLC data.
+    """
+    n = len(vals)
+    if n < period + 5:
+        return None, None
+
+    trs = [abs(vals[i] - vals[i-1]) for i in range(1, n)]
+    look = min(40, n - 1)
+    prices = vals[-(look + 1):]
+    trs_w  = trs[-look:]
+
+    up   = [0.0] * look
+    dn   = [0.0] * look
+    bull = [True] * look
+
+    for i in range(look):
+        a    = sum(trs_w[max(0, i - period + 1):i + 1]) / min(i + 1, period)
+        mid  = prices[i + 1]
+        b_up = mid + mult * a
+        b_dn = mid - mult * a
+        if i == 0:
+            up[i], dn[i] = b_up, b_dn
+            bull[i] = mid > b_dn
+        else:
+            up[i] = b_up if b_up < up[i-1] or prices[i] > up[i-1] else up[i-1]
+            dn[i] = b_dn if b_dn > dn[i-1] or prices[i] < dn[i-1] else dn[i-1]
+            bull[i] = (prices[i+1] >= dn[i]) if bull[i-1] else (prices[i+1] > up[i])
+
+    lvl = dn[-1] if bull[-1] else up[-1]
+    return bull[-1], lvl
+
 # ── SIGNAL ENGINE ─────────────────────────────────────────────────
 def _get_gmgn_signal(market):
     """Fetch smart money signal from GMGN for the underlying asset. Returns 'long', 'short', or None."""
@@ -258,55 +313,79 @@ def _get_gmgn_signal(market):
 
 def get_signal(market):
     """
-    Multi-factor signal engine — returns ('long'|'short', confidence 1-3) or (None, 0).
+    Research-backed multi-factor signal engine.
 
-    Factors (each adds 1 point of confidence):
-      1. EMA-8/21 crossover with meaningful gap (>=0.5%) AND gap is widening (momentum)
-      2. Price above/below the 21-period simple MA (trend filter — no counter-trend entries)
-      3. GMGN smart money agrees with the EMA direction
+    Entry requires ALL of:
+      - Supertrend (10, 3) bullish/bearish
+      - Price on correct side of EMA-50 (no counter-trend)
+      - RSI-14 between 35-65 (not exhausted, not ranging at extremes)
+      - Market not in dead zone (ATR / price > 0.001 — enough volatility to trade)
 
-    Minimum confidence to enter: 2 of 3 factors. Confidence 3 = max size, 2 = normal size.
+    Confidence score (affects position size):
+      +1 base (Supertrend + EMA + RSI all agree)
+      +1 if Supertrend just FLIPPED this bar (fresh signal, highest quality)
+      +1 if GMGN smart money actively confirms direction
+      → min to enter: confidence >= 2
+
+    Returns (direction, confidence, atr) or (None, 0, None).
     """
+    global _st_prev
     prices = list(_price_history.get(market, []))
-    if len(prices) < 22:
-        return None, 0
+    if len(prices) < 55:   # need 50 for EMA + buffer
+        return None, 0, None
     vals = [p for _, p in prices]
 
-    ema8  = sum(vals[-8:])  / 8
-    ema21 = sum(vals[-21:]) / 21
-    sma21 = ema21  # approximate — same window
-    cur   = vals[-1]
-    prev8 = sum(vals[-9:-1]) / 8   # ema8 one bar ago
+    # ── Indicators ────────────────────────────────────────────────
+    ema50     = sum(vals[-50:]) / 50
+    rsi       = _calc_rsi(vals, 14)
+    atr       = _calc_atr(vals, 14)
+    st_bull, st_lvl = _supertrend(vals, 10, 3.0)
 
-    gap_pct = (ema8 - ema21) / ema21  # positive = bullish, negative = bearish
+    if rsi is None or atr is None or st_bull is None:
+        return None, 0, None
 
-    # Factor 1: EMA gap >= 0.5% AND widening
-    prev_gap = (prev8 - sum(vals[-22:-1]) / 21) / (sum(vals[-22:-1]) / 21)
-    gap_big    = abs(gap_pct) >= 0.005
-    gap_growing = abs(gap_pct) > abs(prev_gap)
-    f1 = gap_big and gap_growing
+    cur = vals[-1]
 
-    if not f1:
-        return None, 0  # no signal without a real, accelerating crossover
+    # ── Market regime: must have enough volatility to be worth trading ──
+    atr_pct = atr / cur
+    if atr_pct < 0.001:   # market is frozen / ranging — skip
+        return None, 0, None
 
-    trend = "long" if gap_pct > 0 else "short"
+    # ── Direction from Supertrend ──────────────────────────────────
+    trend = "long" if st_bull else "short"
 
-    # Factor 2: price on the correct side of the 21-MA (no counter-trend)
-    f2 = (trend == "long"  and cur > sma21) or \
-         (trend == "short" and cur < sma21)
+    # ── Factor 1: EMA-50 trend filter (no counter-trend entries) ──
+    ema_ok = (trend == "long" and cur > ema50) or (trend == "short" and cur < ema50)
+    if not ema_ok:
+        return None, 0, None
 
-    # Factor 3: GMGN smart money agrees (or is silent)
+    # ── Factor 2: RSI not exhausted ────────────────────────────────
+    rsi_ok = 35 < rsi < 65
+    if not rsi_ok:
+        return None, 0, None
+
+    # ── Confidence scoring ─────────────────────────────────────────
+    confidence = 1  # base: ST + EMA + RSI all agree
+
+    prev_bull = _st_prev.get(market)
+    just_flipped = prev_bull is not None and prev_bull != st_bull
+    if just_flipped:
+        confidence += 1  # fresh flip = highest quality entry
+
     gmgn_bias = _get_gmgn_signal(market)
-    if gmgn_bias and gmgn_bias != trend:
-        log("info", f"{market} EMA={trend} but GMGN says {gmgn_bias} — skip", "SIG")
-        return None, 0
-    f3 = gmgn_bias == trend  # True only if GMGN actively confirms
+    if gmgn_bias == trend:
+        confidence += 1
+    elif gmgn_bias and gmgn_bias != trend:
+        log("info", f"{market} ST={trend} but GMGN={gmgn_bias} — suppressed", "SIG")
+        _st_prev[market] = st_bull
+        return None, 0, None
 
-    confidence = 1 + int(f2) + int(f3)  # 1-3
+    _st_prev[market] = st_bull
+
     if confidence < 2:
-        return None, 0  # require at least 2 factors
+        return None, 0, None
 
-    return trend, confidence
+    return trend, confidence, atr
 
 # ── LIVE EXECUTION STUBS ──────────────────────────────────────────
 def _execute_drift_order(market, side, size_usd, leverage):
@@ -372,14 +451,17 @@ def _execute_zeta_order(market, side, size_usd, leverage):
         log("err", f"Zeta order error: {e}")
 
 # ── POSITION MANAGEMENT ───────────────────────────────────────────
-def open_position(market, side, price, size_usd, leverage):
+def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=None):
     global _capital
+    # Use ATR-based levels when provided, otherwise fall back to fixed config
+    _sl = sl_pct if sl_pct is not None else DRIFT_SL_PCT
+    _tp = tp_pct if tp_pct is not None else DRIFT_TP_PCT
     if side == "long":
-        tp = price * (1 + DRIFT_TP_PCT)
-        sl = price * (1 - DRIFT_SL_PCT)
+        tp = price * (1 + _tp)
+        sl = price * (1 - _sl)
     else:
-        tp = price * (1 - DRIFT_TP_PCT)
-        sl = price * (1 + DRIFT_SL_PCT)
+        tp = price * (1 - _tp)
+        sl = price * (1 + _sl)
 
     pos = {
         "market": market, "side": side, "entry": price,
@@ -637,7 +719,7 @@ def run_trading_loop():
                 price = get_market_price(market)
                 if price:
                     if market not in _price_history:
-                        _price_history[market] = deque(maxlen=30)
+                        _price_history[market] = deque(maxlen=300)
                     _price_history[market].append((time.time(), price))
 
             # Monitor existing positions for exits
@@ -669,7 +751,7 @@ def run_trading_loop():
                         log("info", f"{market} paused until {resume} — skipping", "TUNE")
                         continue
 
-                    signal, confidence = get_signal(market)
+                    signal, confidence, sig_atr = get_signal(market)
                     if not signal:
                         continue
 
@@ -679,22 +761,36 @@ def run_trading_loop():
                         log("info", f"{market} bias={bias} but signal={signal} — skip", "TUNE")
                         continue
 
+                    # ── Time window: only trade 10:00-22:00 UTC ───────────
+                    utc_hour = int(time.strftime("%H", time.gmtime()))
+                    if not (10 <= utc_hour < 22):
+                        log("info", f"{market} outside trading window ({utc_hour}:00 UTC) — skip")
+                        continue
+
                     price = get_market_price(market)
                     if not price:
                         continue
 
-                    # Use tuned per-market leverage; confidence 3 gets +25% size
-                    market_lev  = mparams.get("leverage", DRIFT_LEVERAGE)
-                    conf_mult   = 1.25 if confidence == 3 else 1.0
-                    size_usd    = cap * DRIFT_TRADE_PCT * market_lev * conf_mult
-                    margin      = size_usd / market_lev
+                    # ── ATR-based SL/TP (dynamic, volatility-adjusted) ────
+                    atr_pct   = sig_atr / price
+                    sl_pct    = atr_pct * 1.5   # SL = 1.5× ATR
+                    tp_pct    = atr_pct * 3.0   # TP = 3× ATR (2:1 R:R)
+
+                    # ── ATR-based position sizing ─────────────────────────
+                    # Size so that the ATR stop-out equals exactly DRIFT_SL_USD
+                    market_lev     = mparams.get("leverage", DRIFT_LEVERAGE)
+                    conf_mult      = 1.25 if confidence == 3 else 1.0
+                    ideal_notional = (DRIFT_SL_USD / sl_pct) if sl_pct > 0 else cap * DRIFT_TRADE_PCT * market_lev
+                    max_notional   = cap * DRIFT_TRADE_PCT * market_lev * conf_mult
+                    size_usd       = min(ideal_notional, max_notional)
+                    margin         = size_usd / market_lev
                     if margin < 1.0:
-                        log("warn", f"Insufficient capital: margin=${margin:.2f}")
+                        log("warn", f"Margin too small: ${margin:.2f}")
                         continue
 
                     log("ok",
                         f"SIGNAL {signal.upper()} conf={confidence}/3 lev={market_lev}x "
-                        f"size=${size_usd:.2f}", market)
+                        f"size=${size_usd:.2f} SL={sl_pct*100:.2f}% TP={tp_pct*100:.2f}%", market)
 
                     # Cache signal for display
                     _signals_cache[market] = {
@@ -702,7 +798,9 @@ def run_trading_loop():
                         "ts": time.strftime("%H:%M:%S"), "price": price,
                     }
 
-                    open_position(market, signal, price, size_usd, market_lev)
+                    # Open with ATR-based SL/TP overrides
+                    open_position(market, signal, price, size_usd, market_lev,
+                                  sl_pct=sl_pct, tp_pct=tp_pct)
                     break  # one new position per cycle
 
         except Exception as e:
