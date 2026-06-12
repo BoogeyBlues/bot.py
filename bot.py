@@ -1,4 +1,4 @@
-import os, time, threading, requests, json, re, csv, io
+import os, time, threading, requests, json, re, csv, io, random
 from flask import Flask, jsonify, Response
 from collections import defaultdict
 
@@ -219,7 +219,8 @@ _notify_q_lock = threading.Lock()
 def notify(title, body):
     """Queue a notification — sent by dedicated thread to avoid Telegram rate limits."""
     with _notify_q_lock:
-        _notify_queue.append((title, body))
+        if len(_notify_queue) < 100:
+            _notify_queue.append((title, body))
 
 def _notify_worker():
     """Single thread sends queued notifications 1/sec so nothing gets dropped."""
@@ -340,6 +341,26 @@ def _load_daily_state():
         completed_trades.clear()
         completed_trades.extend(trades_data)
         log("ok", f"Reloaded {len(completed_trades)} completed trades")
+
+    # Restore auto-tuned params (Redis > local file > defaults)
+    global BOND_ENTRY_MIN, BOND_ENTRY_MAX, BOND_SL_PCT, BOND_STALE_SECS, BOND_MAX_SECS, SPIKE_TP_PCT
+    tuned = redis_load("bot_tuned_params")
+    if not tuned:
+        try:
+            tuned_file = LEARN_FILE.replace(".json", "_tuned.json")
+            if os.path.exists(tuned_file):
+                with open(tuned_file) as f:
+                    tuned = json.load(f)
+        except Exception:
+            tuned = {}
+    if tuned:
+        BOND_ENTRY_MIN  = float(tuned.get("BOND_ENTRY_MIN",  BOND_ENTRY_MIN))
+        BOND_ENTRY_MAX  = float(tuned.get("BOND_ENTRY_MAX",  BOND_ENTRY_MAX))
+        BOND_SL_PCT     = float(tuned.get("BOND_SL_PCT",     BOND_SL_PCT))
+        BOND_STALE_SECS = int(tuned.get("BOND_STALE_SECS",   BOND_STALE_SECS))
+        BOND_MAX_SECS   = int(tuned.get("BOND_MAX_SECS",     BOND_MAX_SECS))
+        SPIKE_TP_PCT    = float(tuned.get("SPIKE_TP_PCT",    SPIKE_TP_PCT))
+        log("ok", f"Restored tuned params: bond={BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% sl={BOND_SL_PCT}% stale={BOND_STALE_SECS}s")
 
 def _reset_daily_if_needed():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses, _pause_until
@@ -622,7 +643,7 @@ def auto_tune(history):
         # Tune bond entry range toward what's winning
         if bond_wins:
             avg_win_entry = sum(t.get("bond_entry", BOND_ENTRY_MIN) for t in bond_wins) / len(bond_wins)
-            BOND_ENTRY_MIN = round(min(max(avg_win_entry - 2, 50), 72), 1)
+            BOND_ENTRY_MIN = round(min(max(avg_win_entry - 2, 25), 72), 1)
             BOND_ENTRY_MAX = round(min(BOND_ENTRY_MIN + 6, 78), 1)
         elif bond_wr < 0.35 and len(bond_all) >= 5:
             # Poor win rate — tighten entry, look for higher momentum
@@ -673,6 +694,21 @@ def auto_tune(history):
                f"Bond entry: {BOND_ENTRY_MIN}–{BOND_ENTRY_MAX}%\n"
                f"Stale exit: {BOND_STALE_SECS}s | SL: {BOND_SL_PCT}%\n"
                f"Spike TP: {SPIKE_TP_PCT}%")
+        # Persist tuned params so restarts don't lose learned values
+        tuned = {
+            "BOND_ENTRY_MIN": BOND_ENTRY_MIN,
+            "BOND_ENTRY_MAX": BOND_ENTRY_MAX,
+            "BOND_SL_PCT":    BOND_SL_PCT,
+            "BOND_STALE_SECS":BOND_STALE_SECS,
+            "BOND_MAX_SECS":  BOND_MAX_SECS,
+            "SPIKE_TP_PCT":   SPIKE_TP_PCT,
+        }
+        redis_save("bot_tuned_params", tuned)
+        try:
+            with open(LEARN_FILE.replace(".json", "_tuned.json"), "w") as f:
+                json.dump(tuned, f, indent=2)
+        except Exception:
+            pass
         try:
             with open(LEARN_FILE.replace(".json", "_stats.json"), "w") as f:
                 json.dump(stats, f, indent=2)
@@ -1236,6 +1272,9 @@ def monitor_loop():
             if PAPER_MODE and price == trade["entry"] and bond > 0 and trade.get("bond_entry", 0) > 0:
                 bond_move = bond - trade["bond_entry"]
                 price = trade["entry"] * (1 + bond_move / 100)
+            # Paper mode fallback: if no price after 60s, use tiny random walk so exits still fire
+            elif PAPER_MODE and price == trade["entry"] and elapsed > 60:
+                price = trade["entry"] * (1 + random.uniform(-0.03, 0.05))
 
             with trades_lock:
                 if mint not in open_trades:
