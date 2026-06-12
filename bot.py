@@ -75,7 +75,7 @@ LOSS_COOLDOWN_HRS = float(os.environ.get("LOSS_COOLDOWN_HRS", "0.5")) # 30-min p
 ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # retune every 5 trades for faster learning
 
 # Bond Runner strategy
-BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "40"))
+BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "25"))
 BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "75"))
 BOND_TP         = float(os.environ.get("BOND_TP",        "67"))
 BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "10"))
@@ -84,7 +84,7 @@ BOND_STALE_SECS = int(os.environ.get("BOND_STALE_SECS",  "120"))   # exit if bon
 
 # Dormant Spike strategy
 SPIKE_MIN_AGE_H = float(os.environ.get("SPIKE_MIN_AGE_H", "12"))
-SPIKE_MIN_1H    = float(os.environ.get("SPIKE_MIN_1H",    "100"))
+SPIKE_MIN_1H    = float(os.environ.get("SPIKE_MIN_1H",    "50"))
 SPIKE_TP_PCT    = float(os.environ.get("SPIKE_TP_PCT",    "40"))
 SPIKE_SL_PCT    = float(os.environ.get("SPIKE_SL_PCT",    "15"))
 SPIKE_MAX_SECS  = int(os.environ.get("SPIKE_MAX_SECS",    "180"))   # 3 min hard cap
@@ -1541,10 +1541,11 @@ def scanner_loop():
                 if coin.get("twitter") or coin.get("telegram"):
                     n_social += 1
 
-                # Active trading: last trade within 10 minutes
+                # Active trading: last trade within 30 minutes
                 last_trade = coin.get("last_trade", 0)
                 secs_since = (time.time() - last_trade / 1000) if last_trade > 0 else 9999
-                if secs_since > 600:
+                if secs_since > 1800:
+                    log("info", f"SKIP stale: last trade {secs_since/60:.0f}m ago bond={coin.get('bond_pct',0):.0f}%", symbol)
                     continue
                 n_replies += 1  # reuse counter — now means "recently active"
 
@@ -1669,17 +1670,19 @@ def scanner_loop():
                         log("ok", f"DORMANT SPIKE | age={age_h:.1f}h 1h={market['change1h']:+.0f}% | sig={sig_score}", symbol)
                         enter_trade(mint, symbol, market["price"], amt, "spike", bond, 0)
                         time.sleep(0.5)
+                    else:
+                        log("info", f"NO STRATEGY: bond={bond:.0f}% age={age_h:.1f}h active={secs_since:.0f}s", symbol)
 
                 time.sleep(0.2)
 
             log("info",
                 f"Filter summary: {len(coins)} coins | "
-                f"{n_social} have-social | {n_replies} active<10m | "
+                f"{n_social} have-social | {n_replies} active<30m | "
                 f"{n_bond_range} in bond range | {n_spike_range} dormant")
             if n_social == 0:
                 log("warn", "0 coins have Twitter or Telegram — market may be slow")
             elif n_replies == 0:
-                log("warn", f"{n_social} coins have socials but none traded in last 10 min")
+                log("warn", f"{n_social} coins have socials but none traded in last 30 min")
 
             # ── Raydium Runner — graduated tokens ──────────────────
             if GRAD_MODE:
@@ -2899,27 +2902,65 @@ def scan_debug():
     if not coins:
         return jsonify({"error": "PumpFun API returned no coins", "fetched": 0})
     results = []
-    for coin in coins[:20]:
-        mint   = coin["mint"]
-        symbol = coin["symbol"]
-        bond   = coin.get("bond_pct", 0)
+    counters = {"stale": 0, "no_strategy": 0, "rug": 0, "holders": 0, "dev": 0, "sm_sell": 0, "no_price": 0, "ready": 0}
+    for coin in coins[:30]:
+        mint       = coin["mint"]
+        symbol     = coin["symbol"]
+        bond       = coin.get("bond_pct", 0)
         has_social = bool(coin.get("twitter") or coin.get("telegram"))
         last_trade = coin.get("last_trade", 0)
         secs_since = round((time.time() - last_trade / 1000)) if last_trade > 0 else 9999
-        in_bond_range = BOND_ENTRY_MIN <= bond <= BOND_ENTRY_MAX
-        results.append({
-            "symbol": symbol, "bond": bond,
-            "social": has_social,
-            "secs_since_trade": secs_since,
-            "in_bond_range": in_bond_range,
-            "pass": secs_since <= 600 and in_bond_range,
-        })
-    passing = [r for r in results if r["pass"]]
+        created_at = coin.get("created_at", 0)
+        age_h      = round((time.time() - created_at / 1000) / 3600, 1) if created_at > 0 else 0
+        in_bond    = BOND_ENTRY_MIN <= bond <= BOND_ENTRY_MAX
+        is_spike   = age_h >= SPIKE_MIN_AGE_H
+
+        entry = {"symbol": symbol, "bond": bond, "age_h": age_h,
+                 "social": has_social, "secs_since": secs_since,
+                 "in_bond_range": in_bond, "kill": None}
+
+        if secs_since > 1800:
+            entry["kill"] = f"stale ({secs_since//60}m ago)"
+            counters["stale"] += 1
+        elif not in_bond and not is_spike:
+            entry["kill"] = f"no strategy: bond={bond:.0f}% age={age_h:.1f}h"
+            counters["no_strategy"] += 1
+        else:
+            rug = run_rugcheck(mint)
+            if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
+                entry["kill"] = "rug: mint/freeze auth"
+                counters["rug"] += 1
+            elif rug and rug.get("is_bundled"):
+                entry["kill"] = "rug: bundled"
+                counters["rug"] += 1
+            else:
+                ok, reason = check_holder_concentration(mint)
+                if not ok:
+                    entry["kill"] = f"holders: {reason}"
+                    counters["holders"] += 1
+                elif gmgn_smart_money_selling(mint):
+                    entry["kill"] = "sm_sell"
+                    counters["sm_sell"] += 1
+                else:
+                    market = get_market_data(mint)
+                    if not market or market["price"] <= 0:
+                        entry["kill"] = "no price data"
+                        counters["no_price"] += 1
+                    else:
+                        entry["kill"] = None
+                        entry["price"] = market["price"]
+                        entry["liq"]   = market["liq"]
+                        entry["1h_pct"]= market["change1h"]
+                        counters["ready"] += 1
+
+        results.append(entry)
+
     return jsonify({
-        "fetched": len(coins),
-        "bond_range": f"{BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%",
-        "passing_all_filters": len(passing),
-        "sample": results,
+        "fetched":     len(coins),
+        "bond_range":  f"{BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%",
+        "spike_min_1h": SPIKE_MIN_1H,
+        "counters":    counters,
+        "coins":       results,
     })
 
 
