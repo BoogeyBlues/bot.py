@@ -43,6 +43,7 @@ _day_start     = ""
 _price_history = {}
 _milestones_hit = set()
 _state_lock    = threading.Lock()
+_tuning_lock   = threading.Lock()
 _log_buffer    = []
 _log_lock      = threading.Lock()
 _notify_queue  = []
@@ -82,9 +83,11 @@ def redis_load(key):
     return None
 
 def _save_state():
-    global _profit_secured
     with _state_lock:
         cap  = _capital
+        sec  = _profit_secured
+        dpnl = _daily_pnl
+        ds   = _day_start
         pos  = {k: dict(v) for k, v in _positions.items()}
         trd  = list(_trades)
         ms   = list(_milestones_hit)
@@ -95,14 +98,16 @@ def _save_state():
     redis_save("drift_positions",      pos)
     redis_save("drift_trades",         trd[-200:])
     redis_save("drift_milestones",     ms)
-    redis_save("drift_secured",        _profit_secured)
+    redis_save("drift_secured",        sec)
     redis_save("drift_market_stats",   mst)
     redis_save("drift_market_params",  mpr)
     redis_save("drift_price_history",  ph)
+    redis_save("drift_daily_pnl",      dpnl)
+    redis_save("drift_day_start",      ds)
 
 def _load_state():
     global _capital, _positions, _trades, _milestones_hit, _profit_secured
-    global _market_stats, _market_params, _price_history
+    global _market_stats, _market_params, _price_history, _daily_pnl, _day_start
     cap    = redis_load("drift_capital")
     pos    = redis_load("drift_positions")
     trd    = redis_load("drift_trades")
@@ -111,6 +116,8 @@ def _load_state():
     mst    = redis_load("drift_market_stats")
     mpr    = redis_load("drift_market_params")
     ph     = redis_load("drift_price_history")
+    dpnl   = redis_load("drift_daily_pnl")
+    ds     = redis_load("drift_day_start")
     with _state_lock:
         if cap is not None:
             _capital = float(cap)
@@ -130,6 +137,10 @@ def _load_state():
             for k, v in ph.items():
                 _price_history[k] = deque(v, maxlen=300)
             log("ok", f"Restored price history for {len(ph)} markets")
+        today = time.strftime("%Y-%m-%d")
+        if dpnl is not None and ds == today:
+            _daily_pnl = float(dpnl)
+            _day_start  = ds
 
 # ── LOGGING ───────────────────────────────────────────────────────
 def log(level, msg, symbol=""):
@@ -281,7 +292,7 @@ def _supertrend(vals, period=10, mult=3.0):
         else:
             up[i] = b_up if b_up < up[i-1] or prices[i] > up[i-1] else up[i-1]
             dn[i] = b_dn if b_dn > dn[i-1] or prices[i] < dn[i-1] else dn[i-1]
-            bull[i] = (prices[i+1] >= dn[i]) if bull[i-1] else (prices[i+1] > up[i])
+            bull[i] = (prices[i+1] >= dn[i]) if bull[i-1] else (prices[i+1] > up[i-1])
 
     lvl = dn[-1] if bull[-1] else up[-1]
     return bull[-1], lvl
@@ -296,6 +307,8 @@ def _get_gmgn_signal(market):
             "User-Agent": "Mozilla/5.0",
             "Accept": "application/json",
         }
+        if GMGN_API_KEY:
+            headers["Authorization"] = f"Bearer {GMGN_API_KEY}"
         r = _session.get(
             "https://gmgn.ai/defi/quotation/v1/signals/sol",
             params={"type": "12", "limit": "20"},
@@ -395,7 +408,7 @@ def get_signal(market):
     return trend, confidence, atr
 
 # ── LIVE EXECUTION STUBS ──────────────────────────────────────────
-def _execute_drift_order(market, side, size_usd, leverage):
+def _execute_drift_order(market, side, size_usd, leverage) -> bool:
     try:
         from driftpy.drift_client import DriftClient
         from driftpy.types import OrderType, PositionDirection, OrderParams
@@ -420,25 +433,32 @@ def _execute_drift_order(market, side, size_usd, leverage):
                 "TRUMP": 27, "AVAX": 28, "SEI": 29,
             }
             idx = market_index_map.get(market.upper(), 0)
+            price = get_market_price(market)
+            if not price:
+                raise ValueError(f"Cannot get price for {market}")
+            base_amount = int((size_usd / price) * 1e9)  # USD → base asset atomic units
             await client.place_perp_order(OrderParams(
                 order_type=OrderType.Market(),
                 market_index=idx,
                 direction=direction,
-                base_asset_amount=int(size_usd * 1e6),
+                base_asset_amount=base_amount,
             ))
             await conn.close()
 
         asyncio.run(_place())
+        return True
     except ImportError:
         log("err", "driftpy not installed — run: pip install driftpy")
     except Exception as e:
         log("err", f"Drift order failed: {e}")
+    return False
 
-def _execute_zeta_order(market, side, size_usd, leverage):
+def _execute_zeta_order(market, side, size_usd, leverage) -> bool:
     try:
         price = get_market_price(market)
         if not price:
-            return
+            log("err", f"Cannot get price for {market} — Zeta order skipped")
+            return False
         quantity = (size_usd * leverage) / price
         r = _session.post(
             "https://dex.zeta.markets/api/v2/order",
@@ -454,8 +474,11 @@ def _execute_zeta_order(market, side, size_usd, leverage):
         )
         if r.status_code != 200:
             log("err", f"Zeta order failed: {r.status_code} {r.text[:80]}")
+            return False
+        return True
     except Exception as e:
         log("err", f"Zeta order error: {e}")
+    return False
 
 # ── POSITION MANAGEMENT ───────────────────────────────────────────
 def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=None):
@@ -479,14 +502,19 @@ def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=N
     }
 
     if not DRIFT_PAPER_MODE:
-        if DRIFT_EXCHANGE == "zeta":
-            _execute_zeta_order(market, side, size_usd, leverage)
-        else:
-            _execute_drift_order(market, side, size_usd, leverage)
+        ok = _execute_zeta_order(market, side, size_usd, leverage) if DRIFT_EXCHANGE == "zeta" \
+             else _execute_drift_order(market, side, size_usd, leverage)
+        if not ok:
+            log("err", f"Exchange order failed for {market} — position NOT opened")
+            return
 
+    margin = size_usd / leverage
     with _state_lock:
+        if _capital < margin:
+            log("warn", f"Insufficient capital ${_capital:.2f} for margin ${margin:.2f} — skipping")
+            return
         _positions[market] = pos
-        _capital -= size_usd / leverage  # margin used
+        _capital -= margin
 
     log("ok", f"OPEN {side.upper()} {market} @ ${price:.4f} size=${size_usd:.2f} {leverage}x TP={tp:.4f} SL={sl:.4f}")
     notify(
@@ -527,9 +555,10 @@ def close_position(market, exit_price, reason=""):
         else:
             _capital += margin + pnl_usd
         _daily_pnl += pnl_usd
+        cap_after = _capital  # snapshot while still holding lock
 
     if is_dollar_tp:
-        log("ok", f"SECURED ${secured_amt:.2f} | COMPOUNDED +${compound_amt:.2f} → capital=${_capital:.2f}", market)
+        log("ok", f"SECURED ${secured_amt:.2f} | COMPOUNDED +${compound_amt:.2f} → capital=${cap_after:.2f}", market)
 
     trade = {
         "market": market, "side": pos["side"],
@@ -556,7 +585,7 @@ def close_position(market, exit_price, reason=""):
             f"PROFIT TAKEN {market}\n"
             f"Secured: ${secured_amt:.2f}\n"
             f"Compounded: +${compound_amt:.2f} back into capital\n"
-            f"Capital now: ${_capital:.2f}"
+            f"Capital now: ${cap_after:.2f}"
         )
     else:
         notify(
@@ -587,9 +616,17 @@ def close_position(market, exit_price, reason=""):
         trade_count = len(_trades)
 
     if trade_count > 0 and trade_count % DRIFT_TUNE_EVERY == 0:
-        threading.Thread(target=drift_auto_tune, daemon=True).start()
+        if _tuning_lock.acquire(blocking=False):
+            def _tune_and_release():
+                try:
+                    drift_auto_tune()
+                finally:
+                    _tuning_lock.release()
+            threading.Thread(target=_tune_and_release, daemon=True).start()
 
 def monitor_positions():
+    # TP/SL exits are handled exclusively by run_position_price_updater (every 5s).
+    # This function only updates trailing peaks so the 60s loop keeps them current.
     with _state_lock:
         markets = list(_positions.keys())
 
@@ -603,54 +640,38 @@ def monitor_positions():
             continue
 
         raw_pct = (price - pos["entry"]) / pos["entry"] * (1 if pos["side"] == "long" else -1)
-        notional = pos["size"]   # size is already notional (margin * leverage)
+        notional = pos["size"]
         with _state_lock:
             if market not in _positions:
                 continue
             _positions[market]["pnl"] = raw_pct * notional
-
-            # Update trailing peak
+            # Update trailing peak using live sl, not stale snapshot
             if pos["side"] == "long" and price > _positions[market]["peak_price"]:
                 _positions[market]["peak_price"] = price
-                _positions[market]["sl"] = max(pos["sl"], price * (1 - DRIFT_TRAIL_PCT))
+                _positions[market]["sl"] = max(_positions[market]["sl"], price * (1 - DRIFT_TRAIL_PCT))
             elif pos["side"] == "short" and price < _positions[market]["peak_price"]:
                 _positions[market]["peak_price"] = price
-                _positions[market]["sl"] = min(pos["sl"], price * (1 + DRIFT_TRAIL_PCT))
-
-            updated_pos = dict(_positions[market])
-
-        # Dollar TP — close when profit hits threshold
-        if DRIFT_TP_USD > 0 and updated_pos.get("pnl", 0) >= DRIFT_TP_USD:
-            close_position(market, price, f"TP${DRIFT_TP_USD:.0f}")
-        # Dollar SL — close when loss hits threshold (most reliable stop)
-        elif DRIFT_SL_USD > 0 and updated_pos.get("pnl", 0) <= -DRIFT_SL_USD:
-            close_position(market, price, f"SL${DRIFT_SL_USD:.0f}")
-        # Percentage TP hit
-        elif (updated_pos["side"] == "long" and price >= updated_pos["tp"]) or \
-             (updated_pos["side"] == "short" and price <= updated_pos["tp"]):
-            close_position(market, price, "TP")
-        # Price-based SL hit
-        elif (updated_pos["side"] == "long" and price <= updated_pos["sl"]) or \
-             (updated_pos["side"] == "short" and price >= updated_pos["sl"]):
-            close_position(market, price, "SL")
+                _positions[market]["sl"] = min(_positions[market]["sl"], price * (1 + DRIFT_TRAIL_PCT))
 
 def _check_milestones():
     with _state_lock:
         cap = _capital
-    for m in MILESTONES:
-        if cap >= m and m not in _milestones_hit:
+        newly_hit = [m for m in MILESTONES if cap >= m and m not in _milestones_hit]
+        for m in newly_hit:
             _milestones_hit.add(m)
-            log("ok", f"MILESTONE ${m:,} REACHED! Capital: ${cap:.2f}")
-            notify(f"*{DRIFT_BOT_NAME}*\nMILESTONE ${m:,} REACHED!\nCapital: ${cap:.2f}")
+    for m in newly_hit:
+        log("ok", f"MILESTONE ${m:,} REACHED! Capital: ${cap:.2f}")
+        notify(f"*{DRIFT_BOT_NAME}*\nMILESTONE ${m:,} REACHED!\nCapital: ${cap:.2f}")
 
 # ── ADAPTIVE LEARNING ─────────────────────────────────────────────
 def drift_auto_tune():
     """Retune per-market leverage, long/short bias, and market pausing from trade history."""
+    import copy
     global _market_params
     changes = []
     with _state_lock:
-        stats  = dict(_market_stats)
-        params = dict(_market_params)
+        stats  = copy.deepcopy(_market_stats)
+        params = copy.deepcopy(_market_params)
         total  = len(_trades)
 
     for market, s in stats.items():
@@ -726,9 +747,10 @@ def run_trading_loop():
             for market in markets:
                 price = get_market_price(market)
                 if price:
-                    if market not in _price_history:
-                        _price_history[market] = deque(maxlen=300)
-                    _price_history[market].append((time.time(), price))
+                    with _state_lock:
+                        if market not in _price_history:
+                            _price_history[market] = deque(maxlen=300)
+                        _price_history[market].append((time.time(), price))
 
             # Monitor existing positions for exits
             monitor_positions()
@@ -736,9 +758,10 @@ def run_trading_loop():
             # Daily PnL reset
             today = time.strftime("%Y-%m-%d")
             global _day_start, _daily_pnl
-            if _day_start != today:
-                _day_start = today
-                _daily_pnl = 0.0
+            with _state_lock:
+                if _day_start != today:
+                    _day_start = today
+                    _daily_pnl = 0.0
 
             # Open new positions if slots available
             with _state_lock:
@@ -801,10 +824,11 @@ def run_trading_loop():
                         f"size=${size_usd:.2f} SL={sl_pct*100:.2f}% TP={tp_pct*100:.2f}%", market)
 
                     # Cache signal for display
-                    _signals_cache[market] = {
-                        "signal": signal, "confidence": confidence,
-                        "ts": time.strftime("%H:%M:%S"), "price": price,
-                    }
+                    with _state_lock:
+                        _signals_cache[market] = {
+                            "signal": signal, "confidence": confidence,
+                            "ts": time.strftime("%H:%M:%S"), "price": price,
+                        }
 
                     # Open with ATR-based SL/TP overrides
                     open_position(market, signal, price, size_usd, market_lev,
@@ -1594,9 +1618,12 @@ def status_api():
     with _state_lock:
         cap       = _capital
         pos_snap  = {k: dict(v) for k, v in _positions.items()}
-        n_trades  = len(_trades)
-        wins_n    = sum(1 for t in _trades if t["pnl"] >= 0)
-        total_pnl = sum(t["pnl"] for t in _trades)
+        trades_snap = list(_trades)
+        dpnl      = _daily_pnl
+        psec      = _profit_secured
+    n_trades  = len(trades_snap)
+    wins_n    = sum(1 for t in trades_snap if t["pnl"] >= 0)
+    total_pnl = sum(t["pnl"] for t in trades_snap)
 
     sol_price = get_sol_price()
     return jsonify({
@@ -1606,7 +1633,7 @@ def status_api():
         "capital": round(cap, 2),
         "starting_capital": STARTING_CAPITAL,
         "profit_goal": PROFIT_GOAL,
-        "daily_pnl": round(_daily_pnl, 2),
+        "daily_pnl": round(dpnl, 2),
         "total_trades": n_trades,
         "wins": wins_n,
         "losses": n_trades - wins_n,
@@ -1616,7 +1643,7 @@ def status_api():
         "positions": pos_snap,
         "leverage": DRIFT_LEVERAGE,
         "sol_price": round(sol_price, 2) if sol_price else None,
-        "profit_secured": round(_profit_secured, 2),
+        "profit_secured": round(psec, 2),
         "tp_usd": DRIFT_TP_USD,
         "compound_pct": DRIFT_COMPOUND_PCT * 100,
         "markets": DRIFT_MARKETS,
@@ -1698,12 +1725,13 @@ def manual_close(market):
     with _state_lock:
         if market not in _positions:
             return jsonify({"error": f"No open position for {market}"}), 400
-        # Use live cached price first — always accurate
         price = _positions[market].get("current_price") or _positions[market].get("entry")
 
-    # Try fresh API price as override if cached is missing
     if not price:
         price = get_market_price(market)
+
+    if not price:
+        return jsonify({"error": f"Cannot determine exit price for {market}"}), 400
 
     close_position(market, price, "MANUAL")
     return jsonify({"msg": f"Closed {market} position @ ${price:.4f}"})
@@ -1712,6 +1740,11 @@ def manual_close(market):
 @app.route("/api/reset-capital", methods=["POST"])
 def reset_capital():
     global _capital, _trades, _daily_pnl, _profit_secured, _positions
+    if not DRIFT_PAPER_MODE:
+        with _state_lock:
+            open_mkts = list(_positions.keys())
+        if open_mkts:
+            return jsonify({"error": f"Cannot reset with open live positions: {open_mkts}. Close them first."}), 400
     with _state_lock:
         _capital         = STARTING_CAPITAL
         _trades          = []
@@ -1729,6 +1762,7 @@ def tune_stats():
     with _state_lock:
         stats  = dict(_market_stats)
         params = dict(_market_params)
+        total  = len(_trades)
     out = {}
     for market in sorted(set(list(stats.keys()) + list(params.keys()))):
         s = stats.get(market, {})
@@ -1749,7 +1783,7 @@ def tune_stats():
         }
     return jsonify({
         "tune_every":   DRIFT_TUNE_EVERY,
-        "total_trades": len(_trades),
+        "total_trades": total,
         "markets":      out,
     })
 

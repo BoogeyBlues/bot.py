@@ -284,13 +284,15 @@ def daily_trade_limit():
 
 # ── DAILY LIMITS ─────────────────────────────────────────────────
 def _save_daily_state():
+    with capital_lock:
+        cap_snapshot = capital
     state = {
         "date":         _daily_date,
         "trades":       _daily_trades,
         "wins":         _daily_wins,
         "losses":       _daily_losses,
         "pause_until":  _pause_until,
-        "capital":      capital,
+        "capital":      cap_snapshot,
         "week_start":   _week_start_date,
         "week_logs":    _week_day_logs,
     }
@@ -402,6 +404,8 @@ def _reset_daily_if_needed():
 
 def daily_limit_reached():
     _reset_daily_if_needed()
+    with capital_lock:
+        cap_now = capital  # snapshot outside _daily_lock to avoid lock-order inversion
     with _daily_lock:
         if _pause_until > time.time():
             resume = time.strftime("%H:%M", time.localtime(_pause_until))
@@ -414,8 +418,6 @@ def daily_limit_reached():
             return True
         # Max daily loss guard — stop if down >MAX_DAILY_LOSS_PCT% from today's open
         if _day_start_cap > 0:
-            with capital_lock:
-                cap_now = capital
             loss_pct = (_day_start_cap - cap_now) / _day_start_cap * 100
             if loss_pct >= MAX_DAILY_LOSS_PCT:
                 log("warn", f"Daily loss guard: down {loss_pct:.1f}% today (${_day_start_cap - cap_now:.2f}) — stopping until tomorrow")
@@ -451,7 +453,9 @@ def _retune_strategies():
                 history = json.load(f)
         if len(history) >= 5:
             auto_tune(history)
-            resume_str = time.strftime("%H:%M", time.localtime(_pause_until))
+            with _daily_lock:
+                resume_ts = _pause_until
+            resume_str = time.strftime("%H:%M", time.localtime(resume_ts))
             notify("✅ Strategy Retuned",
                    f"New bond entry: {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%\n"
                    f"Stale exit: {BOND_STALE_SECS}s\n"
@@ -542,6 +546,9 @@ def _send_weekly_report():
         # Day-by-day capital
         cap_progression = " → ".join(f"${d['capital']:.0f}" for d in _week_day_logs) if _week_day_logs else "N/A"
 
+        with capital_lock:
+            cap = capital
+
         # Apply best bond range from weekly bucket analysis, then let auto_tune refine further
         global BOND_ENTRY_MIN, BOND_ENTRY_MAX
         if best_bucket:
@@ -557,7 +564,7 @@ def _send_weekly_report():
             f"Trades: {total} | {len(wins)}W {len(losses)}L\n"
             f"Win rate: {wr}%\n"
             f"Total PnL: ${total_pnl:+.2f}\n"
-            f"Capital: ${capital:.2f}\n\n"
+            f"Capital: ${cap:.2f}\n\n"
             f"Best bond range: {best_bucket[0] if best_bucket else '?'}%\n"
             f"Best hour: {best_hour}:00\n"
             f"Top loss reason: {top_loss}\n\n"
@@ -566,7 +573,7 @@ def _send_weekly_report():
             f"Bond: {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%\n"
             f"Stale: {BOND_STALE_SECS}s | SL: {BOND_SL_PCT}%"
         )
-        log("ok", f"WEEK 1 DONE | {wr}% WR | PnL ${total_pnl:+.2f} | cap ${capital:.2f}", "WEEK")
+        log("ok", f"WEEK 1 DONE | {wr}% WR | PnL ${total_pnl:+.2f} | cap ${cap:.2f}", "WEEK")
         notify("📈 Week 1 Complete!", report)
 
         # Save full report
@@ -575,7 +582,7 @@ def _send_weekly_report():
                 json.dump({
                     "week": 1, "trades": total, "wins": len(wins), "losses": len(losses),
                     "win_rate": wr, "total_pnl": round(total_pnl, 4),
-                    "final_capital": round(capital, 2),
+                    "final_capital": round(cap, 2),
                     "best_bond_bucket": best_bucket[0] if best_bucket else None,
                     "best_hour": best_hour, "top_loss_reason": top_loss,
                     "day_logs": _week_day_logs,
@@ -597,7 +604,7 @@ def daily_summary_loop():
         time.sleep(secs_to_midnight + 5)
         _send_daily_summary()
         # Weekly deep report every 7 days — then keeps running
-        if len(_week_day_logs) % 7 == 6:
+        if len(_week_day_logs) > 0 and len(_week_day_logs) % 7 == 0:
             time.sleep(10)
             _send_weekly_report()
 
@@ -671,10 +678,10 @@ def auto_tune(history):
             avg_win_hold_secs = (sum(t.get("hold_m", 2) for t in bond_wins) / len(bond_wins)) * 60
             BOND_MAX_SECS = max(180, min(480, int(avg_win_hold_secs * 1.5)))
 
-        # Loosen SL if losses are all from price drop (not stale/timeout)
+        # >60% of bond losses are hitting SL — give price more room to breathe
         sl_losses = [t for t in bond_losses if t.get("result") == "BOND_SL"]
-        if len(sl_losses) > len(bond_losses) * 0.6 and BOND_SL_PCT > 6:
-            BOND_SL_PCT = round(BOND_SL_PCT - 1, 1)  # tighten SL to cut losses faster
+        if len(sl_losses) > len(bond_losses) * 0.6 and BOND_SL_PCT < 15:
+            BOND_SL_PCT = round(BOND_SL_PCT + 1, 1)  # widen SL — too many premature stop-outs
 
         # Spike tuning
         if spike_wr > bond_wr + 0.2 and SPIKE_TP_PCT < 80:
@@ -909,7 +916,9 @@ def check_holder_concentration(mint) -> tuple:
         if r.status_code != 200:
             return True, ""
         data = r.json().get("data") or {}
-        holders = data.get("holders") or data if isinstance(data, list) else []
+        holders = data.get("holders")
+        if holders is None:
+            holders = data if isinstance(data, list) else []
         top10_pct = sum(float(h.get("amount_percentage") or h.get("percent") or 0) for h in holders[:10])
         if top10_pct > 60:
             return False, f"top10={top10_pct:.0f}%"
@@ -1343,7 +1352,7 @@ def monitor_loop():
 
                 # Compute trailing SL level for all strategies
                 # Once trade is up TSL_ACTIVATE_PCT, stop trails below price_high
-                entry_gain_pct = ((price_high - trade["entry"]) / trade["entry"]) * 100
+                entry_gain_pct = ((price_high - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
                 if entry_gain_pct >= TSL_ACTIVATE_PCT:
                     tsl_price = price_high * (1 - BOND_SL_PCT / 100)
                 else:
@@ -1493,7 +1502,7 @@ def copy_trade_loop():
                 continue
 
             for w in wallets:
-                if daily_limit_reached():
+                if not scan_active or daily_limit_reached():
                     break
                 addr = w["address"]
                 try:
@@ -2139,9 +2148,9 @@ def home():
   <div class="section">
     <div class="section-hdr">
       <h2>🏆 Milestone Progress</h2>
-      <span style="font-size:.72rem;color:var(--muted)">${cap:.2f} → ${next_m:,}</span>
+      <span style="font-size:.72rem;color:var(--muted)">${cap:.2f} → {'$'+f'{next_m:,}' if next_m else 'GOAL HIT'}</span>
     </div>
-    <div class="prog-labels"><span>${cap:.2f}</span><span>${next_m:,}</span></div>
+    <div class="prog-labels"><span>${cap:.2f}</span><span>{'$'+f'{next_m:,}' if next_m else 'GOAL HIT'}</span></div>
     <div class="prog-track"><div class="prog-fill"></div></div>
     <div class="milestones">
       {''.join(f'<span class="ms{" hit" if cap >= m else ""}">${m:,}</span>' for m in MILESTONES)}
@@ -2365,7 +2374,7 @@ def _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
     </div>
     <div class="stat">
       <div class="lbl">Next Target</div>
-      <div class="val pink">${next_m:,}</div>
+      <div class="val pink">{'$'+f'{next_m:,}' if next_m else 'GOAL HIT'}</div>
       <div class="sub">{progress_pct}% there</div>
     </div>
   </div>
@@ -2608,7 +2617,7 @@ def status():
   </div>
 
   <div class="section">
-    <div class="section-hdr">MILESTONE PROGRESS — next ${next_m:,} ({progress_pct}%)</div>
+    <div class="section-hdr">MILESTONE PROGRESS — next {'$'+f'{next_m:,}' if next_m else 'GOAL HIT'} ({progress_pct}%)</div>
     <div class="prog-track"><div class="prog-fill"></div></div>
     <div class="milestones">
       {''.join(f'<span class="ms{" hit" if cap >= m else ""}">${m:,}</span>' for m in MILESTONES)}
