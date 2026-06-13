@@ -90,17 +90,19 @@ def _save_state():
         ms   = list(_milestones_hit)
         mst  = dict(_market_stats)
         mpr  = dict(_market_params)
-    redis_save("drift_capital",       cap)
-    redis_save("drift_positions",     pos)
-    redis_save("drift_trades",        trd[-200:])
-    redis_save("drift_milestones",    ms)
-    redis_save("drift_secured",       _profit_secured)
-    redis_save("drift_market_stats",  mst)
-    redis_save("drift_market_params", mpr)
+        ph   = {k: list(v) for k, v in _price_history.items()}
+    redis_save("drift_capital",        cap)
+    redis_save("drift_positions",      pos)
+    redis_save("drift_trades",         trd[-200:])
+    redis_save("drift_milestones",     ms)
+    redis_save("drift_secured",        _profit_secured)
+    redis_save("drift_market_stats",   mst)
+    redis_save("drift_market_params",  mpr)
+    redis_save("drift_price_history",  ph)
 
 def _load_state():
     global _capital, _positions, _trades, _milestones_hit, _profit_secured
-    global _market_stats, _market_params
+    global _market_stats, _market_params, _price_history
     cap    = redis_load("drift_capital")
     pos    = redis_load("drift_positions")
     trd    = redis_load("drift_trades")
@@ -108,6 +110,7 @@ def _load_state():
     sec    = redis_load("drift_secured")
     mst    = redis_load("drift_market_stats")
     mpr    = redis_load("drift_market_params")
+    ph     = redis_load("drift_price_history")
     with _state_lock:
         if cap is not None:
             _capital = float(cap)
@@ -123,6 +126,10 @@ def _load_state():
             _market_stats = mst
         if mpr:
             _market_params = mpr
+        if ph:
+            for k, v in ph.items():
+                _price_history[k] = deque(v, maxlen=300)
+            log("ok", f"Restored price history for {len(ph)} markets")
 
 # ── LOGGING ───────────────────────────────────────────────────────
 def log(level, msg, symbol=""):
@@ -468,6 +475,7 @@ def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=N
         "size": size_usd, "leverage": leverage,
         "peak_price": price, "tp": tp, "sl": sl,
         "opened_at": time.time(), "pnl": 0.0, "paper": DRIFT_PAPER_MODE,
+        "current_price": price,
     }
 
     if not DRIFT_PAPER_MODE:
@@ -2045,6 +2053,15 @@ if __name__ == "__main__":
         if not WALLET or not WALLET_PRIVATE_KEY:
             print("[FATAL] DRIFT_PAPER_MODE=false requires WALLET and WALLET_PRIVATE_KEY. Exiting.")
             raise SystemExit(1)
+
+    if REDIS_URL and REDIS_TOKEN:
+        ping = _redis_cmd("PING")
+        if ping == "PONG":
+            print("[OK] Redis connected")
+        else:
+            print(f"[WARN] Redis PING returned {ping!r} — state will not persist across restarts")
+    else:
+        print("[WARN] UPSTASH_REDIS_REST_URL/TOKEN not set — state will not persist across restarts")
 
     _load_state()
     log("ok", f"{'[PAPER] ' if DRIFT_PAPER_MODE else '[LIVE] '}{DRIFT_BOT_NAME} starting")

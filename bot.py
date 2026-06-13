@@ -188,6 +188,7 @@ _daily_losses     = 0
 _day_start_cap    = 0.0    # capital at start of day — used for daily loss % guard
 _pause_until      = 0.0    # Unix timestamp — bot pauses trading until this time
 _daily_lock       = threading.Lock()
+_tune_lock        = threading.Lock()
 # Weekly tracking
 _week_start_date  = ""
 _week_day_logs    = []     # one entry per day: {date, trades, wins, losses, pnl, start_cap, end_cap}
@@ -303,6 +304,7 @@ def _save_daily_state():
 def _load_daily_state():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses
     global _pause_until, capital, _week_start_date, _week_day_logs, completed_trades
+    global _day_start_cap
     today = time.strftime("%Y-%m-%d")
 
     # Try Redis first (survives redeploys), fall back to local file
@@ -356,13 +358,18 @@ def _load_daily_state():
         except Exception:
             tuned = {}
     if tuned:
-        BOND_ENTRY_MIN  = float(tuned.get("BOND_ENTRY_MIN",  BOND_ENTRY_MIN))
-        BOND_ENTRY_MAX  = float(tuned.get("BOND_ENTRY_MAX",  BOND_ENTRY_MAX))
-        BOND_SL_PCT     = float(tuned.get("BOND_SL_PCT",     BOND_SL_PCT))
-        BOND_STALE_SECS = int(tuned.get("BOND_STALE_SECS",   BOND_STALE_SECS))
-        BOND_MAX_SECS   = int(tuned.get("BOND_MAX_SECS",     BOND_MAX_SECS))
-        SPIKE_TP_PCT    = float(tuned.get("SPIKE_TP_PCT",    SPIKE_TP_PCT))
-        log("ok", f"Restored tuned params: bond={BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% sl={BOND_SL_PCT}% stale={BOND_STALE_SECS}s")
+        try:
+            BOND_ENTRY_MIN  = float(tuned.get("BOND_ENTRY_MIN",  BOND_ENTRY_MIN))
+            BOND_ENTRY_MAX  = float(tuned.get("BOND_ENTRY_MAX",  BOND_ENTRY_MAX))
+            BOND_SL_PCT     = float(tuned.get("BOND_SL_PCT",     BOND_SL_PCT))
+            BOND_STALE_SECS = int(tuned.get("BOND_STALE_SECS",   BOND_STALE_SECS))
+            BOND_MAX_SECS   = int(tuned.get("BOND_MAX_SECS",     BOND_MAX_SECS))
+            SPIKE_TP_PCT    = float(tuned.get("SPIKE_TP_PCT",    SPIKE_TP_PCT))
+            log("ok", f"Restored tuned params: bond={BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% sl={BOND_SL_PCT}% stale={BOND_STALE_SECS}s")
+        except (ValueError, TypeError) as e:
+            log("warn", f"Corrupted tuned params — using defaults: {e}")
+
+    _day_start_cap = capital  # initialize daily loss guard from loaded capital
 
 def _reset_daily_if_needed():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses, _pause_until
@@ -628,6 +635,8 @@ def record_trade(trade_data):
 
 def auto_tune(history):
     global BOND_ENTRY_MIN, BOND_ENTRY_MAX, SPIKE_TP_PCT, BOND_STALE_SECS, BOND_SL_PCT, BOND_MAX_SECS
+    if not _tune_lock.acquire(blocking=False):
+        return  # already tuning — skip concurrent call
     try:
         recent = history[-60:]
         wins   = [t for t in recent if t.get("pnl", 0) > 0]
@@ -718,6 +727,8 @@ def auto_tune(history):
             pass
     except Exception as e:
         log("warn", f"Auto-tune: {e}")
+    finally:
+        _tune_lock.release()
 
 # ── PUMP.FUN COINS ───────────────────────────────────────────────
 def get_pumpfun_coins():
@@ -1253,149 +1264,152 @@ def exit_trade(mint, price, reason, bond=0):
 # ── MONITOR LOOP ────────────────────────────────────────────────
 def monitor_loop():
     while True:
-        time.sleep(3)
-        with trades_lock:
-            mints = list(open_trades.keys())
-        for mint in mints:
+        try:
+            time.sleep(3)
             with trades_lock:
-                if mint not in open_trades:
-                    continue
-                trade = dict(open_trades[mint])
-            symbol   = trade["symbol"]
-            strategy = trade["strategy"]
-            elapsed  = time.time() - trade["opened_at"]
-
-            details = get_bonding_details(mint)
-            bond    = details["bond_pct"] if details else 0
-            market  = get_market_data(mint)
-            price   = market["price"] if market and market["price"] > 0 else trade["entry"]
-
-            # Paper mode: simulate price from bond % movement when DexScreener has no data
-            if PAPER_MODE and price == trade["entry"] and bond > 0 and trade.get("bond_entry", 0) > 0:
-                bond_move = bond - trade["bond_entry"]
-                price = trade["entry"] * (1 + bond_move / 100)
-            # Paper mode fallback: if no price after 60s, use tiny random walk so exits still fire
-            elif PAPER_MODE and price == trade["entry"] and elapsed > 60:
-                price = trade["entry"] * (1 + random.uniform(-0.03, 0.05))
-
-            with trades_lock:
-                if mint not in open_trades:
-                    continue
-                if bond > open_trades[mint]["bond_high"]:
-                    open_trades[mint]["bond_high"]      = bond
-                    open_trades[mint]["bond_last_moved"] = time.time()
-                if price > open_trades[mint]["price_high"]:
-                    open_trades[mint]["price_high"] = price
-                bond_high       = open_trades[mint]["bond_high"]
-                bond_prev       = open_trades[mint]["bond_prev"]
-                bond_last_moved = open_trades[mint].get("bond_last_moved", time.time())
-                slip_start      = open_trades[mint]["bond_slip_start"]
-                price_high      = open_trades[mint]["price_high"]
-                open_trades[mint]["bond_prev"] = bond
-
-            bond_drop = bond - bond_prev
-
-            # Instant exit: sharp bond drop of 4%+ while near graduation
-            if bond_high >= SLIP_TRIGGER and bond_drop <= -SHARP_DROP_PCT:
-                log("warn", f"SHARP DROP bond={bond:.1f}% drop={bond_drop:.1f}%", symbol)
-                exit_trade(mint, price, "SHARP_DROP", bond)
-                continue
-
-            # Gradual slip: bond was >=90% and fell to <=85%, wait 6s for retrace
-            if bond_high >= SLIP_TRIGGER and bond <= SLIP_DROP_TO:
+                mints = list(open_trades.keys())
+            for mint in mints:
                 with trades_lock:
                     if mint not in open_trades:
                         continue
-                    if open_trades[mint]["bond_slip_start"] is None:
-                        open_trades[mint]["bond_slip_start"] = time.time()
-                        log("warn", f"Bond slip {bond:.1f}% — watching {SLIP_WAIT_SECS}s", symbol)
-                    elif time.time() - open_trades[mint]["bond_slip_start"] >= SLIP_WAIT_SECS:
-                        exit_trade(mint, price, "BOND_SLIP", bond)
-                        continue
-            else:
+                    trade = dict(open_trades[mint])
+                symbol   = trade["symbol"]
+                strategy = trade["strategy"]
+                elapsed  = time.time() - trade["opened_at"]
+
+                details = get_bonding_details(mint)
+                bond    = details["bond_pct"] if details else 0
+                market  = get_market_data(mint)
+                price   = market["price"] if market and market["price"] > 0 else trade["entry"]
+
+                # Paper mode: simulate price from bond % movement when DexScreener has no data
+                if PAPER_MODE and price == trade["entry"] and bond > 0 and trade.get("bond_entry", 0) > 0:
+                    bond_move = bond - trade["bond_entry"]
+                    price = trade["entry"] * (1 + bond_move / 100)
+                # Paper mode fallback: if no price after 60s, use tiny random walk so exits still fire
+                elif PAPER_MODE and price == trade["entry"] and elapsed > 60:
+                    price = trade["entry"] * (1 + random.uniform(-0.03, 0.05))
+
                 with trades_lock:
-                    if mint in open_trades:
-                        open_trades[mint]["bond_slip_start"] = None
+                    if mint not in open_trades:
+                        continue
+                    if bond > open_trades[mint]["bond_high"]:
+                        open_trades[mint]["bond_high"]      = bond
+                        open_trades[mint]["bond_last_moved"] = time.time()
+                    if price > open_trades[mint]["price_high"]:
+                        open_trades[mint]["price_high"] = price
+                    bond_high       = open_trades[mint]["bond_high"]
+                    bond_prev       = open_trades[mint]["bond_prev"]
+                    bond_last_moved = open_trades[mint].get("bond_last_moved", time.time())
+                    slip_start      = open_trades[mint]["bond_slip_start"]
+                    price_high      = open_trades[mint]["price_high"]
+                    open_trades[mint]["bond_prev"] = bond
 
-            # Bundle ride exit
-            if strategy == "bundle" and bond >= BUNDLE_RIDE_TP:
-                exit_trade(mint, price, "BUNDLE_TP", bond)
-                continue
+                bond_drop = bond - bond_prev
 
-            # Stale exit: bond hasn't moved in BOND_STALE_SECS — momentum dead
-            stale_secs = time.time() - bond_last_moved
-            if strategy in ("bond", "bundle") and elapsed > 30 and stale_secs >= BOND_STALE_SECS:
-                log("warn", f"Bond stale {stale_secs:.0f}s — exiting", symbol)
-                exit_trade(mint, price, "STALE", bond)
-                continue
-
-            # Compute trailing SL level for all strategies
-            # Once trade is up TSL_ACTIVATE_PCT, stop trails below price_high
-            entry_gain_pct = ((price_high - trade["entry"]) / trade["entry"]) * 100
-            if entry_gain_pct >= TSL_ACTIVATE_PCT:
-                tsl_price = price_high * (1 - BOND_SL_PCT / 100)
-            else:
-                tsl_price = trade["entry"] * (1 - BOND_SL_PCT / 100)
-
-            # Bond Runner exits
-            if strategy == "bond":
-                if bond >= BOND_TP:
-                    exit_trade(mint, price, "BOND_TP", bond)
-                    continue
-                if price <= tsl_price:
-                    reason = "BOND_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "BOND_SL"
-                    exit_trade(mint, price, reason, bond)
-                    continue
-                if elapsed >= BOND_MAX_SECS:
-                    exit_trade(mint, price, "BOND_TIME", bond)
+                # Instant exit: sharp bond drop of 4%+ while near graduation
+                if bond_high >= SLIP_TRIGGER and bond_drop <= -SHARP_DROP_PCT:
+                    log("warn", f"SHARP DROP bond={bond:.1f}% drop={bond_drop:.1f}%", symbol)
+                    exit_trade(mint, price, "SHARP_DROP", bond)
                     continue
 
-            # Spike exits
-            if strategy == "spike":
-                move = ((price - trade["entry"]) / trade["entry"]) * 100
-                if move >= SPIKE_TP_PCT:
-                    exit_trade(mint, price, "SPIKE_TP", bond)
-                    continue
-                if price <= tsl_price:
-                    reason = "SPIKE_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "SPIKE_SL"
-                    exit_trade(mint, price, reason, bond)
-                    continue
-                if elapsed >= SPIKE_MAX_SECS:
-                    exit_trade(mint, price, "SPIKE_TIME", bond)
+                # Gradual slip: bond was >=90% and fell to <=85%, wait 6s for retrace
+                if bond_high >= SLIP_TRIGGER and bond <= SLIP_DROP_TO:
+                    with trades_lock:
+                        if mint not in open_trades:
+                            continue
+                        if open_trades[mint]["bond_slip_start"] is None:
+                            open_trades[mint]["bond_slip_start"] = time.time()
+                            log("warn", f"Bond slip {bond:.1f}% — watching {SLIP_WAIT_SECS}s", symbol)
+                        elif time.time() - open_trades[mint]["bond_slip_start"] >= SLIP_WAIT_SECS:
+                            exit_trade(mint, price, "BOND_SLIP", bond)
+                            continue
+                else:
+                    with trades_lock:
+                        if mint in open_trades:
+                            open_trades[mint]["bond_slip_start"] = None
+
+                # Bundle ride exit
+                if strategy == "bundle" and bond >= BUNDLE_RIDE_TP:
+                    exit_trade(mint, price, "BUNDLE_TP", bond)
                     continue
 
-            # Copy trade exits
-            if strategy == "copy":
-                move = ((price - trade["entry"]) / trade["entry"]) * 100
-                if move >= COPY_TP_PCT:
-                    exit_trade(mint, price, "COPY_TP", bond)
-                    continue
-                if price <= tsl_price:
-                    reason = "COPY_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "COPY_SL"
-                    exit_trade(mint, price, reason, bond)
-                    continue
-                if elapsed >= COPY_MAX_SECS:
-                    exit_trade(mint, price, "COPY_TIME", bond)
+                # Stale exit: bond hasn't moved in BOND_STALE_SECS — momentum dead
+                stale_secs = time.time() - bond_last_moved
+                if strategy in ("bond", "bundle") and elapsed > 30 and stale_secs >= BOND_STALE_SECS:
+                    log("warn", f"Bond stale {stale_secs:.0f}s — exiting", symbol)
+                    exit_trade(mint, price, "STALE", bond)
                     continue
 
-            # Raydium Runner exits (graduated tokens)
-            if strategy == "grad":
-                grad_tsl = price_high * (1 - GRAD_SL_PCT / 100) if entry_gain_pct >= TSL_ACTIVATE_PCT else trade["entry"] * (1 - GRAD_SL_PCT / 100)
-                move = ((price - trade["entry"]) / trade["entry"]) * 100
-                if move >= GRAD_TP_PCT:
-                    exit_trade(mint, price, "GRAD_TP", bond)
-                    continue
-                if price <= grad_tsl:
-                    reason = "GRAD_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "GRAD_SL"
-                    exit_trade(mint, price, reason, bond)
-                    continue
-                if elapsed >= GRAD_MAX_SECS:
-                    exit_trade(mint, price, "GRAD_TIME", bond)
-                    continue
+                # Compute trailing SL level for all strategies
+                # Once trade is up TSL_ACTIVATE_PCT, stop trails below price_high
+                entry_gain_pct = ((price_high - trade["entry"]) / trade["entry"]) * 100
+                if entry_gain_pct >= TSL_ACTIVATE_PCT:
+                    tsl_price = price_high * (1 - BOND_SL_PCT / 100)
+                else:
+                    tsl_price = trade["entry"] * (1 - BOND_SL_PCT / 100)
 
-            pct = ((price - trade["entry"]) / trade["entry"]) * 100
-            tsl_info = f" TSL@{tsl_price:.6f}" if entry_gain_pct >= TSL_ACTIVATE_PCT else ""
-            log("info", f"[{strategy}] bond={bond:.1f}% price={pct:+.1f}% peak={entry_gain_pct:+.1f}%{tsl_info} {elapsed/60:.1f}m", symbol)
+                # Bond Runner exits
+                if strategy == "bond":
+                    if bond >= BOND_TP:
+                        exit_trade(mint, price, "BOND_TP", bond)
+                        continue
+                    if price <= tsl_price:
+                        reason = "BOND_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "BOND_SL"
+                        exit_trade(mint, price, reason, bond)
+                        continue
+                    if elapsed >= BOND_MAX_SECS:
+                        exit_trade(mint, price, "BOND_TIME", bond)
+                        continue
+
+                # Spike exits
+                if strategy == "spike":
+                    move = ((price - trade["entry"]) / trade["entry"]) * 100
+                    if move >= SPIKE_TP_PCT:
+                        exit_trade(mint, price, "SPIKE_TP", bond)
+                        continue
+                    if price <= tsl_price:
+                        reason = "SPIKE_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "SPIKE_SL"
+                        exit_trade(mint, price, reason, bond)
+                        continue
+                    if elapsed >= SPIKE_MAX_SECS:
+                        exit_trade(mint, price, "SPIKE_TIME", bond)
+                        continue
+
+                # Copy trade exits
+                if strategy == "copy":
+                    move = ((price - trade["entry"]) / trade["entry"]) * 100
+                    if move >= COPY_TP_PCT:
+                        exit_trade(mint, price, "COPY_TP", bond)
+                        continue
+                    if price <= tsl_price:
+                        reason = "COPY_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "COPY_SL"
+                        exit_trade(mint, price, reason, bond)
+                        continue
+                    if elapsed >= COPY_MAX_SECS:
+                        exit_trade(mint, price, "COPY_TIME", bond)
+                        continue
+
+                # Raydium Runner exits (graduated tokens)
+                if strategy == "grad":
+                    grad_tsl = price_high * (1 - GRAD_SL_PCT / 100) if entry_gain_pct >= TSL_ACTIVATE_PCT else trade["entry"] * (1 - GRAD_SL_PCT / 100)
+                    move = ((price - trade["entry"]) / trade["entry"]) * 100
+                    if move >= GRAD_TP_PCT:
+                        exit_trade(mint, price, "GRAD_TP", bond)
+                        continue
+                    if price <= grad_tsl:
+                        reason = "GRAD_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "GRAD_SL"
+                        exit_trade(mint, price, reason, bond)
+                        continue
+                    if elapsed >= GRAD_MAX_SECS:
+                        exit_trade(mint, price, "GRAD_TIME", bond)
+                        continue
+
+                pct = ((price - trade["entry"]) / trade["entry"]) * 100
+                tsl_info = f" TSL@{tsl_price:.6f}" if entry_gain_pct >= TSL_ACTIVATE_PCT else ""
+                log("info", f"[{strategy}] bond={bond:.1f}% price={pct:+.1f}% peak={entry_gain_pct:+.1f}%{tsl_info} {elapsed/60:.1f}m", symbol)
+        except Exception as e:
+            log("err", f"monitor_loop error: {e}")
 
 # ── COPY TRADING ─────────────────────────────────────────────────
 def fetch_smart_wallets():
@@ -3024,8 +3038,6 @@ def live_api():
         open_now = []
         for t in open_trades.values():
             elapsed = round(time.time() - t["opened_at"], 1)
-            cur_bond = 0
-            pct = 0
             open_now.append({
                 "symbol":     t["symbol"],
                 "mint":       t["mint"],
