@@ -292,7 +292,7 @@ def _supertrend(vals, period=10, mult=3.0):
         else:
             up[i] = b_up if b_up < up[i-1] or prices[i] > up[i-1] else up[i-1]
             dn[i] = b_dn if b_dn > dn[i-1] or prices[i] < dn[i-1] else dn[i-1]
-            bull[i] = (prices[i+1] >= dn[i]) if bull[i-1] else (prices[i+1] > up[i-1])
+            bull[i] = (prices[i+1] >= dn[i-1]) if bull[i-1] else (prices[i+1] > up[i-1])
 
     lvl = dn[-1] if bull[-1] else up[-1]
     return bull[-1], lvl
