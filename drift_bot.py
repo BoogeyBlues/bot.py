@@ -34,8 +34,9 @@ REDIS_TOKEN        = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
 MILESTONES = [250, 500, 1000, 2500, 5000, 10000, 25000]
 
 # ── STATE ─────────────────────────────────────────────────────────
-_positions       = {}
-_trades          = []
+_positions           = {}
+_trades              = []
+_total_trades_ever   = 0   # monotonic; never capped — used for tune trigger
 _capital         = STARTING_CAPITAL
 _profit_secured  = 0.0   # total profit taken out
 _daily_pnl     = 0.0
@@ -133,14 +134,17 @@ def _load_state():
             _market_stats = mst
         if mpr:
             _market_params = mpr
+        ph_count = 0
         if ph:
             for k, v in ph.items():
                 _price_history[k] = deque(v, maxlen=300)
-            log("ok", f"Restored price history for {len(ph)} markets")
+            ph_count = len(ph)
         today = time.strftime("%Y-%m-%d")
         if dpnl is not None and ds == today:
             _daily_pnl = float(dpnl)
             _day_start  = ds
+    if ph_count:
+        log("ok", f"Restored price history for {ph_count} markets")
 
 # ── LOGGING ───────────────────────────────────────────────────────
 def log(level, msg, symbol=""):
@@ -350,7 +354,8 @@ def get_signal(market):
     Returns (direction, confidence, atr) or (None, 0, None).
     """
     global _st_prev
-    prices = list(_price_history.get(market, []))
+    with _state_lock:
+        prices = list(_price_history.get(market, []))
     if len(prices) < 55:   # need 50 for EMA + buffer
         return None, 0, None
     vals = [p for _, p in prices]
@@ -369,6 +374,7 @@ def get_signal(market):
     # ── Market regime: must have enough volatility to be worth trading ──
     atr_pct = atr / cur
     if atr_pct < 0.001:   # market is frozen / ranging — skip
+        _st_prev[market] = st_bull  # consume flip so it doesn't linger
         return None, 0, None
 
     # ── Direction from Supertrend ──────────────────────────────────
@@ -377,11 +383,13 @@ def get_signal(market):
     # ── Factor 1: EMA-50 trend filter (no counter-trend entries) ──
     ema_ok = (trend == "long" and cur > ema50) or (trend == "short" and cur < ema50)
     if not ema_ok:
+        _st_prev[market] = st_bull  # consume flip so stale flip doesn't persist
         return None, 0, None
 
     # ── Factor 2: RSI not exhausted ────────────────────────────────
     rsi_ok = 35 < rsi < 65
     if not rsi_ok:
+        _st_prev[market] = st_bull  # consume flip
         return None, 0, None
 
     # ── Confidence scoring ─────────────────────────────────────────
@@ -420,30 +428,34 @@ def _execute_drift_order(market, side, size_usd, leverage) -> bool:
 
         async def _place():
             conn = AsyncClient(SOL_RPC)
-            client = DriftClient(conn, kp)
-            await client.subscribe()
-            direction = PositionDirection.Long() if side == "long" else PositionDirection.Short()
-            market_index_map = {
-                "SOL": 0, "BTC": 1, "ETH": 2, "APT": 3,
-                "BONK": 4, "ARB": 5, "DOGE": 6, "BNB": 7,
-                "SUI": 8, "PEPE": 9, "OP": 10, "MATIC": 11,
-                "XRP": 12, "WIF": 13, "JTO": 14, "PYTH": 15,
-                "TIA": 16, "JUP": 17, "RNDR": 18, "W": 19,
-                "DRIFT": 21, "POPCAT": 24, "HYPE": 26,
-                "TRUMP": 27, "AVAX": 28, "SEI": 29,
-            }
-            idx = market_index_map.get(market.upper(), 0)
-            price = get_market_price(market)
-            if not price:
-                raise ValueError(f"Cannot get price for {market}")
-            base_amount = int((size_usd / price) * 1e9)  # USD → base asset atomic units
-            await client.place_perp_order(OrderParams(
-                order_type=OrderType.Market(),
-                market_index=idx,
-                direction=direction,
-                base_asset_amount=base_amount,
-            ))
-            await conn.close()
+            try:
+                client = DriftClient(conn, kp)
+                await client.subscribe()
+                direction = PositionDirection.Long() if side == "long" else PositionDirection.Short()
+                market_index_map = {
+                    "SOL": 0, "BTC": 1, "ETH": 2, "APT": 3,
+                    "BONK": 4, "ARB": 5, "DOGE": 6, "BNB": 7,
+                    "SUI": 8, "PEPE": 9, "OP": 10, "MATIC": 11,
+                    "XRP": 12, "WIF": 13, "JTO": 14, "PYTH": 15,
+                    "TIA": 16, "JUP": 17, "RNDR": 18, "W": 19,
+                    "DRIFT": 21, "POPCAT": 24, "HYPE": 26,
+                    "TRUMP": 27, "AVAX": 28, "SEI": 29,
+                }
+                idx = market_index_map.get(market.upper())
+                if idx is None:
+                    raise ValueError(f"Market {market} not in Drift market_index_map — refusing to place order")
+                price = get_market_price(market)
+                if not price:
+                    raise ValueError(f"Cannot get price for {market}")
+                base_amount = int((size_usd / price) * 1e9)  # USD → base asset atomic units
+                await client.place_perp_order(OrderParams(
+                    order_type=OrderType.Market(),
+                    market_index=idx,
+                    direction=direction,
+                    base_asset_amount=base_amount,
+                ))
+            finally:
+                await conn.close()
 
         asyncio.run(_place())
         return True
@@ -501,6 +513,15 @@ def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=N
         "current_price": price,
     }
 
+    margin = size_usd / leverage
+    with _state_lock:
+        if len(_positions) >= DRIFT_MAX_OPEN:
+            log("warn", f"Max open positions ({DRIFT_MAX_OPEN}) reached — skipping {market}")
+            return
+        if _capital < margin:
+            log("warn", f"Insufficient capital ${_capital:.2f} for margin ${margin:.2f} — skipping")
+            return
+
     if not DRIFT_PAPER_MODE:
         ok = _execute_zeta_order(market, side, size_usd, leverage) if DRIFT_EXCHANGE == "zeta" \
              else _execute_drift_order(market, side, size_usd, leverage)
@@ -508,11 +529,13 @@ def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=N
             log("err", f"Exchange order failed for {market} — position NOT opened")
             return
 
-    margin = size_usd / leverage
     with _state_lock:
-        if _capital < margin:
-            log("warn", f"Insufficient capital ${_capital:.2f} for margin ${margin:.2f} — skipping")
-            return
+        # Re-check inside lock after placing order (capital/slots may have changed)
+        if len(_positions) >= DRIFT_MAX_OPEN or _capital < margin:
+            if not DRIFT_PAPER_MODE:
+                log("err", f"State changed during live order for {market} — position recorded anyway to match on-chain state")
+            else:
+                return
         _positions[market] = pos
         _capital -= margin
 
@@ -547,19 +570,6 @@ def close_position(market, exit_price, reason=""):
     compound_amt = round(pnl_usd * DRIFT_COMPOUND_PCT, 2) if is_dollar_tp else 0
     secured_amt  = round(pnl_usd - compound_amt, 2) if is_dollar_tp else 0
 
-    global _profit_secured
-    with _state_lock:
-        if is_dollar_tp:
-            _capital += margin + compound_amt   # return margin + 10% of profit
-            _profit_secured += secured_amt
-        else:
-            _capital += margin + pnl_usd
-        _daily_pnl += pnl_usd
-        cap_after = _capital  # snapshot while still holding lock
-
-    if is_dollar_tp:
-        log("ok", f"SECURED ${secured_amt:.2f} | COMPOUNDED +${compound_amt:.2f} → capital=${cap_after:.2f}", market)
-
     trade = {
         "market": market, "side": pos["side"],
         "entry": pos["entry"], "exit": exit_price,
@@ -570,10 +580,21 @@ def close_position(market, exit_price, reason=""):
         "ts": time.strftime("%Y-%m-%d %H:%M"),
     }
 
+    global _profit_secured
     with _state_lock:
-        _trades.insert(0, trade)
+        if is_dollar_tp:
+            _capital += margin + compound_amt   # return margin + 10% of profit
+            _profit_secured += secured_amt
+        else:
+            _capital += margin + pnl_usd
+        _daily_pnl += pnl_usd
+        cap_after = _capital  # snapshot while still holding lock
+        _trades.insert(0, trade)  # capital update + trade record in single lock — no inconsistent reads
         if len(_trades) > 200:
             _trades.pop()
+
+    if is_dollar_tp:
+        log("ok", f"SECURED ${secured_amt:.2f} | COMPOUNDED +${compound_amt:.2f} → capital=${cap_after:.2f}", market)
 
     emoji = "✅" if pnl_usd >= 0 else "❌"
     log("ok" if pnl_usd >= 0 else "err",
@@ -613,9 +634,11 @@ def close_position(market, exit_price, reason=""):
         s["long_total" if pos["side"] == "long" else "short_total"] += 1
         if market in _market_params:
             _market_params[market]["last_result"] = "win" if won else "loss"
-        trade_count = len(_trades)
+        global _total_trades_ever
+        _total_trades_ever += 1
+        trade_count = _total_trades_ever  # use monotonic counter — len(_trades) caps at 200
 
-    if trade_count > 0 and trade_count % DRIFT_TUNE_EVERY == 0:
+    if trade_count % DRIFT_TUNE_EVERY == 0:
         if _tuning_lock.acquire(blocking=False):
             def _tune_and_release():
                 try:
@@ -811,6 +834,8 @@ def run_trading_loop():
                     # Size so that the ATR stop-out equals exactly DRIFT_SL_USD
                     market_lev     = mparams.get("leverage", DRIFT_LEVERAGE)
                     conf_mult      = 1.25 if confidence == 3 else 1.0
+                    with _state_lock:
+                        cap = _capital  # re-read per market so prior openings are reflected
                     ideal_notional = (DRIFT_SL_USD / sl_pct) if sl_pct > 0 else cap * DRIFT_TRADE_PCT * market_lev
                     max_notional   = cap * DRIFT_TRADE_PCT * market_lev * conf_mult
                     size_usd       = min(ideal_notional, max_notional)

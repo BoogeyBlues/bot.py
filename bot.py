@@ -21,7 +21,7 @@ def _redis_cmd(*args):
     if not REDIS_URL or not REDIS_TOKEN:
         return None
     try:
-        r = requests.post(
+        r = _session.post(
             REDIS_URL,
             headers={"Authorization": f"Bearer {REDIS_TOKEN}"},
             json=list(args),
@@ -196,7 +196,7 @@ _copy_wallets     = []   # [{address, winrate}]
 _copy_wallet_time = 0.0
 _copied_mints     = {}   # mint -> timestamp, to avoid double-copy
 _copy_lock        = threading.Lock()
-_gmgn_backoff     = 0    # seconds to wait before retrying GMGN rank
+_gmgn_backoff     = 0    # epoch timestamp — retry GMGN rank after this time (0 = no backoff)
 _sold_mints       = {}   # mint -> timestamp, cooldown after selling to prevent re-buy
 _gmgn_sm_signal_mints  = set()   # smart money buy signal mints (type 12)
 _gmgn_surge_mints      = set()   # price surge signal mints (type 6)
@@ -377,6 +377,8 @@ def _reset_daily_if_needed():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses, _pause_until
     global _week_start_date, _week_day_logs, _day_start_cap
     today = time.strftime("%Y-%m-%d")
+    with capital_lock:
+        cap_snap = capital  # snapshot before _daily_lock to respect lock ordering
     with _daily_lock:
         if _daily_date != today:
             if _daily_date:
@@ -385,7 +387,7 @@ def _reset_daily_if_needed():
                     "trades":  _daily_trades,
                     "wins":    _daily_wins,
                     "losses":  _daily_losses,
-                    "capital": capital,
+                    "capital": cap_snap,
                 })
             if not _week_start_date:
                 _week_start_date = today
@@ -394,12 +396,10 @@ def _reset_daily_if_needed():
             _daily_wins    = 0
             _daily_losses  = 0
             _pause_until   = 0.0
-            _day_start_cap = capital  # snapshot for daily loss % guard
+            _day_start_cap = cap_snap
             limit = daily_trade_limit()
-            with capital_lock:
-                cap = capital
-            pct, _ = _cap_tier(cap)
-            log("ok", f"New day {today} | Day {len(_week_day_logs)+1} | cap=${cap:.2f} | trade={pct*100:.0f}% (${trade_size():.2f}) | limit={limit}/day")
+            pct, _ = _cap_tier(cap_snap)
+            log("ok", f"New day {today} | Day {len(_week_day_logs)+1} | cap=${cap_snap:.2f} | trade={pct*100:.0f}% (${trade_size():.2f}) | limit={limit}/day")
             _save_daily_state()
 
 def daily_limit_reached():
@@ -474,7 +474,9 @@ def _send_daily_summary():
         today_pnl = cap - _day_start_cap if _day_start_cap > 0 else 0
         wr = round(_daily_wins / max(_daily_trades, 1) * 100, 1)
         # Today's exit breakdown
-        today_trades = [t for t in completed_trades if t.get("date", "") == time.strftime("%Y-%m-%d")]
+        with log_lock:
+            trades_snap = list(completed_trades)
+        today_trades = [t for t in trades_snap if t.get("date", "") == time.strftime("%Y-%m-%d")]
         exit_counts = {}
         for t in today_trades:
             r = t.get("result", "?")
@@ -485,7 +487,7 @@ def _send_daily_summary():
         to_go = goal - cap
         day_num = len(_week_day_logs) + 1
         # Next tune in N trades
-        total_done = len(completed_trades)
+        total_done = len(trades_snap)
         next_tune_in = ANALYZE_EVERY - (total_done % ANALYZE_EVERY)
         pct_tier, _ = _cap_tier(cap)
         msg = (f"Day {day_num} wrap-up\n"
@@ -602,6 +604,7 @@ def daily_summary_loop():
         now = time.localtime()
         secs_to_midnight = (23 - now.tm_hour) * 3600 + (59 - now.tm_min) * 60 + (60 - now.tm_sec)
         time.sleep(secs_to_midnight + 5)
+        _reset_daily_if_needed()  # ensure today's entry is in week_day_logs before counting
         _send_daily_summary()
         # Weekly deep report every 7 days — then keeps running
         if len(_week_day_logs) > 0 and len(_week_day_logs) % 7 == 0:
@@ -626,16 +629,19 @@ def record_trade(trade_data):
     try:
         history = []
         if os.path.exists(LEARN_FILE):
-            with open(LEARN_FILE, "r") as f:
-                history = json.load(f)
+            try:
+                with open(LEARN_FILE, "r") as f:
+                    history = json.load(f)
+            except json.JSONDecodeError as e:
+                log("warn", f"Corrupted learn file — starting fresh: {e}")
         history.append(trade_data)
         trimmed = history[-200:]
         with open(LEARN_FILE, "w") as f:
             json.dump(trimmed, f)
         redis_save("bot_trades", trimmed)
-        if len(history) % ANALYZE_EVERY == 0:
+        if len(trimmed) % ANALYZE_EVERY == 0:
             log("ok", f"Analyzing last {ANALYZE_EVERY} trades — retuning strategy...", "TUNE")
-            auto_tune(history)
+            auto_tune(trimmed)
             log("ok", f"Tuned: bond={BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% stale={BOND_STALE_SECS}s SL={BOND_SL_PCT}% spikeTP={SPIKE_TP_PCT}%", "TUNE")
     except Exception as e:
         log("warn", f"Learning record: {e}")
@@ -1164,16 +1170,16 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
     with capital_lock:
         if capital < amount:
             return False
+        capital -= amount  # reserve immediately so concurrent enters can't double-spend
 
     tx = execute_buy(mint, symbol, amount, pool)
     if not tx:
+        with capital_lock:
+            capital += amount  # refund reservation on buy failure
         return False
 
     with _daily_lock:
         _daily_trades += 1
-
-    with capital_lock:
-        capital -= amount
 
     with trades_lock:
         open_trades[mint] = {
@@ -1218,14 +1224,15 @@ def exit_trade(mint, price, reason, bond=0):
         else:
             capital += amount  # sell failed — return stake only, no PnL credit
             log("err", f"Sell tx failed — stake returned, PnL not credited. Check wallet.", trade["symbol"])
+        cap_after = capital  # snapshot under lock for use below
 
     sign = "+" if pnl >= 0 else ""
     log("ok" if pnl >= 0 else "err",
-        f"{'WIN' if pnl>=0 else 'LOSS'} {reason} | {sign}${pnl:.4f} | {hold_m:.1f}m | cap=${capital:.2f}",
+        f"{'WIN' if pnl>=0 else 'LOSS'} {reason} | {sign}${pnl:.4f} | {hold_m:.1f}m | cap=${cap_after:.2f}",
         trade["symbol"])
     emoji = "✅" if pnl >= 0 else "❌"
     notify(f"{emoji} {'WIN' if pnl>=0 else 'LOSS'} {trade['symbol']}",
-           f"Reason: {reason}\nPnL: {sign}${pnl:.4f}\nHeld: {hold_m:.1f} min\nCapital: ${capital:.2f}")
+           f"Reason: {reason}\nPnL: {sign}${pnl:.4f}\nHeld: {hold_m:.1f} min\nCapital: ${cap_after:.2f}")
     with _copy_lock:
         _sold_mints[mint] = time.time()  # 30 min cooldown before re-buying
     record_daily_trade(won=(pnl > 0))
@@ -1253,7 +1260,8 @@ def exit_trade(mint, price, reason, bond=0):
         "date":       time.strftime("%Y-%m-%d"),
         "time":       time.strftime("%H:%M:%S"),
     }
-    completed_trades.append(rec)
+    with log_lock:
+        completed_trades.append(rec)
     record_trade(rec)
     check_milestones()
     _save_daily_state()
@@ -1265,7 +1273,7 @@ def exit_trade(mint, price, reason, bond=0):
         if cap_now >= USDC_LOCK_THRESHOLD:
             threading.Thread(target=lock_profit_to_usdc, args=(pnl,), daemon=True).start()
 
-    if capital < 2:
+    if cap_after < 2:
         global scan_active
         scan_active = False
         log("err", "Capital below $2 — scanner halted", "HALT")
@@ -1287,7 +1295,6 @@ def monitor_loop():
                 elapsed  = time.time() - trade["opened_at"]
 
                 details = get_bonding_details(mint)
-                bond    = details["bond_pct"] if details else 0
                 market  = get_market_data(mint)
                 price   = market["price"] if market and market["price"] > 0 else trade["entry"]
 
@@ -1302,6 +1309,8 @@ def monitor_loop():
                 with trades_lock:
                     if mint not in open_trades:
                         continue
+                    bond_prev_raw = open_trades[mint]["bond_prev"]
+                    bond = details["bond_pct"] if details else bond_prev_raw  # keep last known on fetch failure
                     if bond > open_trades[mint]["bond_high"]:
                         open_trades[mint]["bond_high"]      = bond
                         open_trades[mint]["bond_last_moved"] = time.time()
@@ -1458,7 +1467,7 @@ def fetch_smart_wallets():
                 continue
             # Require minimum trade history — single-hit flukes not useful
             total_trades = int(w.get("txs_count", 0) or w.get("buy_count", 0) or 0)
-            if total_trades > 0 and total_trades < 15:
+            if total_trades < 15:  # also rejects 0 — no verifiable history
                 continue
             # Prefer realized profit over paper gains (research finding)
             realized   = float(w.get("realized_profit", 0) or 0)
