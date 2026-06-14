@@ -239,7 +239,7 @@ def _notify_worker():
                     _session.post(
                         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                         json={"chat_id": TELEGRAM_CHAT_ID,
-                              "text": f"*{title}*\n{body}",
+                              "text": f"*{BOT_NAME}* · {title}\n{body}",
                               "parse_mode": "Markdown"},
                         timeout=8
                     )
@@ -4130,4 +4130,10 @@ if __name__ == "__main__":
     log("ok", f"Copy trade: {'ON' if COPY_TRADE else 'OFF'} | WR {COPY_WINRATE_MIN}-{COPY_WINRATE_MAX}% | top {COPY_MAX_WALLETS} wallets")
     log("ok", f"USDC lock : activates at ${USDC_LOCK_THRESHOLD:.0f} capital")
     log("ok", "=" * 55)
+    notify(
+        f"🚀 {BOT_NAME} started",
+        f"Mode: {'PAPER' if PAPER_MODE else 'LIVE'}\n"
+        f"Capital: ${_cap:.2f} | Trade size: ${trade_size():.2f}\n"
+        f"Daily cap: {_limit} trades | Copy trade: {'ON' if COPY_TRADE else 'OFF'}"
+    )
     app.run(host="0.0.0.0", port=port, use_reloader=False)
