@@ -1704,9 +1704,8 @@ def manual_long(market):
             return jsonify({"error": f"{market} already has an open position"}), 400
         if len(_positions) >= DRIFT_MAX_OPEN:
             return jsonify({"error": f"Max open positions ({DRIFT_MAX_OPEN}) reached"}), 400
-        cap = _capital
+        size_usd = _capital * DRIFT_TRADE_PCT * DRIFT_LEVERAGE
 
-    size_usd = cap * DRIFT_TRADE_PCT * DRIFT_LEVERAGE
     open_position(market, "long", price, size_usd, DRIFT_LEVERAGE)
     return jsonify({"msg": f"Opened LONG {market} @ ${price:.4f} size=${size_usd:.2f}"})
 
@@ -1722,9 +1721,8 @@ def manual_short(market):
             return jsonify({"error": f"{market} already has an open position"}), 400
         if len(_positions) >= DRIFT_MAX_OPEN:
             return jsonify({"error": f"Max open positions ({DRIFT_MAX_OPEN}) reached"}), 400
-        cap = _capital
+        size_usd = _capital * DRIFT_TRADE_PCT * DRIFT_LEVERAGE
 
-    size_usd = cap * DRIFT_TRADE_PCT * DRIFT_LEVERAGE
     open_position(market, "short", price, size_usd, DRIFT_LEVERAGE)
     return jsonify({"msg": f"Opened SHORT {market} @ ${price:.4f} size=${size_usd:.2f}"})
 

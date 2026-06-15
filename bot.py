@@ -1479,6 +1479,7 @@ def monitor_loop():
                 details = get_bonding_details(mint)
                 market  = get_market_data(mint)
                 price   = market["price"] if market and market["price"] > 0 else trade["entry"]
+                bond    = trade.get("bond_prev", 0)  # initial value; overwritten under lock below
 
                 # Paper mode: simulate price from bond % movement when DexScreener has no data
                 if PAPER_MODE and price == trade["entry"] and bond > 0 and trade.get("bond_entry", 0) > 0:
@@ -2637,11 +2638,15 @@ new Chart(document.getElementById('capChart'),{{
 
 @app.route("/status/api", methods=["GET"])
 def status_api():
-    wins  = [t for t in completed_trades if t["pnl"] > 0]
-    total = len(completed_trades)
-    pnl   = sum(t["pnl"] for t in completed_trades)
+    with log_lock:
+        ct_snap = list(completed_trades)
     with capital_lock:
         cap = capital
+    with _daily_lock:
+        d_trades = _daily_trades; d_wins = _daily_wins; d_losses = _daily_losses
+    wins  = [t for t in ct_snap if t["pnl"] > 0]
+    total = len(ct_snap)
+    pnl   = sum(t["pnl"] for t in ct_snap)
     sol_price = get_sol_price()
     next_tune_in = ANALYZE_EVERY - (total % ANALYZE_EVERY) if total > 0 else ANALYZE_EVERY
     return jsonify({
@@ -2652,16 +2657,18 @@ def status_api():
         "total_pnl": round(pnl, 4),
         "sol_price": round(sol_price, 2) if sol_price else None,
         "next_tune_in": next_tune_in,
-        "today": {"trades": _daily_trades, "wins": _daily_wins, "losses": _daily_losses,
+        "today": {"trades": d_trades, "wins": d_wins, "losses": d_losses,
                   "paused_until": time.strftime("%H:%M", time.localtime(_pause_until)) if _pause_until > time.time() else None},
     })
 
 @app.route("/status", methods=["GET"])
 def status():
-    wins   = [t for t in completed_trades if t["pnl"] > 0]
-    losses = [t for t in completed_trades if t["pnl"] <= 0]
-    total  = len(completed_trades)
-    pnl    = sum(t["pnl"] for t in completed_trades)
+    with log_lock:
+        ct_snap = list(completed_trades)
+    wins   = [t for t in ct_snap if t["pnl"] > 0]
+    losses = [t for t in ct_snap if t["pnl"] <= 0]
+    total  = len(ct_snap)
+    pnl    = sum(t["pnl"] for t in ct_snap)
     with capital_lock:
         cap = capital
     wr = round(len(wins) / max(total, 1) * 100, 1)
@@ -2875,7 +2882,9 @@ def trades_api():
         open_list = [{k: v for k, v in t.items()
                       if k not in ("opened_at", "bond_slip_start")}
                      for t in open_trades.values()]
-    return jsonify({"open": open_list, "completed": completed_trades[-50:]})
+    with log_lock:
+        ct_snap = list(completed_trades[-50:])
+    return jsonify({"open": open_list, "completed": ct_snap})
 
 @app.route("/trades", methods=["GET"])
 def trades():
@@ -2883,12 +2892,14 @@ def trades():
         open_list = list(open_trades.values())
     with capital_lock:
         cap = capital
+    with log_lock:
+        ct_snap = list(completed_trades)
 
-    wins   = [t for t in completed_trades if t["pnl"] > 0]
-    losses = [t for t in completed_trades if t["pnl"] <= 0]
-    total  = len(completed_trades)
+    wins   = [t for t in ct_snap if t["pnl"] > 0]
+    losses = [t for t in ct_snap if t["pnl"] <= 0]
+    total  = len(ct_snap)
     wr     = round(len(wins) / max(total, 1) * 100, 1)
-    total_pnl = round(sum(t["pnl"] for t in completed_trades), 4)
+    total_pnl = round(sum(t["pnl"] for t in ct_snap), 4)
     avg_win   = round(sum(t["pnl"] for t in wins)   / max(len(wins),   1), 4)
     avg_loss  = round(sum(t["pnl"] for t in losses) / max(len(losses), 1), 4)
     best      = max(completed_trades, key=lambda t: t["pnl"], default=None)
@@ -3257,7 +3268,10 @@ def live_api():
             })
     with capital_lock:
         cap = capital
-    recent_closed = list(reversed(completed_trades[-30:]))
+    with log_lock:
+        recent_closed = list(reversed(completed_trades[-30:]))
+    with _daily_lock:
+        d_trades = _daily_trades; d_wins = _daily_wins; d_losses = _daily_losses
     return jsonify({
         "ts":       round(time.time()),
         "capital":  round(cap, 2),
@@ -3265,7 +3279,7 @@ def live_api():
         "closed":   recent_closed,
         "scanning": scan_active,
         "paused":   _pause_until > time.time(),
-        "today":    {"trades": _daily_trades, "wins": _daily_wins, "losses": _daily_losses},
+        "today":    {"trades": d_trades, "wins": d_wins, "losses": d_losses},
     })
 
 @app.route("/live", methods=["GET"])
