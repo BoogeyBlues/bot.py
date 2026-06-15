@@ -137,8 +137,13 @@ GMGN_API_KEY       = os.environ.get("GMGN_API_KEY", "")
 GMGN_TOP_HOLDERS   = "https://gmgn.ai/defi/quotation/v1/tokens/top_holders/sol"
 GMGN_CREATED_TOKENS= "https://gmgn.ai/defi/quotation/v1/portfolio/sol"
 GMGN_SIGNALS_URL   = "https://gmgn.ai/defi/quotation/v1/signals/sol"
-GMGN_KOL_TRACK     = "https://gmgn.ai/defi/quotation/v1/tracks/kol/sol"
-GMGN_SM_TRACK      = "https://gmgn.ai/defi/quotation/v1/tracks/smartmoney/sol"
+GMGN_KOL_TRACK      = "https://gmgn.ai/defi/quotation/v1/tracks/kol/sol"
+GMGN_SM_TRACK       = "https://gmgn.ai/defi/quotation/v1/tracks/smartmoney/sol"
+GMGN_TRENDING_URL   = "https://gmgn.ai/defi/quotation/v1/tokens/trending/sol"
+GMGN_HOT_SEARCH_URL = "https://gmgn.ai/defi/quotation/v1/tokens/hot_searches/sol"
+GMGN_COMPLETING_URL = "https://gmgn.ai/defi/quotation/v1/tokens/completing/sol"
+GMGN_NEW_PAIRS_URL  = "https://gmgn.ai/defi/quotation/v1/tokens/new_pairs/sol"
+GMGN_TREND_SCAN_INTERVAL = int(os.environ.get("GMGN_TREND_SCAN_INTERVAL", "120"))  # seconds between trend scans
 
 # Notifications
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
@@ -203,8 +208,13 @@ _gmgn_sm_signal_mints  = set()   # smart money buy signal mints (type 12)
 _gmgn_surge_mints      = set()   # price surge signal mints (type 6)
 _gmgn_kol_mints        = set()   # KOL buy mints (entry signal)
 _gmgn_sm_sell_mints    = set()   # smart money sell mints (exit/skip signal)
+_gmgn_trending_mints   = set()   # trending tokens (1h/4h movers)
+_gmgn_hot_mints        = set()   # hot search mints
+_gmgn_completing_mints = set()   # bonding curve near completion
+_gmgn_new_pair_mints   = set()   # newly listed pairs
 _gmgn_signal_time      = 0.0     # last signal refresh time
 _signal_lock           = threading.Lock()
+_trend_scanned         = set()   # mints already evaluated by trend scanner (cleared hourly)
 
 # ── LOGGING ─────────────────────────────────────────────────────
 def log(tag, msg, symbol=""):
@@ -958,19 +968,30 @@ def check_dev_history(dev_wallet) -> tuple:
         return True, ""
 
 def _refresh_gmgn_signals():
-    """Refresh smart-money / KOL signal mint sets. Runs periodically in background."""
-    global _gmgn_sm_signal_mints, _gmgn_surge_mints, _gmgn_kol_mints, _gmgn_sm_sell_mints, _gmgn_signal_time
+    """Refresh smart-money / KOL / trending / hot-search signal mint sets every 5 min."""
+    global _gmgn_sm_signal_mints, _gmgn_surge_mints, _gmgn_kol_mints, _gmgn_sm_sell_mints
+    global _gmgn_trending_mints, _gmgn_hot_mints, _gmgn_completing_mints, _gmgn_new_pair_mints
+    global _gmgn_signal_time
     try:
-        hdrs = {"Referer":"https://gmgn.ai/","Origin":"https://gmgn.ai"}
+        hdrs = {"Referer": "https://gmgn.ai/", "Origin": "https://gmgn.ai",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         if GMGN_API_KEY:
             hdrs["Authorization"] = f"Bearer {GMGN_API_KEY}"
 
+        def _extract(data):
+            """Pull mint address from any GMGN response item shape."""
+            if not data:
+                return set()
+            return {
+                (i.get("address") or i.get("mint") or i.get("token_address") or "")
+                for i in data if (i.get("address") or i.get("mint") or i.get("token_address"))
+            }
+
         def _fetch_signal(stype):
             r = _session.get(GMGN_SIGNALS_URL, headers=hdrs,
-                             params={"signal_type": stype, "chain":"sol","limit":100}, timeout=8)
+                             params={"signal_type": stype, "chain": "sol", "limit": 100}, timeout=8)
             if r.status_code == 200:
-                items = r.json().get("data") or []
-                return {i.get("address") or i.get("mint","") for i in items if i.get("address") or i.get("mint")}
+                return _extract(r.json().get("data") or [])
             return set()
 
         sm  = _fetch_signal(12)   # smart money buy
@@ -979,26 +1000,74 @@ def _refresh_gmgn_signals():
         # KOL buys
         kol = set()
         if GMGN_API_KEY:
-            r2 = _session.get(GMGN_KOL_TRACK, headers=hdrs,
-                              params={"side":"buy","limit":50}, timeout=8)
+            r2 = _session.get(GMGN_KOL_TRACK, headers=hdrs, params={"side": "buy", "limit": 50}, timeout=8)
             if r2.status_code == 200:
-                kol = {i.get("token_address") or i.get("mint","") for i in (r2.json().get("data") or [])}
+                kol = _extract(r2.json().get("data") or [])
 
-        # smart-money sell exits (for sell signal)
+        # Smart-money sells (exit/skip signal)
         sm_sell = set()
-        r3 = _session.get(GMGN_SM_TRACK, headers={**hdrs},
-                          params={"side":"sell","limit":50}, timeout=8)
+        r3 = _session.get(GMGN_SM_TRACK, headers=hdrs, params={"side": "sell", "limit": 50}, timeout=8)
         if r3.status_code == 200:
-            sm_sell = {i.get("token_address") or i.get("mint","") for i in (r3.json().get("data") or [])}
+            sm_sell = _extract(r3.json().get("data") or [])
+
+        # Trending tokens (1h movers)
+        trending = set()
+        for period in ("1h", "4h"):
+            try:
+                rt = _session.get(GMGN_TRENDING_URL, headers=hdrs,
+                                  params={"orderby": "volume", "direction": "desc",
+                                          "period": period, "limit": 50}, timeout=8)
+                if rt.status_code == 200:
+                    items = rt.json().get("data") or rt.json().get("tokens") or []
+                    trending |= _extract(items)
+            except Exception:
+                pass
+
+        # Hot search
+        hot = set()
+        try:
+            rh = _session.get(GMGN_HOT_SEARCH_URL, headers=hdrs, params={"limit": 50}, timeout=8)
+            if rh.status_code == 200:
+                items = rh.json().get("data") or rh.json().get("tokens") or []
+                hot = _extract(items)
+        except Exception:
+            pass
+
+        # Completing bonding curve (near graduation)
+        completing = set()
+        try:
+            rc = _session.get(GMGN_COMPLETING_URL, headers=hdrs,
+                              params={"limit": 50}, timeout=8)
+            if rc.status_code == 200:
+                items = rc.json().get("data") or rc.json().get("tokens") or []
+                completing = _extract(items)
+        except Exception:
+            pass
+
+        # New pairs
+        new_pairs = set()
+        try:
+            rn = _session.get(GMGN_NEW_PAIRS_URL, headers=hdrs, params={"limit": 50}, timeout=8)
+            if rn.status_code == 200:
+                items = rn.json().get("data") or rn.json().get("tokens") or []
+                new_pairs = _extract(items)
+        except Exception:
+            pass
 
         with _signal_lock:
-            _gmgn_sm_signal_mints = sm
-            _gmgn_surge_mints     = srg
-            _gmgn_kol_mints       = kol
-            _gmgn_sm_sell_mints   = sm_sell
-            _gmgn_signal_time     = time.time()
-            if sm or srg or kol:
-                log("info", f"GMGN signals: sm_buy={len(sm)} surge={len(srg)} kol={len(kol)} sm_sell={len(sm_sell)}", "GMGN")
+            _gmgn_sm_signal_mints  = sm
+            _gmgn_surge_mints      = srg
+            _gmgn_kol_mints        = kol
+            _gmgn_sm_sell_mints    = sm_sell
+            _gmgn_trending_mints   = trending
+            _gmgn_hot_mints        = hot
+            _gmgn_completing_mints = completing
+            _gmgn_new_pair_mints   = new_pairs
+            _gmgn_signal_time      = time.time()
+        log("info",
+            f"GMGN signals: sm_buy={len(sm)} surge={len(srg)} kol={len(kol)} "
+            f"sm_sell={len(sm_sell)} trending={len(trending)} hot={len(hot)} "
+            f"completing={len(completing)} new_pairs={len(new_pairs)}", "GMGN")
     except Exception as e:
         log("warn", f"GMGN signal refresh error: {e}", "GMGN")
 
@@ -1010,22 +1079,134 @@ def run_signal_refresh_loop():
 
 def gmgn_signal_score(mint) -> int:
     """
-    Returns 0-3 signal score for a mint:
-      +1 if in smart money buy signal set
-      +1 if in price surge set
-      +1 if in KOL buy set
+    Returns 0-7 signal score for a mint:
+      +1 smart money buy  +1 price surge  +1 KOL buy
+      +1 trending (1h/4h) +1 hot search   +1 completing bonding curve  +1 new pair
     """
     with _signal_lock:
         return (
-            (1 if mint in _gmgn_sm_signal_mints else 0) +
-            (1 if mint in _gmgn_surge_mints else 0) +
-            (1 if mint in _gmgn_kol_mints else 0)
+            (1 if mint in _gmgn_sm_signal_mints  else 0) +
+            (1 if mint in _gmgn_surge_mints       else 0) +
+            (1 if mint in _gmgn_kol_mints         else 0) +
+            (1 if mint in _gmgn_trending_mints    else 0) +
+            (1 if mint in _gmgn_hot_mints         else 0) +
+            (1 if mint in _gmgn_completing_mints  else 0) +
+            (1 if mint in _gmgn_new_pair_mints    else 0)
         )
 
 def gmgn_smart_money_selling(mint) -> bool:
     """Returns True if smart money is actively selling this mint."""
     with _signal_lock:
         return mint in _gmgn_sm_sell_mints
+
+def gmgn_trending_scan_loop():
+    """
+    Every GMGN_TREND_SCAN_INTERVAL seconds: take all mints from the trending,
+    hot-search, completing, and new-pair sets and evaluate them as entry candidates.
+    These may not appear in get_pumpfun_coins() at all, so this is an independent
+    discovery path.
+    """
+    global _trend_scanned
+    time.sleep(30)  # let signal refresh run first
+    while scan_active:
+        try:
+            with _signal_lock:
+                candidates = (
+                    _gmgn_trending_mints |
+                    _gmgn_hot_mints |
+                    _gmgn_completing_mints |
+                    _gmgn_new_pair_mints
+                ) - _trend_scanned
+
+            with trades_lock:
+                num_open = len(open_trades)
+            if num_open >= MAX_OPEN or daily_limit_reached():
+                time.sleep(GMGN_TREND_SCAN_INTERVAL)
+                continue
+
+            if not candidates:
+                time.sleep(GMGN_TREND_SCAN_INTERVAL)
+                continue
+
+            log("info", f"GMGN trend scan: {len(candidates)} new candidates", "GMGN")
+            for mint in list(candidates):
+                if not scan_active or daily_limit_reached():
+                    break
+                with trades_lock:
+                    if len(open_trades) >= MAX_OPEN:
+                        break
+                    if mint in open_trades:
+                        _trend_scanned.add(mint)
+                        continue
+
+                if not mint or len(mint) < 30:
+                    _trend_scanned.add(mint)
+                    continue
+                if mint in blacklisted_mints:
+                    _trend_scanned.add(mint)
+                    continue
+                if gmgn_smart_money_selling(mint):
+                    log("info", f"TREND SKIP: smart money selling", mint[:8])
+                    _trend_scanned.add(mint)
+                    continue
+
+                market = get_market_data(mint)
+                if not market or market["price"] <= 0 or market["liq"] < MIN_LIQ:
+                    _trend_scanned.add(mint)
+                    continue
+
+                details = get_bonding_details(mint)
+                bond = details["bond_pct"] if details else 0
+                if details and details.get("complete"):
+                    _trend_scanned.add(mint)  # already graduated — skip bond check
+                    # fall through to grad runner check below
+                elif bond > BOND_ENTRY_MAX:
+                    _trend_scanned.add(mint)
+                    continue
+
+                rug = run_rugcheck(mint)
+                if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
+                    blacklisted_mints.add(mint)
+                    _trend_scanned.add(mint)
+                    continue
+                if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
+                    _trend_scanned.add(mint)
+                    continue
+
+                holder_ok, holder_reason = check_holder_concentration(mint)
+                if not holder_ok:
+                    log("info", f"TREND SKIP: {holder_reason}", mint[:8])
+                    _trend_scanned.add(mint)
+                    continue
+
+                sig_score = gmgn_signal_score(mint)
+                symbol    = market.get("symbol", mint[:8])
+                amt       = trade_size()
+
+                with _signal_lock:
+                    src = ("trend" if mint in _gmgn_trending_mints else
+                           "hot"   if mint in _gmgn_hot_mints else
+                           "comp"  if mint in _gmgn_completing_mints else "new")
+
+                log("ok", f"GMGN {src.upper()} | bond={bond:.1f}% | liq=${market['liq']:.0f} | sig={sig_score}", symbol)
+                notify(f"🔥 GMGN {src.upper()} {symbol}",
+                       f"Bond: {bond:.1f}% | Liq: ${market['liq']:.0f}\n"
+                       f"Signal score: {sig_score}/7 | Amount: ${amt:.2f}")
+                enter_trade(mint, symbol, market["price"], amt, f"gmgn_{src}", bond, 0)
+                _trend_scanned.add(mint)
+                time.sleep(1)
+
+            # Clear the scanned set hourly so tokens can be re-evaluated if they're still trending
+            with _signal_lock:
+                still_live = (
+                    _gmgn_trending_mints | _gmgn_hot_mints |
+                    _gmgn_completing_mints | _gmgn_new_pair_mints
+                )
+            _trend_scanned -= still_live  # only forget tokens no longer in any set
+
+        except Exception as e:
+            log("err", f"GMGN trend scan loop: {e}", "GMGN")
+        time.sleep(GMGN_TREND_SCAN_INTERVAL)
 
 # ── USDC PROFIT LOCK ─────────────────────────────────────────────
 def lock_profit_to_usdc(profit_usd):
@@ -4122,6 +4303,7 @@ if __name__ == "__main__":
         threading.Thread(target=copy_trade_loop, daemon=True).start()
     t_signals = threading.Thread(target=run_signal_refresh_loop, daemon=True)
     t_signals.start()
+    threading.Thread(target=gmgn_trending_scan_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
     log("ok", "=" * 55)
     log("ok", f"Mode      : {'PAPER' if PAPER_MODE else 'LIVE'}")
