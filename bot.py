@@ -130,6 +130,7 @@ COPY_REFRESH_MINS = int(os.environ.get("COPY_REFRESH_MINS",  "60"))   # refresh 
 COPY_TP_PCT       = float(os.environ.get("COPY_TP_PCT",       "40"))
 COPY_SL_PCT       = float(os.environ.get("COPY_SL_PCT",       "15"))
 COPY_MAX_SECS     = int(os.environ.get("COPY_MAX_SECS",       "180"))
+COPY_PINNED_WALLETS = [a.strip() for a in os.environ.get("COPY_PINNED_WALLETS", "").split(",") if a.strip()]
 GMGN_RANK         = "https://gmgn.ai/defi/quotation/v1/rank/sol/wallets/7d"
 GMGN_ACTIVITY     = "https://gmgn.ai/defi/quotation/v1/wallet_activity/sol"
 GMGN_API_KEY       = os.environ.get("GMGN_API_KEY", "")
@@ -192,7 +193,7 @@ _tune_lock        = threading.Lock()
 # Weekly tracking
 _week_start_date  = ""
 _week_day_logs    = []     # one entry per day: {date, trades, wins, losses, pnl, start_cap, end_cap}
-_copy_wallets     = []   # [{address, winrate}]
+_copy_wallets     = [{"address": a, "winrate": "pinned"} for a in COPY_PINNED_WALLETS]
 _copy_wallet_time = 0.0
 _copied_mints     = {}   # mint -> timestamp, to avoid double-copy
 _copy_lock        = threading.Lock()
@@ -1478,11 +1479,16 @@ def fetch_smart_wallets():
             qualified.append({"address": addr, "winrate": round(wr, 1), "realized": round(realized, 2)})
         # Sort by realized profit (not just winrate) — consistent closers beat lucky holders
         qualified = sorted(qualified, key=lambda x: x.get("realized", 0), reverse=True)[:COPY_MAX_WALLETS]
+        # Always include pinned wallets (user-specified) — never filtered by GMGN ranking
+        pinned_addrs = {w["address"] for w in qualified}
+        pinned_extra = [{"address": a, "winrate": "pinned"}
+                        for a in COPY_PINNED_WALLETS if a not in pinned_addrs]
+        combined = pinned_extra + qualified
         with _copy_lock:
-            _copy_wallets     = qualified
+            _copy_wallets     = combined
             _copy_wallet_time = time.time()
-        log("ok", f"Tracking {len(qualified)} wallets | WR {COPY_WINRATE_MIN}-{COPY_WINRATE_MAX}%", "COPY")
-        for w in qualified:
+        log("ok", f"Tracking {len(combined)} wallets ({len(pinned_extra)} pinned + {len(qualified)} GMGN) | WR {COPY_WINRATE_MIN}-{COPY_WINRATE_MAX}%", "COPY")
+        for w in combined:
             log("info", f"  {w['address'][:8]}... WR:{w['winrate']}%", "COPY")
     except Exception as e:
         log("warn", f"fetch_smart_wallets: {e}", "COPY")
