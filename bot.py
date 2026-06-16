@@ -100,6 +100,7 @@ GRAD_SL_PCT      = float(os.environ.get("GRAD_SL_PCT",      "12"))
 GRAD_MAX_SECS    = int(os.environ.get("GRAD_MAX_SECS",      "300"))   # 5 min hard cap
 # PumpPortal pool name for graduated tokens (pumpswap since March 2025)
 GRAD_POOL        = os.environ.get("GRAD_POOL", "pumpswap")
+GRAD_SMC_MIN     = int(os.environ.get("GRAD_SMC_MIN", "2"))  # min SMC alignment score (0=off, 1-3)
 
 # Exit protection
 SLIP_TRIGGER   = float(os.environ.get("SLIP_TRIGGER",  "90"))
@@ -878,13 +879,98 @@ def get_market_data(mint):
             return None
         pair = max(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
         return {
-            "price":    float(pair.get("priceUsd", 0) or 0),
-            "liq":      float(pair.get("liquidity", {}).get("usd", 0) or 0),
-            "change1h": float(pair.get("priceChange", {}).get("h1", 0) or 0),
-            "age_h":    (time.time() - float(pair.get("pairCreatedAt", time.time() * 1000)) / 1000) / 3600,
+            "price":        float(pair.get("priceUsd", 0) or 0),
+            "liq":          float(pair.get("liquidity", {}).get("usd", 0) or 0),
+            "change1h":     float(pair.get("priceChange", {}).get("h1", 0) or 0),
+            "age_h":        (time.time() - float(pair.get("pairCreatedAt", time.time() * 1000)) / 1000) / 3600,
+            "pair_address": pair.get("pairAddress", ""),
+            "symbol":       pair.get("baseToken", {}).get("symbol", ""),
         }
     except Exception:
         return None
+
+# ── SMC ANALYSIS (EMA / VWAP / FVG) ─────────────────────────────
+def _ema(prices, period):
+    if len(prices) < period:
+        return None
+    k   = 2 / (period + 1)
+    ema = sum(prices[:period]) / period
+    for p in prices[period:]:
+        ema = p * k + ema * (1 - k)
+    return ema
+
+def get_candles(pair_address, resolution="5", limit=60):
+    """Fetch up to `limit` OHLCV candles from DexScreener (5m default)."""
+    if not pair_address:
+        return []
+    try:
+        now  = int(time.time())
+        res  = _session.get(
+            f"https://api.dexscreener.com/latest/dex/candles/solana/{pair_address}",
+            params={"res": resolution, "from": now - limit * int(resolution) * 60, "to": now},
+            timeout=8
+        )
+        if res.status_code != 200:
+            return []
+        raw = res.json()
+        candles = raw.get("candles") or raw.get("data") or []
+        return [c for c in candles if c.get("close", 0) > 0]
+    except Exception:
+        return []
+
+def smc_score(candles, current_price):
+    """
+    Score 0-3 for graduated coin entry quality:
+      +1  price above EMA(21) on 5m chart — trend alignment
+      +1  price above session VWAP         — intraday bullish bias
+      +1  price pulling back into a bullish FVG — optimal entry zone
+    Returns (score: int, detail: str)
+    """
+    if len(candles) < 5:
+        return 0, "no_candles"
+
+    closes = [c["close"] for c in candles]
+    score  = 0
+    parts  = []
+
+    # ── EMA(21) ──────────────────────────────────────────────────
+    ema21 = _ema(closes, min(21, len(closes)))
+    if ema21:
+        if current_price > ema21:
+            score += 1
+            parts.append(f"EMA✓{ema21:.6f}")
+        else:
+            parts.append(f"EMA✗{ema21:.6f}")
+
+    # ── VWAP ─────────────────────────────────────────────────────
+    total_vol = sum(c.get("volume", 0) for c in candles)
+    if total_vol > 0:
+        vwap = sum(
+            (c.get("high", c["close"]) + c.get("low", c["close"]) + c["close"]) / 3
+            * c.get("volume", 0)
+            for c in candles
+        ) / total_vol
+        if current_price > vwap:
+            score += 1
+            parts.append(f"VWAP✓{vwap:.6f}")
+        else:
+            parts.append(f"VWAP✗{vwap:.6f}")
+
+    # ── Bullish FVG ───────────────────────────────────────────────
+    # Candle[i].high < candle[i+2].low = unfilled gap; price in gap = pullback entry
+    fvg_hit = False
+    for i in range(len(candles) - 2):
+        gap_bot = candles[i].get("high", 0)
+        gap_top = candles[i + 2].get("low", 0)
+        if gap_top > gap_bot > 0 and gap_bot <= current_price <= gap_top:
+            score   += 1
+            fvg_hit  = True
+            parts.append(f"FVG✓[{gap_bot:.6f}-{gap_top:.6f}]")
+            break
+    if not fvg_hit:
+        parts.append("FVG✗")
+
+    return score, " ".join(parts)
 
 def get_sol_price():
     try:
@@ -2027,10 +2113,23 @@ def scanner_loop():
                             continue
 
                         sig_score = gmgn_signal_score(mint)
+
+                        # SMC alignment: EMA(21), VWAP, bullish FVG
+                        if GRAD_SMC_MIN > 0:
+                            candles  = get_candles(market.get("pair_address", ""))
+                            sc, sc_detail = smc_score(candles, market["price"])
+                            if sc < GRAD_SMC_MIN:
+                                log("info",
+                                    f"GRAD SMC SKIP {sc}/{GRAD_SMC_MIN} | {sc_detail}", symbol)
+                                continue
+                        else:
+                            sc, sc_detail = 0, "smc_off"
+
                         amt = trade_size()
                         log("ok",
                             f"GRAD RUNNER | age={age_h:.1f}h liq=${market['liq']/1000:.0f}k "
-                            f"1h={market['change1h']:+.0f}% | pool={GRAD_POOL} | sig={sig_score}", symbol)
+                            f"1h={market['change1h']:+.0f}% | smc={sc}/3 {sc_detail} "
+                            f"| pool={GRAD_POOL} | sig={sig_score}", symbol)
                         enter_trade(mint, symbol, market["price"], amt, "grad", 100, 0, pool=GRAD_POOL)
                         n_grad += 1
                         time.sleep(0.5)
