@@ -184,68 +184,102 @@ def _notify_worker():
         else:
             time.sleep(0.2)
 
-# ── PRICE FEEDS (Binance primary → Bybit fallback) ───────────────
-# Binance USDT perpetual symbols for each market
-_BINANCE_SYM = {
-    "SOL":    "SOLUSDT",
-    "BTC":    "BTCUSDT",
-    "ETH":    "ETHUSDT",
-    "XRP":    "XRPUSDT",
-    "DOGE":   "DOGEUSDT",
-    "AVAX":   "AVAXUSDT",
-    "SUI":    "SUIUSDT",
-    "BNB":    "BNBUSDT",
-    "BONK":   "BONKUSDT",
-    "WIF":    "WIFUSDT",
-    "PEPE":   "PEPEUSDT",
-    "POPCAT": "POPCATUSDT",
-    "TRUMP":  "TRUMPUSDT",
-    "SHIB":   "SHIBUSDT",
-    "JTO":    "JTOUSDT",
-    "JUP":    "JUPUSDT",
-    "PYTH":   "PYTHUSDT",
-    "TIA":    "TIAUSDT",
-    "RNDR":   "RNDRUSDT",
-    "HYPE":   "HYPEUSDT",
-    "ARB":    "ARBUSDT",
-    "ONDO":   "ONDOUSDT",
-    "SEI":    "SEIUSDT",
+# ── PRICE FEEDS (Pyth primary → Binance fallback → Bybit last resort) ────────
+# Pyth Network feed IDs — the same oracle Drift Protocol uses for settlement.
+# Verified via https://hermes.pyth.network/v2/price_feeds
+_PYTH_FEEDS = {
+    "SOL":    "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
+    "BTC":    "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
+    "ETH":    "ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace",
+    "XRP":    "ec5d399846a9209f3fe5881d70aae9268c94339ff9817e8d18ff19fa05eea1c8",
+    "DOGE":   "dcef50dd0a4cd2dcc17e45df1676dcb336a11a61c69df7a0299b0150c672d25c",
+    "AVAX":   "93da3352f9f1d105fdfe4971cfa80e9dd777bfc5d0f683ebb6e1294b92137bb7",
+    "BNB":    "2f95862b045670cd22bee3114c39763a4a08beeb663b145d283c31d7d1101c4f",
+    "SUI":    "23d7315113f5b1d3ba7a83604c44b94d79f4fd69af77f804fc7f920a6dc65744",
+    "BONK":   "72b021217ca3fe68922a19aaf990109cb9d84e9ad004b4d2025ad6f529314419",
+    "WIF":    "4ca4beeca86f0d164160323817a4e42b10010a724c2217c6ee41b54cd4cc61fc",
+    "PEPE":   "d69731a2e74ac1ce884fc3890f7ee324b6deb66147055249568869ed700882e4",
+    "POPCAT": "b9312a7ee50e189ef045aa3c7842e099b061bd9bdc99ac645956c3b660dc8cce",
+    "TRUMP":  "879551021853eec7a7dc827578e8e69da7e4fa8148339aa0d3d5296405be4b1a",
+    "JTO":    "b43660a5f790c69354b0729a5ef9d50d68f1df92107540210b9cccba1f947cc2",
+    "JUP":    "0a0408d619e9380abad35060f9192039ed5042fa6f82301d0e48bb52be830996",
+    # HYPE, PYTH token, TIA, RNDR, ARB, ONDO, SEI fall through to Binance
 }
 
-# Bybit symbol map (fallback — same naming convention for most tokens)
-_BYBIT_SYM = {k: v for k, v in _BINANCE_SYM.items()}  # identical symbols on Bybit
+_PYTH_HERMES  = "https://hermes.pyth.network/v2/updates/price/latest"
+
+# Binance symbols — fallback for markets not yet on Pyth
+_BINANCE_SYM = {
+    "SOL":    "SOLUSDT",  "BTC":  "BTCUSDT",  "ETH":   "ETHUSDT",
+    "XRP":    "XRPUSDT",  "DOGE": "DOGEUSDT", "AVAX":  "AVAXUSDT",
+    "SUI":    "SUIUSDT",  "BNB":  "BNBUSDT",  "BONK":  "BONKUSDT",
+    "WIF":    "WIFUSDT",  "PEPE": "PEPEUSDT", "POPCAT":"POPCATUSDT",
+    "TRUMP":  "TRUMPUSDT","SHIB": "SHIBUSDT", "JTO":   "JTOUSDT",
+    "JUP":    "JUPUSDT",  "PYTH": "PYTHUSDT", "TIA":   "TIAUSDT",
+    "RNDR":   "RNDRUSDT", "HYPE": "HYPEUSDT", "ARB":   "ARBUSDT",
+    "ONDO":   "ONDOUSDT", "SEI":  "SEIUSDT",
+}
+
+# Bybit last-resort fallback (same symbol convention)
+_BYBIT_SYM = dict(_BINANCE_SYM)
 
 # Per-market price cache: {market: (price, fetched_at)}
 _price_cache      = {}
 _price_cache_lock = threading.Lock()
-_PRICE_TTL        = 8  # seconds — reuse cached price within same loop tick
+_PRICE_TTL        = 8   # seconds — reuse cached price within same loop tick
+
+def _fetch_all_prices_pyth(markets):
+    """
+    Batch-fetch prices from Pyth Hermes in one HTTP request.
+    Returns {market: price} for all markets with a known Pyth feed ID.
+    Pyth is the oracle Drift uses — these prices match Drift's mark price exactly.
+    """
+    wanted = {m: _PYTH_FEEDS[m] for m in markets if m in _PYTH_FEEDS}
+    if not wanted:
+        return {}
+    try:
+        params = [("ids[]", fid) for fid in wanted.values()]
+        r = _session.get(_PYTH_HERMES, params=params, timeout=8)
+        if r.status_code != 200:
+            return {}
+        id_to_price = {}
+        for item in r.json().get("parsed", []):
+            raw   = item.get("price", {})
+            price = int(raw["price"]) * (10 ** int(raw["expo"]))
+            if price > 0:
+                id_to_price[item["id"]] = price
+        out = {}
+        for market, fid in wanted.items():
+            if fid in id_to_price:
+                out[market] = id_to_price[fid]
+        return out
+    except Exception:
+        return {}
 
 def _fetch_all_prices_binance(markets):
-    """Batch-fetch prices for all markets in one Binance call. Returns {market: price}."""
+    """Batch-fetch prices from Binance for markets missing from Pyth."""
     syms = [_BINANCE_SYM[m] for m in markets if m in _BINANCE_SYM]
     if not syms:
         return {}
     try:
-        import json as _json
         r = _session.get(
             "https://api.binance.com/api/v3/ticker/price",
-            params={"symbols": _json.dumps(syms)},
+            params={"symbols": json.dumps(syms)},
             timeout=8
         )
         if r.status_code != 200:
             return {}
         sym_to_price = {item["symbol"]: float(item["price"]) for item in r.json()}
-        out = {}
-        for market in markets:
-            sym = _BINANCE_SYM.get(market)
-            if sym and sym in sym_to_price and sym_to_price[sym] > 0:
-                out[market] = sym_to_price[sym]
-        return out
+        return {
+            m: sym_to_price[_BINANCE_SYM[m]]
+            for m in markets
+            if _BINANCE_SYM.get(m) in sym_to_price and sym_to_price[_BINANCE_SYM[m]] > 0
+        }
     except Exception:
         return {}
 
 def _fetch_price_bybit(market):
-    """Single-market Bybit fallback price fetch."""
+    """Last-resort single-market Bybit fetch."""
     sym = _BYBIT_SYM.get(market.upper())
     if not sym:
         return None
@@ -266,24 +300,79 @@ def _fetch_price_bybit(market):
     return None
 
 def refresh_price_cache(markets):
-    """Called once per trading loop tick — batch-fetches all market prices."""
-    prices = _fetch_all_prices_binance(markets)
-    now = time.time()
+    """
+    Called once per trading loop tick.
+    1. Pyth batch  — one request, all markets with known feed IDs
+    2. Binance batch — one request for remaining markets
+    3. Bybit individual — last resort for anything still missing
+    """
+    now    = time.time()
+    prices = _fetch_all_prices_pyth(markets)
+
+    # Binance fills in markets not on Pyth
+    missing = [m for m in markets if m not in prices]
+    if missing:
+        prices.update(_fetch_all_prices_binance(missing))
+
+    # Bybit for anything still missing
+    still_missing = [m for m in markets if m not in prices]
+    for market in still_missing:
+        p = _fetch_price_bybit(market)
+        if p:
+            prices[market] = p
+            log("info", f"Bybit fallback: ${p:.4f}", market)
+
     with _price_cache_lock:
         for market, price in prices.items():
             _price_cache[market] = (price, now)
-    # Bybit fallback for any market Binance didn't return
-    for market in markets:
-        if market not in prices:
-            price = _fetch_price_bybit(market)
-            if price:
-                with _price_cache_lock:
-                    _price_cache[market] = (price, now)
-                log("info", f"Bybit fallback price: ${price:.4f}", market)
 
 def get_market_price(market):
-    """Return cached price if fresh, otherwise fetch individually."""
+    """Return cached price if fresh, otherwise fetch individually via Pyth → Binance → Bybit."""
     market = market.upper()
+    with _price_cache_lock:
+        cached = _price_cache.get(market)
+    if cached and (time.time() - cached[1]) < _PRICE_TTL:
+        return cached[0]
+    # Cache miss — single fetch
+    fid = _PYTH_FEEDS.get(market)
+    if fid:
+        try:
+            r = _session.get(_PYTH_HERMES, params=[("ids[]", fid)], timeout=8)
+            if r.status_code == 200:
+                item = r.json().get("parsed", [{}])[0]
+                raw  = item.get("price", {})
+                price = int(raw["price"]) * (10 ** int(raw["expo"]))
+                if price > 0:
+                    with _price_cache_lock:
+                        _price_cache[market] = (price, time.time())
+                    return price
+        except Exception:
+            pass
+    sym = _BINANCE_SYM.get(market)
+    if sym:
+        try:
+            r = _session.get(
+                "https://api.binance.com/api/v3/ticker/price",
+                params={"symbol": sym}, timeout=8
+            )
+            if r.status_code == 200:
+                price = float(r.json().get("price", 0))
+                if price > 0:
+                    with _price_cache_lock:
+                        _price_cache[market] = (price, time.time())
+                    return price
+        except Exception:
+            pass
+    price = _fetch_price_bybit(market)
+    if price:
+        with _price_cache_lock:
+            _price_cache[market] = (price, time.time())
+    return price
+
+def get_sol_price():
+    return get_market_price("SOL")
+
+
     with _price_cache_lock:
         cached = _price_cache.get(market)
     if cached and (time.time() - cached[1]) < _PRICE_TTL:
