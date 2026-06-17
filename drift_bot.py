@@ -24,7 +24,7 @@ SOL_RPC            = os.environ.get("SOL_RPC", "https://api.mainnet-beta.solana.
 TELEGRAM_TOKEN     = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
 GMGN_API_KEY       = os.environ.get("GMGN_API_KEY", "")
-STARTING_CAPITAL   = float(os.environ.get("DRIFT_STARTING_CAPITAL", "100"))
+STARTING_CAPITAL   = float(os.environ.get("DRIFT_STARTING_CAPITAL", "5000"))
 PROFIT_GOAL        = float(os.environ.get("DRIFT_PROFIT_GOAL", "10000"))
 DRIFT_TP_USD       = float(os.environ.get("DRIFT_TP_USD",    str(DRIFT_MARGIN_USD * 2)))  # default: 2× margin
 DRIFT_SL_MARGIN_PCT = float(os.environ.get("DRIFT_SL_MARGIN_PCT", "0.75"))  # close when loss = 75% of margin
