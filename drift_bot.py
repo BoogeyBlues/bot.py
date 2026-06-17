@@ -649,10 +649,14 @@ def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=N
         tp = price * (1 - _tp)
         sl = price * (1 + _sl)
 
+    # Liquidation when margin is fully consumed (~99% for safety math)
+    liq_price = price * (1 - 0.99 / leverage) if side == "long" else price * (1 + 0.99 / leverage)
+
     pos = {
         "market": market, "side": side, "entry": price,
         "size": size_usd, "leverage": leverage,
         "peak_price": price, "tp": tp, "sl": sl,
+        "liq_price": liq_price,
         "trail_pct": _trail,
         "opened_at": time.time(), "pnl": 0.0, "paper": DRIFT_PAPER_MODE,
         "current_price": price,
@@ -978,18 +982,28 @@ def run_trading_loop():
                     sl_pct    = atr_pct * 1.5   # SL = 1.5× ATR
                     tp_pct    = atr_pct * 3.0   # TP = 3× ATR (2:1 R:R)
 
-                    # ── Dynamic leverage: inverse of volatility, clamped to [LEV_MIN, LEV_MAX] ──
+                    # ── Liquidation safety cap ────────────────────────────
+                    # At leverage L, liquidation happens when price moves 1/L against us.
+                    # SL must land INSIDE that distance (using 85% of margin as hard limit).
+                    # If even the minimum leverage puts SL past liquidation, skip the trade.
+                    max_safe_lev = 0.85 / sl_pct if sl_pct > 0 else DRIFT_LEV_MAX
+                    if max_safe_lev < DRIFT_LEV_MIN:
+                        log("info",
+                            f"ATR too high for safe {int(DRIFT_LEV_MIN)}x entry "
+                            f"(sl={sl_pct*100:.2f}% > liq buffer) — skip", market)
+                        continue
+
+                    # ── Dynamic leverage: inverse of volatility, clamped to safe range ──
                     # k=0.10 calibrated for 1-min ATR: gives 65x at ~0.15% per-tick ATR.
                     # Calm markets (BTC/ETH) → higher leverage; volatile (SOL) → lower.
                     # Max-confidence signal (fresh flip + GMGN + RSI neutral) gets 15% boost.
                     LEV_K      = 0.10
                     raw_lev    = LEV_K / atr_pct if atr_pct > 0 else DRIFT_LEV_MIN
-                    # Adaptive tuning can nudge within range; start from ATR-dynamic base
                     tuned_lev  = mparams.get("leverage", DRIFT_LEVERAGE)
-                    raw_lev    = (raw_lev + tuned_lev) / 2  # blend ATR-dynamic with learned value
+                    raw_lev    = (raw_lev + tuned_lev) / 2
                     if confidence >= 4:
-                        raw_lev *= 1.15   # max confidence: push toward upper end
-                    market_lev = int(max(DRIFT_LEV_MIN, min(DRIFT_LEV_MAX, raw_lev)))
+                        raw_lev *= 1.15
+                    market_lev = int(max(DRIFT_LEV_MIN, min(DRIFT_LEV_MAX, raw_lev, max_safe_lev)))
                     size_usd   = DRIFT_MARGIN_USD * market_lev
                     margin     = DRIFT_MARGIN_USD
 
@@ -1979,8 +1993,22 @@ def run_position_price_updater():
                     _positions[market]["current_price"] = price
                     updated = dict(_positions[market])
 
-                # SL/TP checked every 5s
                 pnl = updated.get("pnl", 0)
+
+                # ── Liquidation guard — highest priority ──────────────
+                # Exit immediately if price comes within 0.3% of liq price.
+                # At 80x a 1.25% move liquidates — 0.3% buffer gives ~1s of reaction time.
+                liq_price = updated.get("liq_price")
+                if liq_price:
+                    near_liq = (
+                        (updated["side"] == "long"  and price <= liq_price * 1.003) or
+                        (updated["side"] == "short" and price >= liq_price * 0.997)
+                    )
+                    if near_liq:
+                        close_position(market, price, f"LIQ-GUARD liq={liq_price:.4f}")
+                        continue
+
+                # ── Dollar TP / SL ────────────────────────────────────
                 if DRIFT_TP_USD > 0 and pnl >= DRIFT_TP_USD:
                     close_position(market, price, f"TP${DRIFT_TP_USD:.0f}")
                 elif DRIFT_SL_MARGIN_PCT > 0 and pnl <= -(updated["size"] / updated["leverage"] * DRIFT_SL_MARGIN_PCT):
@@ -1988,13 +2016,13 @@ def run_position_price_updater():
                     close_position(market, price, f"SL${sl_usd:.1f}")
                 elif (updated["side"] == "long" and price >= updated["tp"]) or \
                      (updated["side"] == "short" and price <= updated["tp"]):
-                    close_position(market, price, "TP")
+                    close_position(market, price, "TP%")
                 elif (updated["side"] == "long" and price <= updated["sl"]) or \
                      (updated["side"] == "short" and price >= updated["sl"]):
-                    close_position(market, price, "SL")
+                    close_position(market, price, "SL%")
         except Exception as e:
             log("warn", f"Price updater error: {e}")
-        time.sleep(5)
+        time.sleep(1)
 
 
 @app.route("/monitor", methods=["GET"])
