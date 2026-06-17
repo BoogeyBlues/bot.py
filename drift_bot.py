@@ -184,65 +184,132 @@ def _notify_worker():
         else:
             time.sleep(0.2)
 
-# ── PRICE FEEDS ───────────────────────────────────────────────────
-_CG_ID_MAP = {
-    # Large caps
-    "SOL":    "solana",
-    "BTC":    "bitcoin",
-    "ETH":    "ethereum",
-    "XRP":    "ripple",
-    "DOGE":   "dogecoin",
-    "AVAX":   "avalanche-2",
-    "SUI":    "sui",
-    "BNB":    "binancecoin",
-    # Meme coins
-    "BONK":   "bonk",
-    "WIF":    "dogwifhat",
-    "PEPE":   "pepe",
-    "POPCAT": "popcat",
-    "TRUMP":  "official-trump",
-    "SHIB":   "shiba-inu",      # price feed only — not on Drift (ETH token)
-    # Solana ecosystem
-    "JTO":    "jito-governance",
-    "JUP":    "jupiter-exchange-solana",
-    "PYTH":   "pyth-network",
-    "TIA":    "celestia",
-    "RNDR":   "render-token",
-    "WEN":    "wen-4",
-    # DeFi / perp platforms
-    "HYPE":   "hyperliquid",
-    "ARB":    "arbitrum",
-    "ONDO":   "ondo-finance",
-    "SEI":    "sei-network",
+# ── PRICE FEEDS (Binance primary → Bybit fallback) ───────────────
+# Binance USDT perpetual symbols for each market
+_BINANCE_SYM = {
+    "SOL":    "SOLUSDT",
+    "BTC":    "BTCUSDT",
+    "ETH":    "ETHUSDT",
+    "XRP":    "XRPUSDT",
+    "DOGE":   "DOGEUSDT",
+    "AVAX":   "AVAXUSDT",
+    "SUI":    "SUIUSDT",
+    "BNB":    "BNBUSDT",
+    "BONK":   "BONKUSDT",
+    "WIF":    "WIFUSDT",
+    "PEPE":   "PEPEUSDT",
+    "POPCAT": "POPCATUSDT",
+    "TRUMP":  "TRUMPUSDT",
+    "SHIB":   "SHIBUSDT",
+    "JTO":    "JTOUSDT",
+    "JUP":    "JUPUSDT",
+    "PYTH":   "PYTHUSDT",
+    "TIA":    "TIAUSDT",
+    "RNDR":   "RNDRUSDT",
+    "HYPE":   "HYPEUSDT",
+    "ARB":    "ARBUSDT",
+    "ONDO":   "ONDOUSDT",
+    "SEI":    "SEIUSDT",
 }
 
-def get_market_price(market):
-    cg_id = _CG_ID_MAP.get(market.upper())
-    if not cg_id:
+# Bybit symbol map (fallback — same naming convention for most tokens)
+_BYBIT_SYM = {k: v for k, v in _BINANCE_SYM.items()}  # identical symbols on Bybit
+
+# Per-market price cache: {market: (price, fetched_at)}
+_price_cache      = {}
+_price_cache_lock = threading.Lock()
+_PRICE_TTL        = 8  # seconds — reuse cached price within same loop tick
+
+def _fetch_all_prices_binance(markets):
+    """Batch-fetch prices for all markets in one Binance call. Returns {market: price}."""
+    syms = [_BINANCE_SYM[m] for m in markets if m in _BINANCE_SYM]
+    if not syms:
+        return {}
+    try:
+        import json as _json
+        r = _session.get(
+            "https://api.binance.com/api/v3/ticker/price",
+            params={"symbols": _json.dumps(syms)},
+            timeout=8
+        )
+        if r.status_code != 200:
+            return {}
+        sym_to_price = {item["symbol"]: float(item["price"]) for item in r.json()}
+        out = {}
+        for market in markets:
+            sym = _BINANCE_SYM.get(market)
+            if sym and sym in sym_to_price and sym_to_price[sym] > 0:
+                out[market] = sym_to_price[sym]
+        return out
+    except Exception:
+        return {}
+
+def _fetch_price_bybit(market):
+    """Single-market Bybit fallback price fetch."""
+    sym = _BYBIT_SYM.get(market.upper())
+    if not sym:
         return None
     try:
         r = _session.get(
-            "https://api.coingecko.com/api/v3/simple/price",
-            params={"ids": cg_id, "vs_currencies": "usd"},
+            "https://api.bybit.com/v5/market/tickers",
+            params={"category": "spot", "symbol": sym},
             timeout=8
         )
         if r.status_code == 200:
-            return float(r.json()[cg_id]["usd"])
+            items = r.json().get("result", {}).get("list", [])
+            if items:
+                price = float(items[0].get("lastPrice", 0))
+                if price > 0:
+                    return price
     except Exception:
         pass
-    # Fallback: DexScreener for SOL
-    if market.upper() == "SOL":
+    return None
+
+def refresh_price_cache(markets):
+    """Called once per trading loop tick — batch-fetches all market prices."""
+    prices = _fetch_all_prices_binance(markets)
+    now = time.time()
+    with _price_cache_lock:
+        for market, price in prices.items():
+            _price_cache[market] = (price, now)
+    # Bybit fallback for any market Binance didn't return
+    for market in markets:
+        if market not in prices:
+            price = _fetch_price_bybit(market)
+            if price:
+                with _price_cache_lock:
+                    _price_cache[market] = (price, now)
+                log("info", f"Bybit fallback price: ${price:.4f}", market)
+
+def get_market_price(market):
+    """Return cached price if fresh, otherwise fetch individually."""
+    market = market.upper()
+    with _price_cache_lock:
+        cached = _price_cache.get(market)
+    if cached and (time.time() - cached[1]) < _PRICE_TTL:
+        return cached[0]
+    # Cache miss or stale — try Binance single then Bybit
+    sym = _BINANCE_SYM.get(market)
+    if sym:
         try:
             r = _session.get(
-                "https://api.dexscreener.com/latest/dex/pairs/solana/8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj",
+                "https://api.binance.com/api/v3/ticker/price",
+                params={"symbol": sym},
                 timeout=8
             )
-            pairs = r.json().get("pairs", [])
-            if pairs:
-                return float(pairs[0].get("priceUsd", 0))
+            if r.status_code == 200:
+                price = float(r.json().get("price", 0))
+                if price > 0:
+                    with _price_cache_lock:
+                        _price_cache[market] = (price, time.time())
+                    return price
         except Exception:
             pass
-    return None
+    price = _fetch_price_bybit(market)
+    if price:
+        with _price_cache_lock:
+            _price_cache[market] = (price, time.time())
+    return price
 
 def get_sol_price():
     return get_market_price("SOL")
@@ -766,7 +833,10 @@ def run_trading_loop():
 
     while True:
         try:
-            # Update price history for all markets
+            # Single batch call to Binance for all markets — one request instead of N
+            refresh_price_cache(markets)
+
+            # Update price history from cache
             for market in markets:
                 price = get_market_price(market)
                 if price:
