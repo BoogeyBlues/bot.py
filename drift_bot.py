@@ -7,8 +7,10 @@ app = Flask(__name__)
 # ── CONFIG ────────────────────────────────────────────────────────
 DRIFT_PAPER_MODE   = os.environ.get("DRIFT_PAPER_MODE", "true").lower() != "false"
 DRIFT_EXCHANGE     = os.environ.get("DRIFT_EXCHANGE", "drift")
-DRIFT_LEVERAGE     = float(os.environ.get("DRIFT_LEVERAGE", "3"))
-DRIFT_TRADE_PCT    = float(os.environ.get("DRIFT_TRADE_PCT", "0.10"))
+DRIFT_LEVERAGE     = float(os.environ.get("DRIFT_LEVERAGE", "65"))     # midpoint; used as fallback
+DRIFT_LEV_MIN      = float(os.environ.get("DRIFT_LEV_MIN",  "50"))     # minimum leverage
+DRIFT_LEV_MAX      = float(os.environ.get("DRIFT_LEV_MAX",  "80"))     # maximum leverage
+DRIFT_MARGIN_USD   = float(os.environ.get("DRIFT_MARGIN_USD", "10"))   # fixed margin per trade ($)
 DRIFT_MAX_OPEN     = int(os.environ.get("DRIFT_MAX_OPEN", "3"))
 DRIFT_TP_PCT       = float(os.environ.get("DRIFT_TP_PCT", "0.20"))
 DRIFT_SL_PCT       = float(os.environ.get("DRIFT_SL_PCT", "0.05"))
@@ -25,7 +27,7 @@ GMGN_API_KEY       = os.environ.get("GMGN_API_KEY", "")
 STARTING_CAPITAL   = float(os.environ.get("DRIFT_STARTING_CAPITAL", "100"))
 PROFIT_GOAL        = float(os.environ.get("DRIFT_PROFIT_GOAL", "10000"))
 DRIFT_TP_USD       = float(os.environ.get("DRIFT_TP_USD", "100"))   # close when PnL hits this $
-DRIFT_SL_USD       = float(os.environ.get("DRIFT_SL_USD", "2"))     # close when loss hits this $
+DRIFT_SL_MARGIN_PCT = float(os.environ.get("DRIFT_SL_MARGIN_PCT", "0.75"))  # close when loss = 75% of margin
 DRIFT_TUNE_EVERY   = int(os.environ.get("DRIFT_TUNE_EVERY",   "3")) # retune after every N closed trades
 DRIFT_COMPOUND_PCT = float(os.environ.get("DRIFT_COMPOUND_PCT", "0.10"))  # % of profit reinvested
 REDIS_URL          = os.environ.get("UPSTASH_REDIS_REST_URL", "")
@@ -375,10 +377,6 @@ def get_market_price(market):
         with _price_cache_lock:
             _price_cache[market] = (price, time.time())
     return price
-
-def get_sol_price():
-    return get_market_price("SOL")
-
 
 def get_sol_price():
     return get_market_price("SOL")
@@ -865,11 +863,11 @@ def drift_auto_tune():
         long_wr     = long_wins  / max(long_total,  1)
         short_wr    = short_wins / max(short_total, 1)
 
-        # Leverage: pull back on losers, push up on winners
+        # Leverage: pull back on losers, push up on winners — always within 50-80x range
         if wr < 0.30:
-            new_lev = round(max(1.0, cur_lev - 1.0), 1)
+            new_lev = round(max(DRIFT_LEV_MIN, cur_lev - 5), 1)
         elif wr > 0.65:
-            new_lev = round(min(DRIFT_LEVERAGE * 2, cur_lev + 0.5), 1)
+            new_lev = round(min(DRIFT_LEV_MAX, cur_lev + 2), 1)
         else:
             new_lev = cur_lev
 
@@ -980,23 +978,25 @@ def run_trading_loop():
                     sl_pct    = atr_pct * 1.5   # SL = 1.5× ATR
                     tp_pct    = atr_pct * 3.0   # TP = 3× ATR (2:1 R:R)
 
-                    # ── ATR-based position sizing ─────────────────────────
-                    # Size so that the ATR stop-out equals exactly DRIFT_SL_USD
-                    market_lev     = mparams.get("leverage", DRIFT_LEVERAGE)
-                    conf_mult      = 1.25 if confidence == 3 else 1.0
-                    with _state_lock:
-                        cap = _capital  # re-read per market so prior openings are reflected
-                    ideal_notional = (DRIFT_SL_USD / sl_pct) if sl_pct > 0 else cap * DRIFT_TRADE_PCT * market_lev
-                    max_notional   = cap * DRIFT_TRADE_PCT * market_lev * conf_mult
-                    size_usd       = min(ideal_notional, max_notional)
-                    margin         = size_usd / market_lev
-                    if margin < 1.0:
-                        log("warn", f"Margin too small: ${margin:.2f}")
-                        continue
+                    # ── Dynamic leverage: inverse of volatility, clamped to [LEV_MIN, LEV_MAX] ──
+                    # k=0.10 calibrated for 1-min ATR: gives 65x at ~0.15% per-tick ATR.
+                    # Calm markets (BTC/ETH) → higher leverage; volatile (SOL) → lower.
+                    # Max-confidence signal (fresh flip + GMGN + RSI neutral) gets 15% boost.
+                    LEV_K      = 0.10
+                    raw_lev    = LEV_K / atr_pct if atr_pct > 0 else DRIFT_LEV_MIN
+                    # Adaptive tuning can nudge within range; start from ATR-dynamic base
+                    tuned_lev  = mparams.get("leverage", DRIFT_LEVERAGE)
+                    raw_lev    = (raw_lev + tuned_lev) / 2  # blend ATR-dynamic with learned value
+                    if confidence >= 4:
+                        raw_lev *= 1.15   # max confidence: push toward upper end
+                    market_lev = int(max(DRIFT_LEV_MIN, min(DRIFT_LEV_MAX, raw_lev)))
+                    size_usd   = DRIFT_MARGIN_USD * market_lev
+                    margin     = DRIFT_MARGIN_USD
 
                     log("ok",
-                        f"SIGNAL {signal.upper()} conf={confidence}/3 lev={market_lev}x "
-                        f"size=${size_usd:.2f} SL={sl_pct*100:.2f}% TP={tp_pct*100:.2f}%", market)
+                        f"SIGNAL {signal.upper()} conf={confidence}/4 lev={market_lev}x "
+                        f"margin=${margin:.0f} notional=${size_usd:.0f} "
+                        f"SL={sl_pct*100:.2f}% TP={tp_pct*100:.2f}%", market)
 
                     # Cache signal for display
                     with _state_lock:
@@ -1815,7 +1815,8 @@ def status_api():
         "total_pnl": round(total_pnl, 2),
         "open_positions": len(pos_snap),
         "positions": pos_snap,
-        "leverage": DRIFT_LEVERAGE,
+        "leverage_range": f"{int(DRIFT_LEV_MIN)}-{int(DRIFT_LEV_MAX)}x",
+        "margin_per_trade": DRIFT_MARGIN_USD,
         "sol_price": round(sol_price, 2) if sol_price else None,
         "profit_secured": round(psec, 2),
         "tp_usd": DRIFT_TP_USD,
@@ -1853,10 +1854,10 @@ def manual_long(market):
             return jsonify({"error": f"{market} already has an open position"}), 400
         if len(_positions) >= DRIFT_MAX_OPEN:
             return jsonify({"error": f"Max open positions ({DRIFT_MAX_OPEN}) reached"}), 400
-        size_usd = _capital * DRIFT_TRADE_PCT * DRIFT_LEVERAGE
+        size_usd = DRIFT_MARGIN_USD * DRIFT_LEVERAGE
 
     open_position(market, "long", price, size_usd, DRIFT_LEVERAGE)
-    return jsonify({"msg": f"Opened LONG {market} @ ${price:.4f} size=${size_usd:.2f}"})
+    return jsonify({"msg": f"Opened LONG {market} @ ${price:.4f} margin=${DRIFT_MARGIN_USD:.0f} lev={int(DRIFT_LEVERAGE)}x notional=${size_usd:.0f}"})
 
 
 @app.route("/api/manual-short/<market>", methods=["POST"])
@@ -1870,10 +1871,10 @@ def manual_short(market):
             return jsonify({"error": f"{market} already has an open position"}), 400
         if len(_positions) >= DRIFT_MAX_OPEN:
             return jsonify({"error": f"Max open positions ({DRIFT_MAX_OPEN}) reached"}), 400
-        size_usd = _capital * DRIFT_TRADE_PCT * DRIFT_LEVERAGE
+        size_usd = DRIFT_MARGIN_USD * DRIFT_LEVERAGE
 
     open_position(market, "short", price, size_usd, DRIFT_LEVERAGE)
-    return jsonify({"msg": f"Opened SHORT {market} @ ${price:.4f} size=${size_usd:.2f}"})
+    return jsonify({"msg": f"Opened SHORT {market} @ ${price:.4f} margin=${DRIFT_MARGIN_USD:.0f} lev={int(DRIFT_LEVERAGE)}x notional=${size_usd:.0f}"})
 
 
 @app.route("/ping-telegram", methods=["GET"])
@@ -1982,8 +1983,9 @@ def run_position_price_updater():
                 pnl = updated.get("pnl", 0)
                 if DRIFT_TP_USD > 0 and pnl >= DRIFT_TP_USD:
                     close_position(market, price, f"TP${DRIFT_TP_USD:.0f}")
-                elif DRIFT_SL_USD > 0 and pnl <= -DRIFT_SL_USD:
-                    close_position(market, price, f"SL${DRIFT_SL_USD:.0f}")
+                elif DRIFT_SL_MARGIN_PCT > 0 and pnl <= -(updated["size"] / updated["leverage"] * DRIFT_SL_MARGIN_PCT):
+                    sl_usd = updated["size"] / updated["leverage"] * DRIFT_SL_MARGIN_PCT
+                    close_position(market, price, f"SL${sl_usd:.1f}")
                 elif (updated["side"] == "long" and price >= updated["tp"]) or \
                      (updated["side"] == "short" and price <= updated["tp"]):
                     close_position(market, price, "TP")
@@ -2271,7 +2273,7 @@ if __name__ == "__main__":
 
     _load_state()
     log("ok", f"{'[PAPER] ' if DRIFT_PAPER_MODE else '[LIVE] '}{DRIFT_BOT_NAME} starting")
-    log("ok", f"Exchange: {DRIFT_EXCHANGE.upper()} | Markets: {DRIFT_MARKETS} | Leverage: {DRIFT_LEVERAGE}x")
+    log("ok", f"Exchange: {DRIFT_EXCHANGE.upper()} | Markets: {DRIFT_MARKETS} | Leverage: {int(DRIFT_LEV_MIN)}-{int(DRIFT_LEV_MAX)}x dynamic | Margin: ${DRIFT_MARGIN_USD:.0f}/trade")
     log("ok", f"Capital: ${_capital:.2f} | Goal: ${PROFIT_GOAL:,.0f} | Port: {DRIFT_PORT}")
 
     t_notify = threading.Thread(target=_notify_worker, daemon=True)
@@ -2288,7 +2290,8 @@ if __name__ == "__main__":
         f"Mode: {'PAPER' if DRIFT_PAPER_MODE else 'LIVE'}\n"
         f"Exchange: {DRIFT_EXCHANGE.upper()}\n"
         f"Markets: {DRIFT_MARKETS}\n"
-        f"Leverage: {DRIFT_LEVERAGE}x | Capital: ${_capital:.2f}"
+        f"Leverage: {int(DRIFT_LEV_MIN)}-{int(DRIFT_LEV_MAX)}x dynamic | Margin: ${DRIFT_MARGIN_USD:.0f}/trade\n"
+        f"Capital: ${_capital:.2f}"
     )
 
     app.run(host="0.0.0.0", port=DRIFT_PORT, debug=False)
