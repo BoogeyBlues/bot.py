@@ -50,10 +50,11 @@ _log_lock      = threading.Lock()
 _notify_queue  = []
 _notify_q_lock = threading.Lock()
 _notify_log    = []   # last 50 messages sent (same text as Telegram)
-_signals_cache = {}   # market -> {signal, ts}
-_st_prev       = {}   # market -> previous supertrend bullish state (for flip detection)
-_market_stats  = {}   # market -> {wins, losses, long_wins, short_wins, long_total, short_total}
-_market_params = {}   # tuned per-market: {leverage, bias, paused_until, last_result}
+_signals_cache     = {}   # market -> {signal, ts}
+_st_prev           = {}   # market -> previous supertrend bullish state (for flip detection)
+_market_stats      = {}   # market -> {wins, losses, long_wins, short_wins, long_total, short_total}
+_market_params     = {}   # tuned per-market: {leverage, bias, paused_until, last_result}
+_gmgn_signal_cache = {}   # market -> {result, ts} — 5-min TTL to avoid per-tick API calls
 
 _session = requests.Session()
 _session.trust_env = False
@@ -462,34 +463,37 @@ def _get_gmgn_signal(market):
     """Fetch smart money signal from GMGN for the underlying asset. Returns 'long', 'short', or None."""
     if not GMGN_API_KEY:
         return None
+    cached = _gmgn_signal_cache.get(market)
+    if cached and time.time() - cached["ts"] < 300:
+        return cached["result"]
+    result = None
     try:
         headers = {
             "User-Agent": "Mozilla/5.0",
             "Accept": "application/json",
+            "Authorization": f"Bearer {GMGN_API_KEY}",
         }
-        if GMGN_API_KEY:
-            headers["Authorization"] = f"Bearer {GMGN_API_KEY}"
         r = _session.get(
             "https://gmgn.ai/defi/quotation/v1/signals/sol",
             params={"type": "12", "limit": "20"},
             headers=headers,
             timeout=8
         )
-        if r.status_code != 200:
-            return None
-        signals = r.json().get("data", {}).get("signals", [])
-        # Check if smart money is loading up on the underlying asset symbol
-        for s in signals:
-            sym = (s.get("token_symbol") or "").upper()
-            if sym == market.upper():
-                action = (s.get("action") or "").lower()
-                if action in ("buy", "accumulate"):
-                    return "long"
-                elif action in ("sell", "dump"):
-                    return "short"
+        if r.status_code == 200:
+            signals = r.json().get("data", {}).get("signals", [])
+            for s in signals:
+                sym = (s.get("token_symbol") or "").upper()
+                if sym == market.upper():
+                    action = (s.get("action") or "").lower()
+                    if action in ("buy", "accumulate"):
+                        result = "long"
+                    elif action in ("sell", "dump"):
+                        result = "short"
+                    break
     except Exception:
         pass
-    return None
+    _gmgn_signal_cache[market] = {"result": result, "ts": time.time()}
+    return result
 
 def get_signal(market):
     """
@@ -502,10 +506,11 @@ def get_signal(market):
       - Market not in dead zone (ATR / price > 0.001 — enough volatility to trade)
 
     Confidence score (affects position size):
-      +1 base (Supertrend + EMA + RSI all agree)
+      +1 base (Supertrend + EMA agree, RSI not exhausted)
+      +1 if RSI is neutral (35-65) — momentum has room to run
       +1 if Supertrend just FLIPPED this bar (fresh signal, highest quality)
       +1 if GMGN smart money actively confirms direction
-      → min to enter: confidence >= 2
+      → min to enter: confidence >= 2 (max 4)
 
     Returns (direction, confidence, atr) or (None, 0, None).
     """
@@ -542,14 +547,18 @@ def get_signal(market):
         _st_prev[market] = st_bull  # consume flip so stale flip doesn't persist
         return None, 0, None
 
-    # ── Factor 2: RSI not exhausted ────────────────────────────────
-    rsi_ok = 35 < rsi < 65
-    if not rsi_ok:
-        _st_prev[market] = st_bull  # consume flip
+    # ── Factor 2: RSI exhaustion check ────────────────────────────
+    # Hard block only on clear exhaustion (overbought long or oversold short).
+    # Mid-range RSI adds a confidence point; extreme-but-not-exhausted passes with lower confidence.
+    rsi_exhausted = (trend == "long" and rsi > 78) or (trend == "short" and rsi < 22)
+    if rsi_exhausted:
+        _st_prev[market] = st_bull
         return None, 0, None
 
     # ── Confidence scoring ─────────────────────────────────────────
-    confidence = 1  # base: ST + EMA + RSI all agree
+    confidence = 1  # base: ST + EMA agree and RSI not exhausted
+    if 35 < rsi < 65:
+        confidence += 1  # RSI in neutral zone — momentum has room to run
 
     prev_bull = _st_prev.get(market)
     just_flipped = prev_bull is not None and prev_bull != st_bull
@@ -649,11 +658,13 @@ def _execute_zeta_order(market, side, size_usd, leverage) -> bool:
     return False
 
 # ── POSITION MANAGEMENT ───────────────────────────────────────────
-def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=None):
+def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=None, atr_pct=None):
     global _capital
     # Use ATR-based levels when provided, otherwise fall back to fixed config
     _sl = sl_pct if sl_pct is not None else DRIFT_SL_PCT
     _tp = tp_pct if tp_pct is not None else DRIFT_TP_PCT
+    # Trail distance = 1× ATR (same unit as SL so it scales with volatility)
+    _trail = atr_pct if atr_pct is not None else DRIFT_TRAIL_PCT
     if side == "long":
         tp = price * (1 + _tp)
         sl = price * (1 - _sl)
@@ -665,6 +676,7 @@ def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=N
         "market": market, "side": side, "entry": price,
         "size": size_usd, "leverage": leverage,
         "peak_price": price, "tp": tp, "sl": sl,
+        "trail_pct": _trail,
         "opened_at": time.time(), "pnl": 0.0, "paper": DRIFT_PAPER_MODE,
         "current_price": price,
     }
@@ -788,8 +800,14 @@ def close_position(market, exit_price, reason=""):
         else:
             s["losses"] += 1
         s["long_total" if pos["side"] == "long" else "short_total"] += 1
-        if market in _market_params:
-            _market_params[market]["last_result"] = "win" if won else "loss"
+        mp = _market_params.setdefault(market, {})
+        mp["last_result"] = "win" if won else "loss"
+        if not won:
+            # Brief cooldown after a loss — let the market settle before re-entering
+            existing_pause = mp.get("paused_until", 0)
+            loss_cooldown = time.time() + 900  # 15 min
+            if loss_cooldown > existing_pause:
+                mp["paused_until"] = loss_cooldown
         global _total_trades_ever
         _total_trades_ever += 1
         trade_count = _total_trades_ever  # use monotonic counter — len(_trades) caps at 200
@@ -824,13 +842,13 @@ def monitor_positions():
             if market not in _positions:
                 continue
             _positions[market]["pnl"] = raw_pct * notional
-            # Update trailing peak using live sl, not stale snapshot
+            trail = _positions[market].get("trail_pct", DRIFT_TRAIL_PCT)
             if pos["side"] == "long" and price > _positions[market]["peak_price"]:
                 _positions[market]["peak_price"] = price
-                _positions[market]["sl"] = max(_positions[market]["sl"], price * (1 - DRIFT_TRAIL_PCT))
+                _positions[market]["sl"] = max(_positions[market]["sl"], price * (1 - trail))
             elif pos["side"] == "short" and price < _positions[market]["peak_price"]:
                 _positions[market]["peak_price"] = price
-                _positions[market]["sl"] = min(_positions[market]["sl"], price * (1 + DRIFT_TRAIL_PCT))
+                _positions[market]["sl"] = min(_positions[market]["sl"], price * (1 + trail))
 
 def _check_milestones():
     with _state_lock:
@@ -974,12 +992,6 @@ def run_trading_loop():
                         log("info", f"{market} bias={bias} but signal={signal} — skip", "TUNE")
                         continue
 
-                    # ── Time window: only trade 10:00-22:00 UTC ───────────
-                    utc_hour = int(time.strftime("%H", time.gmtime()))
-                    if not (10 <= utc_hour < 22):
-                        log("info", f"{market} outside trading window ({utc_hour}:00 UTC) — skip")
-                        continue
-
                     price = get_market_price(market)
                     if not price:
                         continue
@@ -1014,10 +1026,9 @@ def run_trading_loop():
                             "ts": time.strftime("%H:%M:%S"), "price": price,
                         }
 
-                    # Open with ATR-based SL/TP overrides
+                    # Open with ATR-based SL/TP and ATR-based trailing stop
                     open_position(market, signal, price, size_usd, market_lev,
-                                  sl_pct=sl_pct, tp_pct=tp_pct)
-                    break  # one new position per cycle
+                                  sl_pct=sl_pct, tp_pct=tp_pct, atr_pct=atr_pct)
 
         except Exception as e:
             log("err", f"Loop error: {e}")
