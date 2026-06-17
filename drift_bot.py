@@ -10,8 +10,8 @@ DRIFT_EXCHANGE     = os.environ.get("DRIFT_EXCHANGE", "drift")
 DRIFT_LEVERAGE     = float(os.environ.get("DRIFT_LEVERAGE", "65"))     # midpoint; used as fallback
 DRIFT_LEV_MIN      = float(os.environ.get("DRIFT_LEV_MIN",  "50"))     # minimum leverage
 DRIFT_LEV_MAX      = float(os.environ.get("DRIFT_LEV_MAX",  "80"))     # maximum leverage
-DRIFT_MARGIN_USD   = float(os.environ.get("DRIFT_MARGIN_USD", "10"))   # fixed margin per trade ($)
-DRIFT_MAX_OPEN     = int(os.environ.get("DRIFT_MAX_OPEN", "3"))
+DRIFT_MARGIN_USD   = float(os.environ.get("DRIFT_MARGIN_USD", "400"))  # fixed margin per trade ($)
+DRIFT_MAX_OPEN     = int(os.environ.get("DRIFT_MAX_OPEN", "5"))
 DRIFT_TP_PCT       = float(os.environ.get("DRIFT_TP_PCT", "0.20"))
 DRIFT_SL_PCT       = float(os.environ.get("DRIFT_SL_PCT", "0.05"))
 DRIFT_TRAIL_PCT    = float(os.environ.get("DRIFT_TRAIL_PCT", "0.05"))
@@ -26,7 +26,7 @@ TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
 GMGN_API_KEY       = os.environ.get("GMGN_API_KEY", "")
 STARTING_CAPITAL   = float(os.environ.get("DRIFT_STARTING_CAPITAL", "100"))
 PROFIT_GOAL        = float(os.environ.get("DRIFT_PROFIT_GOAL", "10000"))
-DRIFT_TP_USD       = float(os.environ.get("DRIFT_TP_USD", "100"))   # close when PnL hits this $
+DRIFT_TP_USD       = float(os.environ.get("DRIFT_TP_USD",    str(DRIFT_MARGIN_USD * 2)))  # default: 2× margin
 DRIFT_SL_MARGIN_PCT = float(os.environ.get("DRIFT_SL_MARGIN_PCT", "0.75"))  # close when loss = 75% of margin
 DRIFT_TUNE_EVERY   = int(os.environ.get("DRIFT_TUNE_EVERY",   "3")) # retune after every N closed trades
 DRIFT_COMPOUND_PCT = float(os.environ.get("DRIFT_COMPOUND_PCT", "0.10"))  # % of profit reinvested
@@ -1012,7 +1012,7 @@ def run_trading_loop():
         except Exception as e:
             log("err", f"Loop error: {e}")
 
-        time.sleep(60)
+        time.sleep(30)
 
 # ── FLASK ROUTES ──────────────────────────────────────────────────
 _CURSOR = """<style>
