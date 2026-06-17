@@ -185,7 +185,7 @@ def _notify_worker():
         else:
             time.sleep(0.2)
 
-# ── PRICE FEEDS (Pyth primary → Binance fallback → Bybit last resort) ────────
+# ── PRICE FEEDS (Pyth primary → OKX fallback → Bybit last resort) ─────────────
 # Pyth Network feed IDs — the same oracle Drift Protocol uses for settlement.
 # Verified via https://hermes.pyth.network/v2/price_feeds
 _PYTH_FEEDS = {
@@ -204,25 +204,33 @@ _PYTH_FEEDS = {
     "TRUMP":  "879551021853eec7a7dc827578e8e69da7e4fa8148339aa0d3d5296405be4b1a",
     "JTO":    "b43660a5f790c69354b0729a5ef9d50d68f1df92107540210b9cccba1f947cc2",
     "JUP":    "0a0408d619e9380abad35060f9192039ed5042fa6f82301d0e48bb52be830996",
-    # HYPE, PYTH token, TIA, RNDR, ARB, ONDO, SEI fall through to Binance
+    "HYPE":   "4279e31cc369bbcc2faf022b382b080e32a8e689ff20fbc530d2a603eb6cd98b",
+    "TIA":    "09f7c1d7dfbb7df2b8fe3d3d87ee94a2259d212da4f30c1f0540d066dfa44723",
+    "ARB":    "3fa4252848f9f0a1480be62745a4629d9eb1322aebab8a791e344b3b9c1adcf5",
+    "RNDR":   "3d4a2bd9535be6ce8059d75eadeba507b043257321aa544717c56fa19b49e35d",
+    "SEI":    "53614f1cb0c031d4af66c04cb9c756234adad0e1cee85303795091499a4084eb",
+    "ONDO":   "d40472610abe56d36d065a0cf889fc8f1dd9f3b7f2a478231a5fc6df07ea5ce3",
+    # PYTH token falls through to OKX
 }
 
 _PYTH_HERMES  = "https://hermes.pyth.network/v2/updates/price/latest"
 
-# Binance symbols — fallback for markets not yet on Pyth
-_BINANCE_SYM = {
-    "SOL":    "SOLUSDT",  "BTC":  "BTCUSDT",  "ETH":   "ETHUSDT",
-    "XRP":    "XRPUSDT",  "DOGE": "DOGEUSDT", "AVAX":  "AVAXUSDT",
-    "SUI":    "SUIUSDT",  "BNB":  "BNBUSDT",  "BONK":  "BONKUSDT",
-    "WIF":    "WIFUSDT",  "PEPE": "PEPEUSDT", "POPCAT":"POPCATUSDT",
-    "TRUMP":  "TRUMPUSDT","SHIB": "SHIBUSDT", "JTO":   "JTOUSDT",
-    "JUP":    "JUPUSDT",  "PYTH": "PYTHUSDT", "TIA":   "TIAUSDT",
-    "RNDR":   "RNDRUSDT", "HYPE": "HYPEUSDT", "ARB":   "ARBUSDT",
-    "ONDO":   "ONDOUSDT", "SEI":  "SEIUSDT",
+# OKX perpetuals mark price — fallback for markets not on Pyth.
+# Uses perp mark prices (not spot) so they align with how Drift prices positions.
+_OKX_SYM = {
+    "SOL":    "SOL-USDT-SWAP",  "BTC":    "BTC-USDT-SWAP",  "ETH":    "ETH-USDT-SWAP",
+    "XRP":    "XRP-USDT-SWAP",  "DOGE":   "DOGE-USDT-SWAP", "AVAX":   "AVAX-USDT-SWAP",
+    "SUI":    "SUI-USDT-SWAP",  "BNB":    "BNB-USDT-SWAP",  "BONK":   "BONK-USDT-SWAP",
+    "WIF":    "WIF-USDT-SWAP",  "PEPE":   "PEPE-USDT-SWAP", "POPCAT": "POPCAT-USDT-SWAP",
+    "TRUMP":  "TRUMP-USDT-SWAP","JTO":    "JTO-USDT-SWAP",  "JUP":    "JUP-USDT-SWAP",
+    "HYPE":   "HYPE-USDT-SWAP", "TIA":    "TIA-USDT-SWAP",  "ARB":    "ARB-USDT-SWAP",
+    "RNDR":   "RENDER-USDT-SWAP","SEI":   "SEI-USDT-SWAP",  "ONDO":   "ONDO-USDT-SWAP",
+    "PYTH":   "PYTH-USDT-SWAP", "SHIB":   "SHIB-USDT-SWAP",
 }
 
-# Bybit last-resort fallback (same symbol convention)
-_BYBIT_SYM = dict(_BINANCE_SYM)
+# Bybit last-resort fallback (spot, same symbol convention as OKX minus -SWAP)
+_BYBIT_SYM = {k: v.replace("-USDT-SWAP", "USDT") for k, v in _OKX_SYM.items()}
+_BYBIT_SYM["RNDR"] = "RNDRUSDT"   # Bybit uses RNDR, not RENDER
 
 # Per-market price cache: {market: (price, fetched_at)}
 _price_cache      = {}
@@ -257,24 +265,30 @@ def _fetch_all_prices_pyth(markets):
     except Exception:
         return {}
 
-def _fetch_all_prices_binance(markets):
-    """Batch-fetch prices from Binance for markets missing from Pyth."""
-    syms = [_BINANCE_SYM[m] for m in markets if m in _BINANCE_SYM]
-    if not syms:
+def _fetch_all_prices_okx(markets):
+    """
+    Batch-fetch perpetuals mark prices from OKX in one request (all SWAP tickers).
+    Returns {market: price} for markets found. Uses perp mark price, not spot.
+    """
+    if not any(m in _OKX_SYM for m in markets):
         return {}
     try:
         r = _session.get(
-            "https://api.binance.com/api/v3/ticker/price",
-            params={"symbols": json.dumps(syms)},
-            timeout=8
+            "https://www.okx.com/api/v5/public/mark-price",
+            params={"instType": "SWAP"},
+            timeout=10
         )
         if r.status_code != 200:
             return {}
-        sym_to_price = {item["symbol"]: float(item["price"]) for item in r.json()}
+        sym_to_price = {
+            item["instId"]: float(item["markPx"])
+            for item in r.json().get("data", [])
+            if float(item.get("markPx", 0)) > 0
+        }
         return {
-            m: sym_to_price[_BINANCE_SYM[m]]
+            m: sym_to_price[_OKX_SYM[m]]
             for m in markets
-            if _BINANCE_SYM.get(m) in sym_to_price and sym_to_price[_BINANCE_SYM[m]] > 0
+            if _OKX_SYM.get(m) in sym_to_price
         }
     except Exception:
         return {}
@@ -304,16 +318,16 @@ def refresh_price_cache(markets):
     """
     Called once per trading loop tick.
     1. Pyth batch  — one request, all markets with known feed IDs
-    2. Binance batch — one request for remaining markets
+    2. OKX batch   — one request for remaining markets (perp mark prices)
     3. Bybit individual — last resort for anything still missing
     """
     now    = time.time()
     prices = _fetch_all_prices_pyth(markets)
 
-    # Binance fills in markets not on Pyth
+    # OKX fills in markets not on Pyth
     missing = [m for m in markets if m not in prices]
     if missing:
-        prices.update(_fetch_all_prices_binance(missing))
+        prices.update(_fetch_all_prices_okx(missing))
 
     # Bybit for anything still missing
     still_missing = [m for m in markets if m not in prices]
@@ -328,7 +342,7 @@ def refresh_price_cache(markets):
             _price_cache[market] = (price, now)
 
 def get_market_price(market):
-    """Return cached price if fresh, otherwise fetch individually via Pyth → Binance → Bybit."""
+    """Return cached price if fresh, otherwise fetch individually via Pyth → OKX → Bybit."""
     market = market.upper()
     with _price_cache_lock:
         cached = _price_cache.get(market)
@@ -349,21 +363,13 @@ def get_market_price(market):
                     return price
         except Exception:
             pass
-    sym = _BINANCE_SYM.get(market)
-    if sym:
-        try:
-            r = _session.get(
-                "https://api.binance.com/api/v3/ticker/price",
-                params={"symbol": sym}, timeout=8
-            )
-            if r.status_code == 200:
-                price = float(r.json().get("price", 0))
-                if price > 0:
-                    with _price_cache_lock:
-                        _price_cache[market] = (price, time.time())
-                    return price
-        except Exception:
-            pass
+    # OKX single-market fallback via the batch endpoint
+    okx_prices = _fetch_all_prices_okx([market])
+    if market in okx_prices:
+        price = okx_prices[market]
+        with _price_cache_lock:
+            _price_cache[market] = (price, time.time())
+        return price
     price = _fetch_price_bybit(market)
     if price:
         with _price_cache_lock:
@@ -373,33 +379,6 @@ def get_market_price(market):
 def get_sol_price():
     return get_market_price("SOL")
 
-
-    with _price_cache_lock:
-        cached = _price_cache.get(market)
-    if cached and (time.time() - cached[1]) < _PRICE_TTL:
-        return cached[0]
-    # Cache miss or stale — try Binance single then Bybit
-    sym = _BINANCE_SYM.get(market)
-    if sym:
-        try:
-            r = _session.get(
-                "https://api.binance.com/api/v3/ticker/price",
-                params={"symbol": sym},
-                timeout=8
-            )
-            if r.status_code == 200:
-                price = float(r.json().get("price", 0))
-                if price > 0:
-                    with _price_cache_lock:
-                        _price_cache[market] = (price, time.time())
-                    return price
-        except Exception:
-            pass
-    price = _fetch_price_bybit(market)
-    if price:
-        with _price_cache_lock:
-            _price_cache[market] = (price, time.time())
-    return price
 
 def get_sol_price():
     return get_market_price("SOL")
