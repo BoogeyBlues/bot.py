@@ -1,4 +1,4 @@
-import os, time, threading, requests, json
+import os, time, threading, requests, json, hmac, hashlib
 from collections import deque
 from flask import Flask, jsonify, request as flask_request
 
@@ -32,6 +32,9 @@ DRIFT_TUNE_EVERY   = int(os.environ.get("DRIFT_TUNE_EVERY",   "3")) # retune aft
 DRIFT_COMPOUND_PCT = float(os.environ.get("DRIFT_COMPOUND_PCT", "0.10"))  # % of profit reinvested
 REDIS_URL          = os.environ.get("UPSTASH_REDIS_REST_URL", "")
 REDIS_TOKEN        = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
+BYBIT_API_KEY      = os.environ.get("BYBIT_API_KEY", "")
+BYBIT_API_SECRET   = os.environ.get("BYBIT_API_SECRET", "")
+BYBIT_BASE_URL     = "https://api.bybit.com"
 
 MILESTONES = [250, 500, 1000, 2500, 5000, 10000, 25000]
 
@@ -634,6 +637,87 @@ def _execute_zeta_order(market, side, size_usd, leverage) -> bool:
         log("err", f"Zeta order error: {e}")
     return False
 
+# ── BYBIT EXECUTION ──────────────────────────────────────────────
+def _bybit_headers(ts, body_str):
+    recv = "5000"
+    sig  = hmac.new(BYBIT_API_SECRET.encode(),
+                    f"{ts}{BYBIT_API_KEY}{recv}{body_str}".encode(),
+                    hashlib.sha256).hexdigest()
+    return {
+        "X-BAPI-API-KEY":     BYBIT_API_KEY,
+        "X-BAPI-SIGN":        sig,
+        "X-BAPI-SIGN-TYPE":   "2",
+        "X-BAPI-TIMESTAMP":   ts,
+        "X-BAPI-RECV-WINDOW": recv,
+        "Content-Type":       "application/json",
+    }
+
+def _bybit_qty(price, size_usd):
+    qty = size_usd / price
+    if price >= 100:
+        return round(qty, 3)
+    if price >= 1:
+        return round(qty, 1)
+    if price >= 0.001:
+        return int(qty)
+    return int(qty / 1000) * 1000  # PEPE/BONK — nearest thousand
+
+def _execute_bybit_order(market, side, size_usd, leverage) -> bool:
+    if not BYBIT_API_KEY or not BYBIT_API_SECRET:
+        log("err", "BYBIT_API_KEY / BYBIT_API_SECRET not set")
+        return False
+    symbol = _BYBIT_SYM.get(market.upper())
+    if not symbol:
+        log("err", f"No Bybit symbol for {market}")
+        return False
+    price = get_market_price(market)
+    if not price:
+        log("err", f"Cannot get price for {market}")
+        return False
+    qty = _bybit_qty(price, size_usd)
+    # set leverage (non-fatal)
+    ts       = str(int(time.time() * 1000))
+    lev_body = json.dumps({"category": "linear", "symbol": symbol,
+                            "buyLeverage": str(int(leverage)),
+                            "sellLeverage": str(int(leverage))})
+    try:
+        _session.post(f"{BYBIT_BASE_URL}/v5/position/set-leverage",
+                      headers=_bybit_headers(ts, lev_body),
+                      data=lev_body, timeout=10)
+    except Exception:
+        pass
+    # place market order
+    ts         = str(int(time.time() * 1000))
+    order_body = json.dumps({"category": "linear", "symbol": symbol,
+                              "side": "Buy" if side == "long" else "Sell",
+                              "orderType": "Market", "qty": str(qty)})
+    r    = _session.post(f"{BYBIT_BASE_URL}/v5/order/create",
+                         headers=_bybit_headers(ts, order_body),
+                         data=order_body, timeout=15)
+    data = r.json()
+    if data.get("retCode") != 0:
+        log("err", f"Bybit order failed: {data.get('retMsg')} [{data.get('retCode')}]", market)
+        return False
+    log("ok", f"Bybit {side} {market} qty={qty} orderId={data['result'].get('orderId','')[:16]}", market)
+    return True
+
+def _close_bybit_position(market, side) -> bool:
+    symbol = _BYBIT_SYM.get(market.upper())
+    if not symbol or not BYBIT_API_KEY:
+        return False
+    ts   = str(int(time.time() * 1000))
+    body = json.dumps({"category": "linear", "symbol": symbol,
+                       "side": "Sell" if side == "long" else "Buy",
+                       "orderType": "Market", "qty": "0", "reduceOnly": True})
+    r    = _session.post(f"{BYBIT_BASE_URL}/v5/order/create",
+                         headers=_bybit_headers(ts, body),
+                         data=body, timeout=15)
+    data = r.json()
+    if data.get("retCode") != 0:
+        log("err", f"Bybit close failed: {data.get('retMsg')}", market)
+        return False
+    return True
+
 # ── POSITION MANAGEMENT ───────────────────────────────────────────
 def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=None, atr_pct=None):
     global _capital
@@ -672,8 +756,12 @@ def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=N
             return
 
     if not DRIFT_PAPER_MODE:
-        ok = _execute_zeta_order(market, side, size_usd, leverage) if DRIFT_EXCHANGE == "zeta" \
-             else _execute_drift_order(market, side, size_usd, leverage)
+        if DRIFT_EXCHANGE == "zeta":
+            ok = _execute_zeta_order(market, side, size_usd, leverage)
+        elif DRIFT_EXCHANGE == "bybit":
+            ok = _execute_bybit_order(market, side, size_usd, leverage)
+        else:
+            ok = _execute_drift_order(market, side, size_usd, leverage)
         if not ok:
             log("err", f"Exchange order failed for {market} — position NOT opened")
             return
@@ -705,6 +793,8 @@ def close_position(market, exit_price, reason=""):
         pos = _positions.pop(market, None)
     if not pos:
         return
+    if not DRIFT_PAPER_MODE and DRIFT_EXCHANGE == "bybit":
+        _close_bybit_position(market, pos["side"])
 
     if pos["side"] == "long":
         pnl_pct = (exit_price - pos["entry"]) / pos["entry"]
@@ -2286,7 +2376,11 @@ setInterval(pollLogs, 3000);
 # ── ENTRY POINT ───────────────────────────────────────────────────
 if __name__ == "__main__":
     if not DRIFT_PAPER_MODE:
-        if not WALLET or not WALLET_PRIVATE_KEY:
+        if DRIFT_EXCHANGE == "bybit":
+            if not BYBIT_API_KEY or not BYBIT_API_SECRET:
+                print("[FATAL] DRIFT_EXCHANGE=bybit requires BYBIT_API_KEY and BYBIT_API_SECRET. Exiting.")
+                raise SystemExit(1)
+        elif not WALLET or not WALLET_PRIVATE_KEY:
             print("[FATAL] DRIFT_PAPER_MODE=false requires WALLET and WALLET_PRIVATE_KEY. Exiting.")
             raise SystemExit(1)
 
