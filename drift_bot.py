@@ -718,6 +718,235 @@ def _close_bybit_position(market, side) -> bool:
         return False
     return True
 
+# ── JUPITER PERPS EXECUTION ────────────────────────────────────────
+# Markets: SOL, ETH, BTC only (JLP pool composition)
+_JPERP_PROGRAM   = "PERPHjGBqRHArX4DySjwM6UJHiR3sWAatqfdBS2qQJu"
+_JPERP_POOL      = "5BUwFW4nRbftYTDMbgxykoFWqWHPzahFSNAaaaJtVKsq"
+_JPERP_EVT_AUTH  = "37hJBDnntwqhGbK7L6M1bLyvccj4u55CCUiLPdYkiqBN"
+_JPERP_CUSTODIES = {   # on-chain custody PDAs
+    "SOL": "7xS2gz2bTp3fwCC7knJvUWTEU9Tycczu6VhJYKgi1wdz",
+    "ETH": "AQCGyheWPLeo6Qp9WpYS9m3Qj479t7R636N9ey1rEjEn",
+    "BTC": "5Pv3gM9JrFFH883SWAhvJC9RPYmo8UNxuFtv5bMMALkm",
+}
+_JPERP_MINTS     = {   # token mint addresses on Solana
+    "SOL": "So11111111111111111111111111111111111111112",
+    "ETH": "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",  # Wormhole ETH
+    "BTC": "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh",  # Wormhole wBTC
+}
+_JPERP_DECIMALS  = {"SOL": 9, "ETH": 8, "BTC": 8}
+_JPERP_USDC_CUST = "G18jKKXQwBbrHeiK3C9MRXhkHsLHf7XgCSisykV46EZa"
+_JPERP_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+_JPERP_MARKETS   = {"SOL", "ETH", "BTC"}
+
+# System programs
+_SYS_PROG  = "11111111111111111111111111111111"
+_TOK_PROG  = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+_ATOK_PROG = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bsT"
+
+
+def _jperp_ata(owner_pk, mint_pk):
+    """Derive the Associated Token Account address (no spl-token dependency)."""
+    from solders.pubkey import Pubkey
+    ata, _ = Pubkey.find_program_address(
+        [bytes(owner_pk), bytes(Pubkey.from_string(_TOK_PROG)), bytes(mint_pk)],
+        Pubkey.from_string(_ATOK_PROG)
+    )
+    return ata
+
+
+def _execute_jupiter_perp_order(market, side, size_usd, leverage) -> bool:
+    mkt = market.upper()
+    if mkt not in _JPERP_MARKETS:
+        log("err", f"Jupiter Perps: {market} not supported — only SOL/ETH/BTC")
+        return False
+    try:
+        from anchorpy import Program, Provider, Wallet, Context
+        from solders.keypair import Keypair
+        from solders.pubkey import Pubkey
+        from solana.rpc.async_api import AsyncClient
+        import asyncio
+
+        kp = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+
+        async def _place():
+            conn = AsyncClient(SOL_RPC)
+            try:
+                prog_id    = Pubkey.from_string(_JPERP_PROGRAM)
+                pool       = Pubkey.from_string(_JPERP_POOL)
+                evt_auth   = Pubkey.from_string(_JPERP_EVT_AUTH)
+                custody    = Pubkey.from_string(_JPERP_CUSTODIES[mkt])
+                usdc_cust  = Pubkey.from_string(_JPERP_USDC_CUST)
+                usdc_mint  = Pubkey.from_string(_JPERP_USDC_MINT)
+                owner      = kp.pubkey()
+
+                # Longs: collateral stored in the token itself; shorts: USDC
+                col_cust = custody if side == "long" else usdc_cust
+
+                # PDA derivations
+                [perps_pda, _] = Pubkey.find_program_address([b"perpetuals"], prog_id)
+                [pos_pda,   _] = Pubkey.find_program_address(
+                    [b"position", bytes(owner), bytes(pool), bytes(custody), bytes(col_cust)],
+                    prog_id
+                )
+                # time-based counter → unique request PDA per call
+                counter = int(time.time() * 1000) % (2 ** 63)
+                [req_pda, _] = Pubkey.find_program_address(
+                    [b"position_request", bytes(owner), counter.to_bytes(8, "little")],
+                    prog_id
+                )
+
+                # Token accounts (we always fund from owner's USDC ATA)
+                funding_ata = _jperp_ata(owner, usdc_mint)
+                req_ata     = _jperp_ata(req_pda, usdc_mint)
+
+                # Parameters scaled to 6 decimal places
+                margin_u6 = int(DRIFT_MARGIN_USD * 1_000_000)
+                size_u6   = int(size_usd * 1_000_000)
+                slippage  = 10_000  # 1% in units of 10^-6
+
+                # For longs: USDC is swapped → token internally; provide min-out
+                price = get_market_price(mkt)
+                if not price:
+                    raise ValueError(f"No price for {mkt}")
+                if side == "long":
+                    tok_units = (DRIFT_MARGIN_USD / price) * (10 ** _JPERP_DECIMALS[mkt])
+                    jup_min   = int(tok_units * 0.99)   # 1% slippage buffer
+                else:
+                    jup_min = None  # USDC used directly for shorts
+
+                side_enum = {"long": {}} if side == "long" else {"short": {}}
+
+                provider = Provider(conn, Wallet(kp))
+                idl      = await Program.fetch_idl(prog_id, provider)
+                if not idl:
+                    raise RuntimeError("Jupiter Perps IDL not available on-chain")
+                program  = Program(idl, prog_id, provider)
+
+                await program.rpc["create_increase_position_market_request"](
+                    counter,
+                    margin_u6,   # collateralTokenDelta
+                    jup_min,     # jupiterMinimumOut  (None = no swap for shorts)
+                    slippage,    # priceSlippage
+                    side_enum,   # side
+                    size_u6,     # sizeUsdDelta
+                    ctx=Context(accounts={
+                        "custody":                   custody,
+                        "collateral_custody":         col_cust,
+                        "funding_account":            funding_ata,
+                        "input_mint":                 usdc_mint,
+                        "owner":                      owner,
+                        "perpetuals":                 perps_pda,
+                        "pool":                       pool,
+                        "position":                   pos_pda,
+                        "position_request":           req_pda,
+                        "position_request_ata":       req_ata,
+                        "referral":                   None,
+                        "system_program":             Pubkey.from_string(_SYS_PROG),
+                        "token_program":              Pubkey.from_string(_TOK_PROG),
+                        "associated_token_program":   Pubkey.from_string(_ATOK_PROG),
+                        "event_authority":            evt_auth,
+                        "program":                    prog_id,
+                    }, signers=[kp])
+                )
+                log("ok", f"Jupiter Perps {side} {mkt} size=${size_usd:.0f} lev={leverage}x — keeper request submitted", mkt)
+                return True
+            finally:
+                await conn.close()
+
+        return asyncio.run(_place())
+    except ImportError:
+        log("err", "anchorpy not installed — run: pip install anchorpy")
+        return False
+    except Exception as e:
+        log("err", f"Jupiter Perps open error: {e}", market)
+        return False
+
+
+def _close_jupiter_perp_position(market, side, size_usd) -> bool:
+    mkt = market.upper()
+    if mkt not in _JPERP_MARKETS:
+        return False
+    try:
+        from anchorpy import Program, Provider, Wallet, Context
+        from solders.keypair import Keypair
+        from solders.pubkey import Pubkey
+        from solana.rpc.async_api import AsyncClient
+        import asyncio
+
+        kp = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+
+        async def _close():
+            conn = AsyncClient(SOL_RPC)
+            try:
+                prog_id   = Pubkey.from_string(_JPERP_PROGRAM)
+                pool      = Pubkey.from_string(_JPERP_POOL)
+                evt_auth  = Pubkey.from_string(_JPERP_EVT_AUTH)
+                custody   = Pubkey.from_string(_JPERP_CUSTODIES[mkt])
+                usdc_cust = Pubkey.from_string(_JPERP_USDC_CUST)
+                usdc_mint = Pubkey.from_string(_JPERP_USDC_MINT)
+                owner     = kp.pubkey()
+
+                col_cust = custody if side == "long" else usdc_cust
+
+                [perps_pda, _] = Pubkey.find_program_address([b"perpetuals"], prog_id)
+                [pos_pda,   _] = Pubkey.find_program_address(
+                    [b"position", bytes(owner), bytes(pool), bytes(custody), bytes(col_cust)],
+                    prog_id
+                )
+                counter = int(time.time() * 1000) % (2 ** 63)
+                [req_pda, _] = Pubkey.find_program_address(
+                    [b"position_request", bytes(owner), counter.to_bytes(8, "little")],
+                    prog_id
+                )
+
+                recv_ata = _jperp_ata(owner, usdc_mint)   # receive USDC on close
+                req_ata  = _jperp_ata(req_pda, usdc_mint)
+
+                size_u6   = int(size_usd * 1_000_000)
+                slippage  = 10_000
+                side_enum = {"long": {}} if side == "long" else {"short": {}}
+
+                provider = Provider(conn, Wallet(kp))
+                idl      = await Program.fetch_idl(prog_id, provider)
+                if not idl:
+                    raise RuntimeError("Jupiter Perps IDL not available on-chain")
+                program  = Program(idl, prog_id, provider)
+
+                await program.rpc["create_decrease_position_market_request"](
+                    counter,
+                    0,           # collateralTokenDelta: 0 = release all collateral
+                    size_u6,     # sizeUsdDelta: full position size
+                    side_enum,
+                    slippage,
+                    usdc_mint,   # desiredMint: receive USDC back
+                    ctx=Context(accounts={
+                        "custody":                   custody,
+                        "collateral_custody":         col_cust,
+                        "owner":                      owner,
+                        "pool":                       pool,
+                        "perpetuals":                 perps_pda,
+                        "position":                   pos_pda,
+                        "position_request":           req_pda,
+                        "position_request_ata":       req_ata,
+                        "receiving_account":          recv_ata,
+                        "referral":                   None,
+                        "system_program":             Pubkey.from_string(_SYS_PROG),
+                        "token_program":              Pubkey.from_string(_TOK_PROG),
+                        "associated_token_program":   Pubkey.from_string(_ATOK_PROG),
+                        "event_authority":            evt_auth,
+                        "program":                    prog_id,
+                    }, signers=[kp])
+                )
+                log("ok", f"Jupiter Perps close {side} {mkt} — keeper request submitted", mkt)
+                return True
+            finally:
+                await conn.close()
+
+        return asyncio.run(_close())
+    except Exception as e:
+        log("err", f"Jupiter Perps close error: {e}", market)
+        return False
+
 # ── POSITION MANAGEMENT ───────────────────────────────────────────
 def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=None, atr_pct=None):
     global _capital
@@ -760,6 +989,8 @@ def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=N
             ok = _execute_zeta_order(market, side, size_usd, leverage)
         elif DRIFT_EXCHANGE == "bybit":
             ok = _execute_bybit_order(market, side, size_usd, leverage)
+        elif DRIFT_EXCHANGE == "jupiter":
+            ok = _execute_jupiter_perp_order(market, side, size_usd, leverage)
         else:
             ok = _execute_drift_order(market, side, size_usd, leverage)
         if not ok:
@@ -793,8 +1024,11 @@ def close_position(market, exit_price, reason=""):
         pos = _positions.pop(market, None)
     if not pos:
         return
-    if not DRIFT_PAPER_MODE and DRIFT_EXCHANGE == "bybit":
-        _close_bybit_position(market, pos["side"])
+    if not DRIFT_PAPER_MODE:
+        if DRIFT_EXCHANGE == "bybit":
+            _close_bybit_position(market, pos["side"])
+        elif DRIFT_EXCHANGE == "jupiter":
+            _close_jupiter_perp_position(market, pos["side"], pos["size"])
 
     if pos["side"] == "long":
         pnl_pct = (exit_price - pos["entry"]) / pos["entry"]
@@ -1041,6 +1275,10 @@ def run_trading_loop():
 
             if n_open < DRIFT_MAX_OPEN:
                 for market in markets:
+                    # Jupiter Perps only supports SOL/ETH/BTC — skip others silently
+                    if DRIFT_EXCHANGE == "jupiter" and market.upper() not in _JPERP_MARKETS:
+                        continue
+
                     with _state_lock:
                         already_open = market in _positions
                         mparams = dict(_market_params.get(market, {}))
@@ -2380,6 +2618,22 @@ if __name__ == "__main__":
             if not BYBIT_API_KEY or not BYBIT_API_SECRET:
                 print("[FATAL] DRIFT_EXCHANGE=bybit requires BYBIT_API_KEY and BYBIT_API_SECRET. Exiting.")
                 raise SystemExit(1)
+        elif DRIFT_EXCHANGE == "jupiter":
+            if not WALLET_PRIVATE_KEY:
+                print("[FATAL] DRIFT_EXCHANGE=jupiter requires WALLET_PRIVATE_KEY. Exiting.")
+                raise SystemExit(1)
+            try:
+                import anchorpy  # noqa: F401
+            except ImportError:
+                print("[FATAL] DRIFT_EXCHANGE=jupiter requires anchorpy — run: pip install anchorpy. Exiting.")
+                raise SystemExit(1)
+            active_mkts = [m.strip().upper() for m in DRIFT_MARKETS.split(",") if m.strip().upper() in _JPERP_MARKETS]
+            if not active_mkts:
+                print("[FATAL] DRIFT_MARKETS has no Jupiter-supported markets (SOL/ETH/BTC). Exiting.")
+                raise SystemExit(1)
+            skipped = [m.strip().upper() for m in DRIFT_MARKETS.split(",") if m.strip().upper() not in _JPERP_MARKETS]
+            if skipped:
+                print(f"[WARN] Jupiter Perps does not support {skipped} — those markets will be skipped")
         elif not WALLET or not WALLET_PRIVATE_KEY:
             print("[FATAL] DRIFT_PAPER_MODE=false requires WALLET and WALLET_PRIVATE_KEY. Exiting.")
             raise SystemExit(1)
