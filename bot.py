@@ -94,6 +94,8 @@ GRAD_MODE        = os.environ.get("GRAD_MODE", "true").lower() == "true"
 GRAD_MAX_AGE_H   = float(os.environ.get("GRAD_MAX_AGE_H",   "4"))     # only tokens graduated in last 4h
 GRAD_MIN_LIQ     = float(os.environ.get("GRAD_MIN_LIQ",     "15000")) # min $15k liquidity
 GRAD_MIN_1H_PCT  = float(os.environ.get("GRAD_MIN_1H_PCT",  "10"))    # min +10% 1h momentum
+GRAD_MIN_5M_PCT  = float(os.environ.get("GRAD_MIN_5M_PCT",  "-5"))    # reject if dumping >5% in last 5m
+GRAD_MIN_VOL_24H = float(os.environ.get("GRAD_MIN_VOL_24H", "10000")) # min $10k 24h volume
 GRAD_MIN_VOL_LIQ = float(os.environ.get("GRAD_MIN_VOL_LIQ", "0.5"))   # min volume/liq ratio
 GRAD_TP_PCT      = float(os.environ.get("GRAD_TP_PCT",      "30"))
 GRAD_SL_PCT      = float(os.environ.get("GRAD_SL_PCT",      "12"))
@@ -881,10 +883,17 @@ def get_market_data(mint):
         if not pairs:
             return None
         pair = max(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
+        vol  = pair.get("volume", {})
+        pc   = pair.get("priceChange", {})
         return {
             "price":        float(pair.get("priceUsd", 0) or 0),
             "liq":          float(pair.get("liquidity", {}).get("usd", 0) or 0),
-            "change1h":     float(pair.get("priceChange", {}).get("h1", 0) or 0),
+            "change5m":     float(pc.get("m5", 0) or 0),
+            "change1h":     float(pc.get("h1",  0) or 0),
+            "change6h":     float(pc.get("h6",  0) or 0),
+            "vol_h1":       float(vol.get("h1",  0) or 0),
+            "vol_h6":       float(vol.get("h6",  0) or 0),
+            "vol_h24":      float(vol.get("h24", 0) or 0),
             "age_h":        (time.time() - float(pair.get("pairCreatedAt", time.time() * 1000)) / 1000) / 3600,
             "pair_address": pair.get("pairAddress", ""),
             "symbol":       pair.get("baseToken", {}).get("symbol", ""),
@@ -1979,8 +1988,8 @@ def scanner_loop():
                 # Active trading: last trade within 30 minutes
                 last_trade = coin.get("last_trade", 0)
                 secs_since = (time.time() - last_trade / 1000) if last_trade > 0 else 9999
-                if secs_since > 1800:
-                    log("info", f"SKIP stale: last trade {secs_since/60:.0f}m ago bond={coin.get('bond_pct',0):.0f}%", symbol)
+                if secs_since > 300:
+                    log("info", f"SKIP stale: last trade {secs_since:.0f}s ago bond={coin.get('bond_pct',0):.0f}%", symbol)
                     continue
                 n_replies += 1  # reuse counter — now means "recently active"
 
@@ -2156,22 +2165,18 @@ def scanner_loop():
                             continue
                         if market["change1h"] < GRAD_MIN_1H_PCT:
                             continue
-
-                        # Volume/liquidity ratio filter (avoids thin illiquid pairs)
-                        try:
-                            res_ds = _session.get(
-                                f"https://api.dexscreener.com/latest/dex/tokens/{mint}",
-                                timeout=8
-                            )
-                            pairs = [p for p in res_ds.json().get("pairs", []) if p.get("chainId") == "solana"]
-                            if pairs:
-                                best = max(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
-                                vol24h = float(best.get("volume", {}).get("h24", 0) or 0)
-                                liq    = float(best.get("liquidity", {}).get("usd", 1) or 1)
-                                if liq > 0 and (vol24h / liq) < GRAD_MIN_VOL_LIQ:
-                                    continue
-                        except Exception:
-                            pass
+                        # 5-minute momentum: reject if actively dumping right now
+                        if market["change5m"] < GRAD_MIN_5M_PCT:
+                            log("info", f"SKIP stale: 5m={market['change5m']:+.1f}% (dumping)", symbol)
+                            continue
+                        # 24h volume: reject coins with near-zero real trading activity
+                        if market["vol_h24"] < GRAD_MIN_VOL_24H:
+                            log("info", f"SKIP stale: vol24h=${market['vol_h24']:.0f} < ${GRAD_MIN_VOL_24H:.0f}", symbol)
+                            continue
+                        # Volume/liquidity ratio (avoids thin illiquid pairs)
+                        if market["liq"] > 0 and (market["vol_h24"] / market["liq"]) < GRAD_MIN_VOL_LIQ:
+                            log("info", f"SKIP thin: vol/liq={market['vol_h24']/market['liq']:.2f}", symbol)
+                            continue
 
                         if gmgn_smart_money_selling(mint):
                             log("warn", "SKIP: smart money selling", symbol)
