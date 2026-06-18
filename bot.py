@@ -618,6 +618,9 @@ def daily_summary_loop():
         time.sleep(secs_to_midnight + 5)
         _reset_daily_if_needed()  # ensure today's entry is in week_day_logs before counting
         _send_daily_summary()
+        if COPY_PINNED_WALLETS:
+            time.sleep(5)
+            _send_wallet_report()
         # Weekly deep report every 7 days — then keeps running
         if len(_week_day_logs) > 0 and len(_week_day_logs) % 7 == 0:
             time.sleep(10)
@@ -1761,7 +1764,80 @@ def fetch_smart_wallets():
     except Exception as e:
         log("warn", f"fetch_smart_wallets: {e}", "COPY")
 
-def copy_trade_loop():
+_GMGN_WALLET_STATS = "https://gmgn.ai/defi/quotation/v1/smartmoney/sol/walletNew"
+
+def fetch_pinned_wallet_stats():
+    """
+    Fetch 7-day performance stats for every pinned wallet from GMGN.
+    Returns list of dicts with address, winrate, realized_profit, trades, last_active.
+    """
+    if not COPY_PINNED_WALLETS:
+        return []
+    hdrs = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept":     "application/json",
+        "Referer":    "https://gmgn.ai/",
+        "Origin":     "https://gmgn.ai",
+    }
+    if GMGN_API_KEY:
+        hdrs["Authorization"] = f"Bearer {GMGN_API_KEY}"
+    results = []
+    for addr in COPY_PINNED_WALLETS:
+        try:
+            r = _session.get(
+                f"{_GMGN_WALLET_STATS}/{addr}",
+                params={"period": "7d"},
+                headers=hdrs,
+                timeout=10
+            )
+            if r.status_code != 200:
+                results.append({"address": addr, "error": r.status_code})
+                continue
+            d = r.json().get("data", {})
+            wr_raw = float(d.get("winrate", 0) or 0)
+            wr     = wr_raw * 100 if wr_raw <= 1 else wr_raw
+            realized   = float(d.get("realized_profit",   0) or 0)
+            unrealized = float(d.get("unrealized_profit", 0) or 0)
+            trades     = int(d.get("buy_30d", 0) or d.get("txs_count", 0) or 0)
+            last_ts    = int(d.get("last_active_timestamp", 0) or 0)
+            last_active = time.strftime("%m/%d %H:%M", time.localtime(last_ts)) if last_ts else "unknown"
+            results.append({
+                "address":    addr,
+                "winrate":    round(wr, 1),
+                "realized":   round(realized, 2),
+                "unrealized": round(unrealized, 2),
+                "trades":     trades,
+                "last_active": last_active,
+            })
+            time.sleep(0.5)  # avoid hammering GMGN
+        except Exception as e:
+            results.append({"address": addr, "error": str(e)})
+    return results
+
+def _send_wallet_report():
+    """Send daily Telegram report ranking the pinned wallets by 7d realized profit."""
+    stats = fetch_pinned_wallet_stats()
+    if not stats:
+        return
+    # Sort by realized profit descending; errors go to bottom
+    stats.sort(key=lambda x: x.get("realized", -999999), reverse=True)
+    lines = ["📊 *Wallet Watch — 7d Report*\n"]
+    for i, w in enumerate(stats, 1):
+        addr  = w["address"]
+        short = f"`{addr[:6]}...{addr[-4:]}`"
+        if "error" in w:
+            lines.append(f"{i}. {short}\n   ⚠️ No data ({w['error']})")
+        else:
+            pnl_sign = "+" if w["realized"] >= 0 else ""
+            lines.append(
+                f"{i}. {short}\n"
+                f"   WR: {w['winrate']}% | PnL: {pnl_sign}${w['realized']:,.0f} | Trades: {w['trades']}\n"
+                f"   Last active: {w['last_active']}"
+            )
+    notify("📊 Wallet Rankings", "\n".join(lines))
+    log("ok", f"Sent daily wallet report for {len(stats)} pinned wallets", "COPY")
+
+
     time.sleep(15)
     fetch_smart_wallets()
     while scan_active:
