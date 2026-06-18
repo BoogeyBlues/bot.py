@@ -760,93 +760,81 @@ def auto_tune(history):
     finally:
         _tune_lock.release()
 
-# ── PUMP.FUN COINS ───────────────────────────────────────────────
-def get_pumpfun_coins():
-    endpoints = [
-        "https://frontend-api-v3.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false",
-        "https://frontend-api-v3.pump.fun/coins/currently-live?offset=0&limit=50&includeNsfw=false&order=DESC",
-        "https://frontend-api-v2.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false",
-    ]
-    headers = {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
-        "Accept": "application/json",
-        "Referer": "https://pump.fun/",
-        "Origin": "https://pump.fun",
-    }
-    for url in endpoints:
-        try:
-            res = _session.get(url, headers=headers, timeout=10)
-            if res.status_code != 200:
-                continue
-            data  = res.json()
-            items = data if isinstance(data, list) else data.get("coins", [])
-            if not items:
-                continue
-            coins = []
-            for coin in items[:50]:
-                mint  = coin.get("mint", "")
-                vsol  = float(coin.get("virtual_sol_reserves", 0) or 0)
-                bond  = min((vsol / 85_000_000_000) * 100, 99.9) if vsol > 0 else 0
-                if mint and not coin.get("complete", False):
-                    coins.append({
-                        "mint":       mint,
-                        "symbol":     coin.get("symbol", mint[:8]),
-                        "bond_pct":   round(bond, 1),
-                        "twitter":    bool(coin.get("twitter")),
-                        "telegram":   bool(coin.get("telegram")),
-                        "dev":        coin.get("creator", ""),
-                        "replies":    int(coin.get("reply_count", 0) or 0),
-                        "created_at":   int(coin.get("created_timestamp", 0) or 0),
-                        "last_trade":   int(coin.get("last_trade_timestamp", 0) or 0),
-                        "complete":     False,
-                    })
-            log("info", f"pump.fun API: {len(coins)} live coins")
-            return coins
-        except Exception as e:
-            log("warn", f"Endpoint failed: {e}")
-    return []
+# ── GMGN COIN DISCOVERY ──────────────────────────────────────────
+def get_gmgn_coins():
+    """
+    Pull candidate coins from all 4 GMGN feeds in one function.
+    Covers all Solana tokens (Raydium, Meteora, Orca, Jupiter, PumpFun)
+    — broader scope than the old PumpFun-only API.
 
-def get_graduated_coins():
-    """Return recently graduated pump.fun tokens now trading on Raydium."""
-    endpoints = [
-        "https://frontend-api-v3.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false",
-        "https://frontend-api-v2.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false",
-    ]
-    headers = {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
-        "Accept": "application/json",
-        "Referer": "https://pump.fun/",
-        "Origin": "https://pump.fun",
+    Returns (active_coins, graduated_coins) where:
+      active_coins    — still on bonding curve or fresh listings
+      graduated_coins — complete=True or established tokens (for grad runner)
+    """
+    hdrs = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept":     "application/json",
+        "Referer":    "https://gmgn.ai/",
+        "Origin":     "https://gmgn.ai",
     }
-    for url in endpoints:
+    if GMGN_API_KEY:
+        hdrs["Authorization"] = f"Bearer {GMGN_API_KEY}"
+
+    seen  = {}   # mint → coin dict  (dedup across feeds)
+    feeds = [
+        (GMGN_COMPLETING_URL,  "completing", {"limit": 50}),
+        (GMGN_TRENDING_URL,    "trending",   {"limit": 50, "orderby": "volume", "direction": "desc"}),
+        (GMGN_HOT_SEARCH_URL,  "hot_search", {"limit": 30}),
+        (GMGN_NEW_PAIRS_URL,   "new_pairs",  {"limit": 30}),
+    ]
+
+    for url, label, params in feeds:
         try:
-            res = _session.get(url, headers=headers, timeout=10)
-            if res.status_code != 200:
+            r = _session.get(url, headers=hdrs, params=params, timeout=10)
+            if r.status_code != 200:
+                log("warn", f"GMGN {label}: {r.status_code}")
                 continue
-            data  = res.json()
-            items = data if isinstance(data, list) else data.get("coins", [])
-            if not items:
-                continue
-            coins = []
-            for coin in items[:50]:
-                mint = coin.get("mint", "")
-                if mint and coin.get("complete", False):
-                    coins.append({
-                        "mint":       mint,
-                        "symbol":     coin.get("symbol", mint[:8]),
-                        "twitter":    bool(coin.get("twitter")),
-                        "telegram":   bool(coin.get("telegram")),
-                        "dev":        coin.get("creator", ""),
-                        "created_at": int(coin.get("created_timestamp", 0) or 0),
-                        "last_trade": int(coin.get("last_trade_timestamp", 0) or 0),
-                        "complete":   True,
-                    })
-            if coins:
-                log("info", f"pump.fun API: {len(coins)} graduated coins")
-                return coins
+            data  = r.json().get("data", {})
+            items = data.get("tokens") or data.get("rank") or data.get("pairs") or []
+            if isinstance(items, dict):
+                items = list(items.values())
+            for item in items:
+                mint = item.get("address") or item.get("mint", "")
+                if not mint or mint in seen:
+                    continue
+                # Bond % — completing feed populates this; others default 0 (unknown/graduated)
+                bond_raw = float(
+                    item.get("bond_progress") or
+                    item.get("bondingCurveProgress") or
+                    item.get("king_of_hill_progress") or 0
+                )
+                # Timestamps — GMGN may be seconds or ms; normalise to ms
+                def _to_ms(v):
+                    v = int(v or 0)
+                    return v * 1000 if 0 < v < 10_000_000_000 else v
+                lt_ms = _to_ms(item.get("last_trade_unix_time") or item.get("last_trade_timestamp"))
+                ct_ms = _to_ms(item.get("created_timestamp") or item.get("open_timestamp"))
+
+                seen[mint] = {
+                    "mint":       mint,
+                    "symbol":     item.get("symbol", mint[:8]),
+                    "bond_pct":   round(bond_raw, 1),
+                    "twitter":    bool(item.get("twitter_username") or item.get("twitter")),
+                    "telegram":   bool(item.get("telegram")),
+                    "dev":        item.get("creator") or item.get("dev") or "",
+                    "replies":    int(item.get("reply_count") or 0),
+                    "created_at": ct_ms,
+                    "last_trade": lt_ms,
+                    "complete":   bool(item.get("complete") or bond_raw >= 100),
+                    "_source":    label,
+                }
         except Exception as e:
-            log("warn", f"Graduated coins endpoint failed: {e}")
-    return []
+            log("warn", f"GMGN {label}: {e}")
+
+    active    = [c for c in seen.values() if not c["complete"]]
+    graduated = [c for c in seen.values() if c["complete"]]
+    log("info", f"GMGN: {len(active)} active + {len(graduated)} graduated across 4 feeds")
+    return active, graduated
 
 def get_bonding_details(mint):
     try:
@@ -1941,7 +1929,7 @@ def _send_wallet_report():
 # ── SCANNER LOOP ─────────────────────────────────────────────────
 def scanner_loop():
     log("ok", "=" * 55)
-    log("ok", "PumpFun Sniper — Bond Runner + Dormant Spike + Raydium Runner")
+    log("ok", "GMGN Sniper — Bond Runner + Dormant Spike + Raydium Runner")
     log("ok", f"Bond entry: {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% | TP: {BOND_TP}%")
     log("ok", f"Spike: {SPIKE_MIN_AGE_H}h+ dormant, {SPIKE_MIN_1H}%+ 1h move")
     log("ok", f"Raydium Runner: {'ON' if GRAD_MODE else 'OFF'} | liq>${GRAD_MIN_LIQ/1000:.0f}k | 1h>{GRAD_MIN_1H_PCT:.0f}%")
@@ -1958,9 +1946,9 @@ def scanner_loop():
                 continue
 
             log("info", f"--- Scan | Open:{num_open}/{MAX_OPEN} | Size:${trade_size():.2f} ---")
-            coins = get_pumpfun_coins()
-            if not coins:
-                log("warn", "No coins fetched")
+            coins, grad_coins = get_gmgn_coins()
+            if not coins and not grad_coins:
+                log("warn", "No coins fetched from GMGN")
                 time.sleep(30)
                 continue
             _scan_sol_price = get_sol_price() or 0
@@ -1985,13 +1973,15 @@ def scanner_loop():
                 if coin.get("twitter") or coin.get("telegram"):
                     n_social += 1
 
-                # Active trading: last trade within 30 minutes
+                # Active trading: skip if last trade timestamp known and stale
+                # If timestamp is 0/unknown (established tokens from trending feed), skip this
+                # check and rely on DexScreener change5m filter further down instead.
                 last_trade = coin.get("last_trade", 0)
-                secs_since = (time.time() - last_trade / 1000) if last_trade > 0 else 9999
-                if secs_since > 300:
+                secs_since = (time.time() - last_trade / 1000) if last_trade > 0 else 0
+                if last_trade > 0 and secs_since > 300:
                     log("info", f"SKIP stale: last trade {secs_since:.0f}s ago bond={coin.get('bond_pct',0):.0f}%", symbol)
                     continue
-                n_replies += 1  # reuse counter — now means "recently active"
+                n_replies += 1  # recently active or timestamp unknown
 
                 bond = coin.get("bond_pct", 0)
                 if BOND_ENTRY_MIN <= bond <= BOND_ENTRY_MAX:
@@ -2133,7 +2123,6 @@ def scanner_loop():
                 with trades_lock:
                     num_open = len(open_trades)
                 if num_open < MAX_OPEN:
-                    grad_coins = get_graduated_coins()
                     n_grad = 0
                     for coin in grad_coins:
                         with trades_lock:
@@ -3361,9 +3350,9 @@ def get_log():
 
 @app.route("/scan-debug", methods=["GET"])
 def scan_debug():
-    coins = get_pumpfun_coins()
+    coins, _ = get_gmgn_coins()
     if not coins:
-        return jsonify({"error": "PumpFun API returned no coins", "fetched": 0})
+        return jsonify({"error": "GMGN returned no coins", "fetched": 0})
     results = []
     counters = {"stale": 0, "no_strategy": 0, "rug": 0, "holders": 0, "dev": 0, "sm_sell": 0, "no_price": 0, "ready": 0}
     for coin in coins[:30]:
