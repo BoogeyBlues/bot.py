@@ -100,9 +100,15 @@ GRAD_MIN_VOL_LIQ = float(os.environ.get("GRAD_MIN_VOL_LIQ", "0.5"))   # min volu
 GRAD_TP_PCT      = float(os.environ.get("GRAD_TP_PCT",      "30"))
 GRAD_SL_PCT      = float(os.environ.get("GRAD_SL_PCT",      "12"))
 GRAD_MAX_SECS    = int(os.environ.get("GRAD_MAX_SECS",      "300"))   # 5 min hard cap
-# PumpPortal pool name for graduated tokens (pumpswap since March 2025)
 GRAD_POOL        = os.environ.get("GRAD_POOL", "pumpswap")
 GRAD_SMC_MIN     = int(os.environ.get("GRAD_SMC_MIN", "2"))  # min SMC alignment score (0=off, 1-3)
+
+# Hype Scalp — fires when a coin appears in 2+ GMGN feeds simultaneously
+HYPE_MIN_FEEDS   = int(os.environ.get("HYPE_MIN_FEEDS",   "2"))    # min feeds to trigger
+HYPE_MIN_LIQ     = float(os.environ.get("HYPE_MIN_LIQ",   "5000")) # lower bar — scalp is fast
+HYPE_TP_PCT      = float(os.environ.get("HYPE_TP_PCT",    "15"))   # take profit at 15%
+HYPE_SL_PCT      = float(os.environ.get("HYPE_SL_PCT",    "8"))    # stop loss at 8%
+HYPE_MAX_SECS    = int(os.environ.get("HYPE_MAX_SECS",    "120"))  # 2 min max hold
 
 # Exit protection
 SLIP_TRIGGER   = float(os.environ.get("SLIP_TRIGGER",  "90"))
@@ -800,7 +806,11 @@ def get_gmgn_coins():
                 items = list(items.values())
             for item in items:
                 mint = item.get("address") or item.get("mint", "")
-                if not mint or mint in seen:
+                if mint in seen:
+                    # Coin appeared in another feed — accumulate sources, raise hype score
+                    if label not in seen[mint]["_sources"]:
+                        seen[mint]["_sources"].append(label)
+                        seen[mint]["hype_score"] = len(seen[mint]["_sources"])
                     continue
                 # Bond % — completing feed populates this; others default 0 (unknown/graduated)
                 bond_raw = float(
@@ -825,8 +835,9 @@ def get_gmgn_coins():
                     "replies":    int(item.get("reply_count") or 0),
                     "created_at": ct_ms,
                     "last_trade": lt_ms,
-                    "complete":   bool(item.get("complete") or bond_raw >= 100),
-                    "_source":    label,
+                    "complete":    bool(item.get("complete") or bond_raw >= 100),
+                    "_sources":   [label],
+                    "hype_score": 1,
                 }
         except Exception as e:
             log("warn", f"GMGN {label}: {e}")
@@ -1677,6 +1688,22 @@ def monitor_loop():
                         exit_trade(mint, price, "COPY_TIME", bond)
                         continue
 
+                # Hype scalp exits — fast TP/SL, 2min max hold
+                if strategy == "hype":
+                    move = ((price - trade["entry"]) / trade["entry"]) * 100
+                    hype_sl = trade["entry"] * (1 - HYPE_SL_PCT / 100)
+                    hype_tsl = price_high * (1 - HYPE_SL_PCT / 100) if entry_gain_pct >= TSL_ACTIVATE_PCT else hype_sl
+                    if move >= HYPE_TP_PCT:
+                        exit_trade(mint, price, "HYPE_TP", bond)
+                        continue
+                    if price <= hype_tsl:
+                        reason = "HYPE_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "HYPE_SL"
+                        exit_trade(mint, price, reason, bond)
+                        continue
+                    if elapsed >= HYPE_MAX_SECS:
+                        exit_trade(mint, price, "HYPE_TIME", bond)
+                        continue
+
                 # Raydium Runner exits (graduated tokens)
                 if strategy == "grad":
                     grad_tsl = price_high * (1 - GRAD_SL_PCT / 100) if entry_gain_pct >= TSL_ACTIVATE_PCT else trade["entry"] * (1 - GRAD_SL_PCT / 100)
@@ -1991,6 +2018,28 @@ def scanner_loop():
                 age_h = (time.time() - created_at / 1000) / 3600 if created_at > 0 else 0
                 if age_h >= SPIKE_MIN_AGE_H:
                     n_spike_range += 1
+
+                # ── Hype Scalp — multi-feed GMGN presence + social + momentum ──
+                hype = coin.get("hype_score", 1)
+                has_social = bool(coin.get("twitter") or coin.get("telegram"))
+                if hype >= HYPE_MIN_FEEDS and has_social:
+                    market = get_market_data(mint)
+                    if (market and market["price"] > 0
+                            and market["liq"] >= HYPE_MIN_LIQ
+                            and market["change5m"] > 0):   # still climbing right now
+                        sig_score = gmgn_signal_score(mint)
+                        if not gmgn_smart_money_selling(mint):
+                            amt    = trade_size()
+                            feeds  = "+".join(coin["_sources"])
+                            log("ok",
+                                f"HYPE SCALP | feeds={hype}({feeds}) social=✓ "
+                                f"5m={market['change5m']:+.1f}% liq=${market['liq']:.0f} sig={sig_score}", symbol)
+                            notify(f"🔥 HYPE {symbol}",
+                                   f"Feeds: {feeds}\n5m: {market['change5m']:+.1f}%\n"
+                                   f"Liq: ${market['liq']:.0f}\nSig: {sig_score}")
+                            enter_trade(mint, symbol, market["price"], amt, "hype", bond, 0, "pumpswap")
+                            time.sleep(0.5)
+                            continue
 
                 # ── Bundle ride ────────────────────────────────────────
                 if BUNDLE_MODE == "ride" and 0 < bond < 75:
