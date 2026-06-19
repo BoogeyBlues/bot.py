@@ -2637,26 +2637,26 @@ if __name__ == "__main__":
     if not DRIFT_PAPER_MODE:
         if DRIFT_EXCHANGE == "bybit":
             if not BYBIT_API_KEY or not BYBIT_API_SECRET:
-                print("[FATAL] DRIFT_EXCHANGE=bybit requires BYBIT_API_KEY and BYBIT_API_SECRET. Exiting.")
+                log("err", "DRIFT_EXCHANGE=bybit requires BYBIT_API_KEY and BYBIT_API_SECRET env vars.")
                 raise SystemExit(1)
         elif DRIFT_EXCHANGE == "jupiter":
             if not WALLET_PRIVATE_KEY:
-                print("[FATAL] DRIFT_EXCHANGE=jupiter requires WALLET_PRIVATE_KEY. Exiting.")
+                log("err", "DRIFT_EXCHANGE=jupiter requires WALLET_PRIVATE_KEY env var.")
                 raise SystemExit(1)
             try:
                 import anchorpy  # noqa: F401
             except ImportError:
-                print("[FATAL] DRIFT_EXCHANGE=jupiter requires anchorpy — run: pip install anchorpy. Exiting.")
+                log("err", "DRIFT_EXCHANGE=jupiter requires anchorpy — run: pip install anchorpy.")
                 raise SystemExit(1)
             active_mkts = [m.strip().upper() for m in DRIFT_MARKETS.split(",") if m.strip().upper() in _JPERP_MARKETS]
             if not active_mkts:
-                print("[FATAL] DRIFT_MARKETS has no Jupiter-supported markets (SOL/ETH/BTC). Exiting.")
+                log("err", "DRIFT_MARKETS has no Jupiter-supported markets (SOL/ETH/BTC).")
                 raise SystemExit(1)
             skipped = [m.strip().upper() for m in DRIFT_MARKETS.split(",") if m.strip().upper() not in _JPERP_MARKETS]
             if skipped:
-                print(f"[WARN] Jupiter Perps does not support {skipped} — those markets will be skipped")
+                log("warn", f"Jupiter Perps does not support {skipped} — those markets will be skipped")
         elif not WALLET or not WALLET_PRIVATE_KEY:
-            print("[FATAL] DRIFT_PAPER_MODE=false requires WALLET and WALLET_PRIVATE_KEY. Exiting.")
+            log("err", "DRIFT_PAPER_MODE=false requires WALLET and WALLET_PRIVATE_KEY env vars.")
             raise SystemExit(1)
 
     if REDIS_URL and REDIS_TOKEN:

@@ -1,5 +1,5 @@
 import os, time, threading, requests, json, re, csv, io, random
-from flask import Flask, jsonify, Response
+from flask import Flask, jsonify, Response, request as flask_request
 from collections import defaultdict
 
 try:
@@ -2330,8 +2330,7 @@ def drift_proxy(path):
 
 @app.route("/", methods=["GET"])
 def home():
-    from flask import request as _req
-    theme = _req.args.get("theme", "classic")
+    theme = flask_request.args.get("theme", "classic")
     with capital_lock:
         cap = capital
     with trades_lock:
@@ -4541,10 +4540,10 @@ def export_all():
 if __name__ == "__main__":
     if not PAPER_MODE:
         if not WALLET or not WALLET_PRIVATE_KEY:
-            print("[FATAL] LIVE mode requires WALLET and WALLET_PRIVATE_KEY env vars. Exiting.")
+            log("err", "LIVE mode requires WALLET and WALLET_PRIVATE_KEY env vars.")
             raise SystemExit(1)
         if not _SOLANA_AVAILABLE:
-            print("[FATAL] LIVE mode requires solders and solana packages.")
+            log("err", "LIVE mode requires solders and solana packages — pip install solders solana.")
             raise SystemExit(1)
     elif _PAPER_ENV != "true" and (not WALLET or not WALLET_PRIVATE_KEY):
         log("warn", "WALLET/WALLET_PRIVATE_KEY not set — PAPER mode")
