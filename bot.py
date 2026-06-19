@@ -61,9 +61,9 @@ FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "0"))  # 0 = use ti
 
 # Capital tiers per risk level: (min_capital, trade_pct, daily_max_trades)
 _RISK_TIERS = {
-    "conservative": [(5_000,0.12,15),(500,0.10,12),(100,0.08,10),(0,0.05,8)],
-    "standard":     [(5_000,0.18,20),(500,0.15,15),(100,0.12,12),(0,0.08,12)],
-    "aggressive":   [(5_000,0.22,25),(500,0.18,20),(100,0.15,15),(0,0.12,15)],
+    "conservative": [(5_000,0.12,60),(500,0.10,50),(100,0.08,40),(0,0.05,30)],
+    "standard":     [(5_000,0.18,80),(500,0.15,70),(100,0.12,60),(0,0.08,50)],
+    "aggressive":   [(5_000,0.22,100),(500,0.18,90),(100,0.15,75),(0,0.12,60)],
 }
 _CAP_TIERS = _RISK_TIERS.get(RISK_LEVEL, _RISK_TIERS["standard"])
 
@@ -84,7 +84,7 @@ BOND_STALE_SECS = int(os.environ.get("BOND_STALE_SECS",  "120"))   # exit if bon
 
 # Dormant Spike strategy
 SPIKE_MIN_AGE_H = float(os.environ.get("SPIKE_MIN_AGE_H", "12"))
-SPIKE_MIN_1H    = float(os.environ.get("SPIKE_MIN_1H",    "50"))
+SPIKE_MIN_1H    = float(os.environ.get("SPIKE_MIN_1H",    "20"))
 SPIKE_TP_PCT    = float(os.environ.get("SPIKE_TP_PCT",    "40"))
 SPIKE_SL_PCT    = float(os.environ.get("SPIKE_SL_PCT",    "15"))
 SPIKE_MAX_SECS  = int(os.environ.get("SPIKE_MAX_SECS",    "180"))   # 3 min hard cap
@@ -101,7 +101,7 @@ GRAD_TP_PCT      = float(os.environ.get("GRAD_TP_PCT",      "30"))
 GRAD_SL_PCT      = float(os.environ.get("GRAD_SL_PCT",      "12"))
 GRAD_MAX_SECS    = int(os.environ.get("GRAD_MAX_SECS",      "300"))   # 5 min hard cap
 GRAD_POOL        = os.environ.get("GRAD_POOL", "pumpswap")
-GRAD_SMC_MIN     = int(os.environ.get("GRAD_SMC_MIN", "2"))  # min SMC alignment score (0=off, 1-3)
+GRAD_SMC_MIN     = int(os.environ.get("GRAD_SMC_MIN", "1"))  # min SMC alignment score (0=off, 1-3)
 
 # Hype Scalp — fires when a coin appears in 2+ GMGN feeds simultaneously
 HYPE_MIN_FEEDS   = int(os.environ.get("HYPE_MIN_FEEDS",   "2"))    # min feeds to trigger

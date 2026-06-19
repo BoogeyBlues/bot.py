@@ -1375,7 +1375,7 @@ def run_trading_loop():
         except Exception as e:
             log("err", f"Loop error: {e}")
 
-        time.sleep(30)
+        time.sleep(5)
 
 # ── FLASK ROUTES ──────────────────────────────────────────────────
 _CURSOR = """<style>
