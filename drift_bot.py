@@ -346,6 +346,32 @@ def refresh_price_cache(markets):
         for market, price in prices.items():
             _price_cache[market] = (price, now)
 
+def _prefetch_price_history(markets):
+    """Seed _price_history with 60 1-min OKX candles so EMA-50 is ready on first loop tick."""
+    for market in markets:
+        sym = _OKX_SYM.get(market.upper())
+        if not sym:
+            continue
+        try:
+            r = _session.get(
+                "https://www.okx.com/api/v5/market/candles",
+                params={"instId": sym, "bar": "1m", "limit": "60"},
+                timeout=10,
+            )
+            candles = r.json().get("data", [])
+            entries = [(int(c[0]) / 1000, float(c[4])) for c in reversed(candles)]
+            if entries:
+                with _state_lock:
+                    if market not in _price_history:
+                        _price_history[market] = deque(maxlen=300)
+                    existing = {ts for ts, _ in _price_history[market]}
+                    for ts, px in entries:
+                        if ts not in existing:
+                            _price_history[market].append((ts, px))
+                log("ok", f"Pre-fetched {len(entries)} candles — signal engine warm", market)
+        except Exception as e:
+            log("warn", f"Candle pre-fetch failed: {e}", market)
+
 def get_market_price(market):
     """Return cached price if fresh, otherwise fetch individually via Pyth → OKX → Bybit."""
     market = market.upper()
@@ -545,17 +571,19 @@ def get_signal(market):
     if just_flipped:
         confidence += 1  # fresh flip = highest quality entry
 
-    gmgn_bias = _get_gmgn_signal(market)
-    if gmgn_bias == trend:
-        confidence += 1
-    elif gmgn_bias and gmgn_bias != trend:
-        log("info", f"{market} ST={trend} but GMGN={gmgn_bias} — suppressed", "SIG")
-        _st_prev[market] = st_bull
-        return None, 0, None
+    # GMGN only tracks meme coins — skip for institutional perp markets
+    if market.upper() not in _JPERP_MARKETS:
+        gmgn_bias = _get_gmgn_signal(market)
+        if gmgn_bias == trend:
+            confidence += 1
+        elif gmgn_bias and gmgn_bias != trend:
+            log("info", f"{market} ST={trend} but GMGN={gmgn_bias} — suppressed", "SIG")
+            _st_prev[market] = st_bull
+            return None, 0, None
 
     _st_prev[market] = st_bull
 
-    if confidence < 2:
+    if confidence < 1:
         return None, 0, None
 
     return trend, confidence, atr
@@ -1242,6 +1270,9 @@ def drift_auto_tune():
 def run_trading_loop():
     markets = [m.strip().upper() for m in DRIFT_MARKETS.split(",")]
     log("ok", f"Trading loop started | markets={markets} | paper={DRIFT_PAPER_MODE}")
+
+    # Seed price history immediately so EMA-50 is ready on the first loop tick
+    _prefetch_price_history(markets)
 
     while True:
         try:

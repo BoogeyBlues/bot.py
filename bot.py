@@ -93,7 +93,7 @@ SPIKE_MAX_SECS  = int(os.environ.get("SPIKE_MAX_SECS",    "180"))   # 3 min hard
 GRAD_MODE        = os.environ.get("GRAD_MODE", "true").lower() == "true"
 GRAD_MAX_AGE_H   = float(os.environ.get("GRAD_MAX_AGE_H",   "4"))     # only tokens graduated in last 4h
 GRAD_MIN_LIQ     = float(os.environ.get("GRAD_MIN_LIQ",     "15000")) # min $15k liquidity
-GRAD_MIN_1H_PCT  = float(os.environ.get("GRAD_MIN_1H_PCT",  "10"))    # min +10% 1h momentum
+GRAD_MIN_1H_PCT  = float(os.environ.get("GRAD_MIN_1H_PCT",  "5"))     # min +5% 1h momentum
 GRAD_MIN_5M_PCT  = float(os.environ.get("GRAD_MIN_5M_PCT",  "-5"))    # reject if dumping >5% in last 5m
 GRAD_MIN_VOL_24H = float(os.environ.get("GRAD_MIN_VOL_24H", "10000")) # min $10k 24h volume
 GRAD_MIN_VOL_LIQ = float(os.environ.get("GRAD_MIN_VOL_LIQ", "0.5"))   # min volume/liq ratio
@@ -2005,7 +2005,7 @@ def scanner_loop():
                 # check and rely on DexScreener change5m filter further down instead.
                 last_trade = coin.get("last_trade", 0)
                 secs_since = (time.time() - last_trade / 1000) if last_trade > 0 else 0
-                if last_trade > 0 and secs_since > 300:
+                if last_trade > 0 and secs_since > 600:
                     log("info", f"SKIP stale: last trade {secs_since:.0f}s ago bond={coin.get('bond_pct',0):.0f}%", symbol)
                     continue
                 n_replies += 1  # recently active or timestamp unknown
