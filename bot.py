@@ -1862,6 +1862,7 @@ def _send_wallet_report():
     log("ok", f"Sent daily wallet report for {len(stats)} pinned wallets", "COPY")
 
 
+def copy_trade_loop():
     time.sleep(15)
     fetch_smart_wallets()
     while scan_active:
