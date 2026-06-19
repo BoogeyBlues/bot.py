@@ -1,1 +1,1 @@
-web: python overseer.py
+web: bash start.sh
