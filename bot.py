@@ -2305,6 +2305,29 @@ def _inject_cursor(resp):
             resp.set_data(html.replace('</body>', _CURSOR + '</body>', 1))
     return resp
 
+_DRIFT_PORT = int(os.environ.get("DRIFT_PORT", "5001"))
+
+@app.route("/drift", defaults={"path": ""}, methods=["GET","POST","PUT","DELETE","PATCH"])
+@app.route("/drift/<path:path>",             methods=["GET","POST","PUT","DELETE","PATCH"])
+def drift_proxy(path):
+    import requests as _preq
+    try:
+        url = f"http://localhost:{_DRIFT_PORT}/{path}"
+        resp = _preq.request(
+            method=flask_request.method,
+            url=url,
+            headers={k: v for k, v in flask_request.headers if k.lower() != "host"},
+            data=flask_request.get_data(),
+            params=flask_request.args,
+            allow_redirects=False,
+            timeout=10,
+        )
+        skip = {"content-encoding", "content-length", "transfer-encoding", "connection"}
+        headers = [(k, v) for k, v in resp.headers.items() if k.lower() not in skip]
+        return Response(resp.content, resp.status_code, headers)
+    except Exception as e:
+        return f"<h2>Drift bot starting up…</h2><p>{e}</p><p><a href='/drift'>Retry</a></p>", 503
+
 @app.route("/", methods=["GET"])
 def home():
     from flask import request as _req
