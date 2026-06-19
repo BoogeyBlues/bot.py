@@ -7,9 +7,9 @@ app = Flask(__name__)
 # ── CONFIG ────────────────────────────────────────────────────────
 DRIFT_PAPER_MODE   = os.environ.get("DRIFT_PAPER_MODE", "true").lower() != "false"
 DRIFT_EXCHANGE     = os.environ.get("DRIFT_EXCHANGE", "jupiter")
-DRIFT_LEVERAGE     = float(os.environ.get("DRIFT_LEVERAGE", "10"))     # midpoint; used as fallback
-DRIFT_LEV_MIN      = float(os.environ.get("DRIFT_LEV_MIN",  "2"))      # minimum leverage
-DRIFT_LEV_MAX      = float(os.environ.get("DRIFT_LEV_MAX",  "20"))     # maximum leverage
+DRIFT_LEVERAGE     = float(os.environ.get("DRIFT_LEVERAGE", "65"))     # midpoint; used as fallback
+DRIFT_LEV_MIN      = float(os.environ.get("DRIFT_LEV_MIN",  "50"))     # minimum leverage
+DRIFT_LEV_MAX      = float(os.environ.get("DRIFT_LEV_MAX",  "80"))     # maximum leverage
 DRIFT_MARGIN_USD   = float(os.environ.get("DRIFT_MARGIN_USD", "400"))  # fixed margin per trade ($)
 DRIFT_MAX_OPEN     = int(os.environ.get("DRIFT_MAX_OPEN", "5"))
 DRIFT_TP_PCT       = float(os.environ.get("DRIFT_TP_PCT", "0.20"))
@@ -67,6 +67,7 @@ _st_prev           = {}   # market -> previous supertrend bullish state (for fli
 _market_stats      = {}   # market -> {wins, losses, long_wins, short_wins, long_total, short_total}
 _market_params     = {}   # tuned per-market: {leverage, bias, paused_until, last_result}
 _gmgn_signal_cache = {}   # market -> {result, ts} — 5-min TTL to avoid per-tick API calls
+_last_candle_refresh = {}  # market -> last candle refresh timestamp
 
 _session = requests.Session()
 _session.trust_env = False
@@ -379,6 +380,47 @@ def _prefetch_price_history(markets):
         except Exception as e:
             log("warn", f"Candle pre-fetch failed: {e}", market)
 
+def _refresh_candles(markets):
+    """
+    Fetch the latest 1-min candle from OKX for each market every 60 seconds.
+    Appends only new candles (dedup by timestamp) so price history stays
+    clean 1-min OHLC-close data for the signal engine.
+    Call this from the trading loop instead of appending raw tick prices.
+    """
+    global _last_candle_refresh
+    now = time.time()
+    for market in markets:
+        last = _last_candle_refresh.get(market, 0)
+        if now - last < 60:
+            continue  # not due yet
+        sym = _OKX_SYM.get(market.upper())
+        if not sym:
+            continue
+        try:
+            r = _session.get(
+                "https://www.okx.com/api/v5/market/candles",
+                params={"instId": sym, "bar": "1m", "limit": "3"},
+                timeout=8,
+            )
+            candles = r.json().get("data", [])
+            entries = [(int(c[0]) / 1000, float(c[4])) for c in reversed(candles)]
+            if entries:
+                with _state_lock:
+                    if market not in _price_history:
+                        _price_history[market] = deque(maxlen=300)
+                    existing = {ts for ts, _ in _price_history[market]}
+                    added = 0
+                    for ts, px in entries:
+                        if ts not in existing:
+                            _price_history[market].append((ts, px))
+                            existing.add(ts)
+                            added += 1
+                if added:
+                    log("info", f"Candle refresh: +{added} new 1-min candles", market)
+            _last_candle_refresh[market] = now
+        except Exception as e:
+            log("warn", f"Candle refresh failed: {e}", market)
+
 def get_market_price(market):
     """Return cached price if fresh, otherwise fetch individually via Pyth → OKX → Bybit."""
     market = market.upper()
@@ -523,22 +565,24 @@ def get_signal(market):
       +1 if RSI is neutral (35-65) — momentum has room to run
       +1 if Supertrend just FLIPPED this bar (fresh signal, highest quality)
       +1 if GMGN smart money actively confirms direction
-      → min to enter: confidence >= 2 (max 4)
+      → min to enter: confidence >= 1 (max 4)
+
+    Scalping config: EMA-20, Supertrend(7,3), RSI-7, min 25 prices.
 
     Returns (direction, confidence, atr) or (None, 0, None).
     """
     global _st_prev
     with _state_lock:
         prices = list(_price_history.get(market, []))
-    if len(prices) < 55:   # need 50 for EMA + buffer
+    if len(prices) < 25:   # need 20 for EMA + buffer
         return None, 0, None
     vals = [p for _, p in prices]
 
     # ── Indicators ────────────────────────────────────────────────
-    ema50     = sum(vals[-50:]) / 50
-    rsi       = _calc_rsi(vals, 14)
-    atr       = _calc_atr(vals, 14)
-    st_bull, st_lvl = _supertrend(vals, 10, 3.0)
+    ema20     = sum(vals[-20:]) / 20
+    rsi       = _calc_rsi(vals, 7)
+    atr       = _calc_atr(vals, 7)
+    st_bull, st_lvl = _supertrend(vals, 7, 3.0)
 
     if rsi is None or atr is None or st_bull is None:
         return None, 0, None
@@ -554,8 +598,8 @@ def get_signal(market):
     # ── Direction from Supertrend ──────────────────────────────────
     trend = "long" if st_bull else "short"
 
-    # ── Factor 1: EMA-50 trend filter (no counter-trend entries) ──
-    ema_ok = (trend == "long" and cur > ema50) or (trend == "short" and cur < ema50)
+    # ── Factor 1: EMA-20 trend filter (no counter-trend entries) ──
+    ema_ok = (trend == "long" and cur > ema20) or (trend == "short" and cur < ema20)
     if not ema_ok:
         _st_prev[market] = st_bull  # consume flip so stale flip doesn't persist
         return None, 0, None
@@ -1144,7 +1188,7 @@ def close_position(market, exit_price, reason=""):
         if not won:
             # Brief cooldown after a loss — let the market settle before re-entering
             existing_pause = mp.get("paused_until", 0)
-            loss_cooldown = time.time() + 900  # 15 min
+            loss_cooldown = time.time() + 120  # 2 min (scalping — fast re-entry)
             if loss_cooldown > existing_pause:
                 mp["paused_until"] = loss_cooldown
         global _total_trades_ever
@@ -1285,14 +1329,9 @@ def run_trading_loop():
             # Single batch call to Binance for all markets — one request instead of N
             refresh_price_cache(markets)
 
-            # Update price history from cache
-            for market in markets:
-                price = get_market_price(market)
-                if price:
-                    with _state_lock:
-                        if market not in _price_history:
-                            _price_history[market] = deque(maxlen=300)
-                        _price_history[market].append((time.time(), price))
+            # Refresh 1-min candles for signal engine (every 60s per market)
+            # Raw tick prices are NOT appended to price history — only clean 1-min candles
+            _refresh_candles(markets)
 
             # Monitor existing positions for exits
             monitor_positions()
@@ -1355,40 +1394,37 @@ def run_trading_loop():
                     if not price:
                         continue
 
-                    # ── ATR-based SL/TP (dynamic, volatility-adjusted) ────
-                    atr_pct   = sig_atr / price
-                    sl_pct    = atr_pct * 1.5   # SL = 1.5× ATR
-                    tp_pct    = atr_pct * 3.0   # TP = 3× ATR (2:1 R:R)
+                    # ── Fixed scalping SL/TP for 50x-80x leverage ────────
+                    # At 50x leverage, liquidation = 2% move against us.
+                    # SL must be inside 1.7% (85% of liq distance) to be safe.
+                    # Use fixed params: SL=1.0%, TP=2.0%, Trail=0.5%.
+                    # This bypasses ATR-derived SL which caused zero trades.
+                    atr_pct   = sig_atr / price if price > 0 else 0.002
+                    sl_pct    = 0.010   # fixed 1.0% SL — well inside 1.7% liq buffer at 50x
+                    tp_pct    = 0.020   # fixed 2.0% TP — 2:1 R:R
+                    trail_pct = 0.005   # fixed 0.5% trailing stop
 
-                    # ── Liquidation safety cap ────────────────────────────
-                    # At leverage L, liquidation happens when price moves 1/L against us.
-                    # SL must land INSIDE that distance (using 85% of margin as hard limit).
-                    # If even the minimum leverage puts SL past liquidation, skip the trade.
-                    max_safe_lev = 0.85 / sl_pct if sl_pct > 0 else DRIFT_LEV_MAX
-                    if max_safe_lev < DRIFT_LEV_MIN:
+                    # Safety: if ATR is so extreme that even fixed 1.0% SL is past liq,
+                    # which means atr > liq buffer (>1.7%), skip the trade.
+                    max_sl_for_min_lev = 0.85 / DRIFT_LEV_MIN  # 1.7% at 50x
+                    if sl_pct >= max_sl_for_min_lev:
                         log("info",
-                            f"ATR too high for safe {int(DRIFT_LEV_MIN)}x entry "
-                            f"(sl={sl_pct*100:.2f}% > liq buffer) — skip", market)
+                            f"Fixed SL {sl_pct*100:.1f}% >= liq buffer "
+                            f"{max_sl_for_min_lev*100:.1f}% at {int(DRIFT_LEV_MIN)}x — skip", market)
                         continue
 
-                    # ── Dynamic leverage: inverse of volatility, clamped to safe range ──
-                    # k=0.10 calibrated for 1-min ATR: gives 65x at ~0.15% per-tick ATR.
-                    # Calm markets (BTC/ETH) → higher leverage; volatile (SOL) → lower.
-                    # Max-confidence signal (fresh flip + GMGN + RSI neutral) gets 15% boost.
-                    LEV_K      = 0.10
-                    raw_lev    = LEV_K / atr_pct if atr_pct > 0 else DRIFT_LEV_MIN
+                    # ── Leverage: use tuned per-market value, clamp to range ──
                     tuned_lev  = mparams.get("leverage", DRIFT_LEVERAGE)
-                    raw_lev    = (raw_lev + tuned_lev) / 2
                     if confidence >= 4:
-                        raw_lev *= 1.15
-                    market_lev = int(max(DRIFT_LEV_MIN, min(DRIFT_LEV_MAX, raw_lev, max_safe_lev)))
+                        tuned_lev = min(DRIFT_LEV_MAX, tuned_lev * 1.10)
+                    market_lev = int(max(DRIFT_LEV_MIN, min(DRIFT_LEV_MAX, tuned_lev)))
                     size_usd   = DRIFT_MARGIN_USD * market_lev
                     margin     = DRIFT_MARGIN_USD
 
                     log("ok",
                         f"SIGNAL {signal.upper()} conf={confidence}/4 lev={market_lev}x "
                         f"margin=${margin:.0f} notional=${size_usd:.0f} "
-                        f"SL={sl_pct*100:.2f}% TP={tp_pct*100:.2f}%", market)
+                        f"SL={sl_pct*100:.1f}% TP={tp_pct*100:.1f}% trail={trail_pct*100:.1f}%", market)
 
                     # Cache signal for display
                     with _state_lock:
@@ -1397,9 +1433,9 @@ def run_trading_loop():
                             "ts": time.strftime("%H:%M:%S"), "price": price,
                         }
 
-                    # Open with ATR-based SL/TP and ATR-based trailing stop
+                    # Open with fixed SL/TP and tight trailing stop
                     open_position(market, signal, price, size_usd, market_lev,
-                                  sl_pct=sl_pct, tp_pct=tp_pct, atr_pct=atr_pct)
+                                  sl_pct=sl_pct, tp_pct=tp_pct, atr_pct=trail_pct)
 
         except Exception as e:
             log("err", f"Loop error: {e}")
