@@ -6,7 +6,7 @@ app = Flask(__name__)
 
 # ── CONFIG ────────────────────────────────────────────────────────
 DRIFT_PAPER_MODE   = os.environ.get("DRIFT_PAPER_MODE", "true").lower() != "false"
-DRIFT_EXCHANGE     = os.environ.get("DRIFT_EXCHANGE", "drift")
+DRIFT_EXCHANGE     = os.environ.get("DRIFT_EXCHANGE", "jupiter")
 DRIFT_LEVERAGE     = float(os.environ.get("DRIFT_LEVERAGE", "65"))     # midpoint; used as fallback
 DRIFT_LEV_MIN      = float(os.environ.get("DRIFT_LEV_MIN",  "50"))     # minimum leverage
 DRIFT_LEV_MAX      = float(os.environ.get("DRIFT_LEV_MAX",  "80"))     # maximum leverage
@@ -1422,12 +1422,24 @@ def _inject_cursor(resp):
 
 @app.route("/", methods=["GET"])
 def home():
-    mode       = "PAPER" if DRIFT_PAPER_MODE else "LIVE"
-    mode_color = "#ffee00" if DRIFT_PAPER_MODE else "#39ff14"
-    exch       = DRIFT_EXCHANGE.upper()
+    mode         = "PAPER" if DRIFT_PAPER_MODE else "LIVE"
+    mode_color   = "#ffee00" if DRIFT_PAPER_MODE else "#39ff14"
+    exch         = DRIFT_EXCHANGE.upper()
     markets_list = [m.strip().upper() for m in DRIFT_MARKETS.split(",")]
-
-    # SHOES + LIQUID redesign
+    cap_str      = f"${_capital:,.2f}"
+    cap_pct      = round(max(0, min(100, (_capital - STARTING_CAPITAL) / max(PROFIT_GOAL - STARTING_CAPITAL, 1) * 100)), 1)
+    milestone_html = "".join(
+        f'<div class="milestone" id="ms-{m}"><div class="milestone-dot"></div>${m:,}</div>'
+        for m in MILESTONES
+    )
+    market_rows = "".join(
+        f'<div class="market-row">'
+        f'<div class="market-label">{mk}</div>'
+        f'<button class="trade-btn btn-long" onclick="manualTrade(\'{mk}\',\'long\')">LONG</button>'
+        f'<button class="trade-btn btn-short" onclick="manualTrade(\'{mk}\',\'short\')">SHORT</button>'
+        f'</div>'
+        for mk in markets_list
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1436,601 +1448,482 @@ def home():
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>{DRIFT_BOT_NAME}</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
-*{{box-sizing:border-box;margin:0;padding:0}}
-:root{{--cyan:#00e5ff;--green:#00ff88;--red:#ff3355;--yellow:#ffee00;--bg:#050a14;--card:#0a1220;--border:#ffffff15}}
+*{{margin:0;padding:0;box-sizing:border-box}}
+:root{{--bg:#050a14;--bg2:#080f1e;--bg3:#0d1628;--cyan:#00e5ff;--green:#00ff88;--red:#ff3355;--yellow:#ffee00;--text:#c8d8f0;--muted:#4a6080}}
 
-/* LIQUID BACKGROUND */
-body{{
-  background:var(--bg);
-  background-image:
-    radial-gradient(ellipse 70% 50% at 15% 15%,#00e5ff09 0%,transparent 60%),
-    radial-gradient(ellipse 50% 70% at 85% 85%,#ff335508 0%,transparent 60%);
-  color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;
-  min-height:100vh;overflow-x:hidden
-}}
-.bg-art{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;opacity:.22;pointer-events:none;z-index:0}}
-.wrap{{position:relative;z-index:1}}
+body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
+
+/* ORBS */
+.orb{{position:fixed;border-radius:50%;pointer-events:none;z-index:0;filter:blur(80px);opacity:.18}}
+.orb-cyan{{width:340px;height:340px;top:-80px;left:calc(50% - 215px);background:radial-gradient(circle,var(--cyan) 0%,transparent 70%);animation:orbCyan 8s ease-in-out infinite}}
+.orb-red{{width:300px;height:300px;bottom:-80px;left:calc(50% + 15px);background:radial-gradient(circle,var(--red) 0%,transparent 70%);animation:orbRed 8s ease-in-out infinite}}
+@keyframes orbCyan{{0%{{transform:translate(0,0)}}25%{{transform:translate(40px,30px)}}50%{{transform:translate(20px,60px)}}75%{{transform:translate(-20px,30px)}}100%{{transform:translate(0,0)}}}}
+@keyframes orbRed{{0%{{transform:translate(0,0)}}25%{{transform:translate(-30px,-40px)}}50%{{transform:translate(-60px,-20px)}}75%{{transform:translate(-20px,20px)}}100%{{transform:translate(0,0)}}}}
+#particles{{position:fixed;inset:0;z-index:0;pointer-events:none}}
+.wrapper{{max-width:430px;margin:0 auto;position:relative;z-index:1;min-height:100vh}}
 
 /* NAV */
-nav{{display:flex;border-bottom:2px solid var(--cyan);overflow-x:auto;scrollbar-width:none;
-  background:linear-gradient(90deg,#020d1c,#030f1e)}}
-nav::-webkit-scrollbar{{display:none}}
-nav a{{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;
-  white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;
-  border-right:1px solid var(--border);transition:all .2s}}
-nav a:hover,nav a.active{{background:var(--cyan);color:#000}}
+nav{{position:sticky;top:0;z-index:100;background:rgba(5,10,20,.92);backdrop-filter:blur(12px);border-bottom:1px solid rgba(0,229,255,.12);display:flex;align-items:center;padding:0 12px;height:48px;overflow:hidden}}
+.nav-link{{font-family:'Bebas Neue',sans-serif;font-size:13px;letter-spacing:1.5px;color:var(--muted);text-decoration:none;padding:0 9px;height:100%;display:flex;align-items:center;transition:color .2s;opacity:0;transform:translateX(-30px);white-space:nowrap}}
+.nav-link.active{{color:var(--cyan)}}
+.nav-link:hover{{color:var(--text)}}
+.nav-link:nth-child(1){{animation:navSlide .5s ease forwards .05s}}
+.nav-link:nth-child(2){{animation:navSlide .5s ease forwards .15s}}
+.nav-link:nth-child(3){{animation:navSlide .5s ease forwards .25s}}
+.nav-link:nth-child(4){{animation:navSlide .5s ease forwards .35s}}
+@keyframes navSlide{{to{{opacity:1;transform:translateX(0)}}}}
 
 /* MODE STRIP */
-.strip{{background:var(--card);border-bottom:2px solid var(--border);padding:5px 16px;
-  display:flex;justify-content:space-between;align-items:center}}
-.strip-left{{font-size:.6rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em}}
-.mode-pill{{font-size:.65rem;font-weight:900;padding:3px 10px;background:{mode_color};color:#000;letter-spacing:.08em}}
+.mode-strip{{display:flex;align-items:center;justify-content:space-between;padding:8px 16px;background:rgba(8,15,30,.7);border-bottom:1px solid rgba(0,229,255,.07)}}
+.bot-name{{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--cyan);display:flex;align-items:center;gap:6px}}
+.blink-dot{{width:6px;height:6px;border-radius:50%;background:{mode_color};animation:blinkDot 1s step-end infinite}}
+@keyframes blinkDot{{0%,100%{{opacity:1}}50%{{opacity:0}}}}
+.mode-pill{{font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;letter-spacing:2px;padding:3px 10px;border-radius:20px;background:rgba(255,238,0,.1);border:1px solid rgba(255,238,0,.3);color:var(--yellow);animation:pillGlow 2.5s ease-in-out infinite}}
+@keyframes pillGlow{{0%,100%{{box-shadow:0 0 4px rgba(255,238,0,.2)}}50%{{box-shadow:0 0 14px rgba(255,238,0,.6),0 0 28px rgba(255,238,0,.2)}}}}
+
+.scroll-area{{padding:0 16px 80px}}
 
 /* HERO */
-.hero{{padding:18px 16px 20px;
-  background:linear-gradient(180deg,#020d1c 0%,rgba(0,229,255,.04) 60%,var(--bg) 100%);
-  text-align:center;position:relative;overflow:hidden}}
-.hero::after{{content:'';position:absolute;bottom:0;left:0;right:0;height:2px;
-  background:linear-gradient(90deg,transparent,var(--cyan),var(--green),transparent);
-  animation:liquidWave 3s ease-in-out infinite}}
-@keyframes liquidWave{{0%,100%{{opacity:.6;transform:scaleX(1)}}50%{{opacity:1;transform:scaleX(1.05)}}}}
-.hero-title{{font-family:'Bebas Neue',sans-serif;font-size:1.6rem;color:var(--cyan);letter-spacing:.12em;text-shadow:0 0 20px #00e5ff55}}
-.hero-cap{{font-family:'Bebas Neue',sans-serif;font-size:3.8rem;color:var(--cyan);
-  text-shadow:0 0 40px #00e5ff66,4px 4px 0 #ff3355;line-height:1.05;animation:glow 3s ease-in-out infinite}}
-.hero-row{{display:flex;justify-content:center;gap:18px;margin-top:8px;font-size:.68rem;color:#555}}
-.hero-row span{{color:#888;font-family:'JetBrains Mono',monospace}}
+.hero{{padding:28px 0 16px;text-align:center}}
+.hero-title{{font-family:'Bebas Neue',sans-serif;font-size:42px;letter-spacing:4px;color:var(--cyan);text-shadow:0 0 20px rgba(0,229,255,.4);display:inline-block;overflow:hidden;white-space:nowrap;width:0;border-right:3px solid var(--cyan);animation:typewriter .8s steps(12,end) forwards .3s}}
+@keyframes typewriter{{to{{width:260px}}}}
+.hero-balance{{display:flex;justify-content:center;align-items:baseline;gap:1px;margin:10px 0 6px;font-family:'JetBrains Mono',monospace;font-size:32px;font-weight:700;color:var(--text)}}
+.digit-reel-wrap{{display:inline-block;overflow:hidden;height:1.1em;vertical-align:bottom}}
+.digit-reel{{display:flex;flex-direction:column}}
+.digit-char{{height:1.1em;line-height:1.1em;display:block}}
+.hero-sub{{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--muted);letter-spacing:1.5px;display:flex;justify-content:center;gap:20px;opacity:0;animation:fadeIn .5s ease forwards 1.1s}}
+.hero-sub .up{{color:var(--green)}}.hero-sub .hi{{color:var(--cyan)}}
+@keyframes fadeIn{{to{{opacity:1}}}}
 
-/* WAVE DIVIDER */
-.wave-div{{overflow:hidden;line-height:0}}
-.wave-div svg{{display:block;width:100%}}
+/* WAVE */
+.wave-wrap{{height:32px;overflow:hidden;margin:12px -16px;position:relative}}
+.wave-svg{{width:200%;height:100%;animation:waveScroll 4s linear infinite}}
+@keyframes waveScroll{{from{{transform:translateX(0)}}to{{transform:translateX(-50%)}}}}
 
-/* STATS */
-.stats{{display:grid;grid-template-columns:1fr 1fr 1fr;gap:1px;
-  background:linear-gradient(90deg,var(--cyan),var(--green))}}
-.stat{{background:#0a1220;padding:12px 10px;text-align:center}}
-.stat .lbl{{font-size:.54rem;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:.08em}}
-.stat .val{{font-family:'Bebas Neue',sans-serif;font-size:1.55rem;line-height:1.1;margin-top:2px}}
+/* STATS GRID */
+.stats-grid{{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px}}
+.stat-cell{{background:var(--bg3);border:1px solid rgba(0,229,255,.1);border-radius:10px;padding:10px 8px;text-align:center;opacity:0;transform:translateY(20px)}}
+.stat-cell:nth-child(1){{animation:statUp .5s ease forwards .3s,statBob 3s ease-in-out infinite 1.5s}}
+.stat-cell:nth-child(2){{animation:statUp .5s ease forwards .45s,statBob 3s ease-in-out infinite 2.5s}}
+.stat-cell:nth-child(3){{animation:statUp .5s ease forwards .6s,statBob 3s ease-in-out infinite 3.5s}}
+@keyframes statUp{{to{{opacity:1;transform:translateY(0)}}}}
+@keyframes statBob{{0%,100%{{transform:translateY(0)}}50%{{transform:translateY(-4px)}}}}
+.stat-label{{font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:2px;color:var(--muted);margin-bottom:4px;text-transform:uppercase}}
+.stat-val{{font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:1px;color:var(--cyan)}}
 
-/* LIQUID SECTION */
-.sec{{background:linear-gradient(180deg,#0a1220 0%,#07101e 100%);margin-bottom:1px;position:relative}}
-.sec-hdr{{display:flex;align-items:center;justify-content:space-between;
-  padding:10px 16px;border-bottom:1px solid #ffffff0a}}
-.sec-hdr h2{{font-size:.6rem;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:.12em}}
-.sec-hdr a{{font-size:.6rem;color:var(--cyan);text-decoration:none;font-weight:700}}
-.sec-hdr span{{font-size:.6rem;color:var(--cyan);font-weight:700}}
+/* SECTION HEADER */
+.section-header{{font-family:'Bebas Neue',sans-serif;font-size:16px;letter-spacing:3px;color:var(--text);margin:20px 0 10px;position:relative;overflow:hidden}}
+.scan-bar{{position:absolute;top:0;left:-40%;width:40%;height:100%;background:linear-gradient(90deg,transparent,rgba(0,229,255,.35),transparent);animation:scanBar 4s ease-in-out infinite}}
+@keyframes scanBar{{0%{{left:-40%}}100%{{left:140%}}}}
 
-/* POSITION CARDS — tap to reveal timestamp */
-.pos-card{{
-  margin:10px 12px;
-  background:linear-gradient(135deg,#0d1825,#091420);
-  border:1px solid #ffffff12;border-radius:4px;
-  position:relative;overflow:hidden;cursor:pointer;
-  transition:box-shadow .3s ease
-}}
-.pos-card::before{{content:'';position:absolute;top:0;left:0;right:0;height:2px;
-  background:linear-gradient(90deg,transparent,var(--cyan),transparent);
-  animation:shimmer 2.5s ease-in-out infinite}}
-.pos-card.profit{{border-color:#00ff8828;box-shadow:0 0 16px #00ff8806}}
-.pos-card.profit::before{{background:linear-gradient(90deg,transparent,var(--green),transparent)}}
-.pos-card.loss{{border-color:#ff335528;box-shadow:0 0 16px #ff335506}}
-.pos-card.loss::before{{background:linear-gradient(90deg,transparent,var(--red),transparent)}}
-.pos-card:active{{transform:scale(.99)}}
-.pos-body{{padding:12px 14px 4px}}
-.pos-top{{display:flex;align-items:center;gap:8px;margin-bottom:8px}}
-.pos-sym{{font-family:'Bebas Neue',sans-serif;font-size:1.3rem;color:var(--cyan)}}
-.pos-side{{font-size:.63rem;font-weight:900;padding:2px 7px;border:1px solid;letter-spacing:.06em}}
-.pos-pnl{{font-family:'JetBrains Mono',monospace;font-size:.95rem;font-weight:700;margin-left:auto;transition:color .4s}}
-.pos-meta{{display:grid;grid-template-columns:1fr 1fr;gap:3px 10px;
-  font-size:.6rem;color:#444;font-family:'JetBrains Mono',monospace;margin-bottom:8px}}
-.pos-meta b{{color:#666;font-weight:400}}
-canvas.mini{{width:100%!important;display:block;border-radius:2px}}
-/* expandable timestamp detail */
-.pos-detail{{max-height:0;overflow:hidden;transition:max-height .35s cubic-bezier(.4,0,.2,1),padding .35s ease;
-  background:linear-gradient(180deg,transparent,#00e5ff05);padding:0 14px}}
-.pos-card.expanded .pos-detail{{max-height:72px;padding:8px 14px 10px}}
-.pos-ts-row{{font-size:.58rem;font-family:'JetBrains Mono',monospace;color:#444;
-  display:flex;justify-content:space-between;margin-bottom:4px}}
-.pos-ts-row span:last-child{{color:#666}}
-.pos-notional{{font-size:.56rem;color:#2a3a4a;font-family:'JetBrains Mono',monospace}}
-.pos-hint{{display:flex;justify-content:center;align-items:center;gap:4px;
-  padding:5px 0 6px;font-size:.48rem;color:#1e2d3a;letter-spacing:.12em;text-transform:uppercase}}
-.pos-chevron{{display:inline-block;transition:transform .35s ease;font-size:.6rem;line-height:1}}
-.pos-card.expanded .pos-chevron{{transform:rotate(180deg)}}
-.close-btn{{width:calc(100% - 28px);margin:0 14px 12px;display:block;padding:7px;background:transparent;
-  border:1px solid #ff335530;color:#ff3355;font-size:.6rem;font-weight:900;
-  letter-spacing:.08em;cursor:pointer;text-transform:uppercase;transition:all .2s;border-radius:2px}}
-.close-btn:hover,.close-btn:active{{background:var(--red);color:#fff}}
-.no-pos{{text-align:center;padding:28px 16px;color:#1e2d3a;font-size:.72rem}}
-.no-pos-icon{{font-size:1.4rem;margin-bottom:6px;opacity:.4}}
+/* POSITION CARDS */
+.pos-card{{border-radius:12px;padding:12px;margin-bottom:10px;display:flex;align-items:center;gap:10px;opacity:0;transform:translateX(60px);cursor:pointer}}
+.pos-card.profit{{background:linear-gradient(110deg,var(--bg3) 0%,rgba(0,255,136,.04) 50%,var(--bg3) 100%);background-size:200% 100%;border:1px solid rgba(0,255,136,.35);animation:slideFromRight .55s ease forwards .7s,cardShimmer 3s linear infinite 2s}}
+.pos-card.loss{{background:var(--bg3);border:1px solid rgba(255,51,85,.35);animation:slideFromRight .55s ease forwards .85s}}
+@keyframes slideFromRight{{to{{opacity:1;transform:translateX(0)}}}}
+@keyframes cardShimmer{{0%{{background-position:200% 0}}100%{{background-position:-200% 0}}}}
+.pos-info{{flex:1}}
+.pos-pair{{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;color:var(--text)}}
+.pos-dir{{font-size:10px;font-family:'JetBrains Mono',monospace;letter-spacing:1px;margin-top:2px}}
+.pos-dir.long{{color:var(--green)}}.pos-dir.short{{color:var(--red)}}
+.pos-pnl{{font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:700;flex-shrink:0}}
+.pos-pnl.up{{color:var(--green)}}.pos-pnl.dn{{color:var(--red)}}
+.sparkline-wrap{{width:72px;height:40px;flex-shrink:0}}
+.no-pos{{text-align:center;padding:28px 16px;color:var(--muted);font-size:13px}}
 
-/* WAVE SPACER */
-.wave-spacer{{height:18px;background:var(--bg);position:relative;overflow:hidden}}
-.wave-spacer::after{{content:'';position:absolute;bottom:0;left:-10%;width:120%;height:100%;
-  background:linear-gradient(180deg,transparent,#00e5ff07);
-  clip-path:ellipse(60% 100% at 50% 100%)}}
+/* TRADE DECK */
+.deck-wrap{{perspective:600px;height:88px;position:relative;margin-bottom:8px;cursor:pointer;user-select:none}}
+.trade-card{{position:absolute;inset:0;background:var(--bg3);border-radius:12px;border:1px solid rgba(0,229,255,.12);padding:12px 16px;display:flex;align-items:center;justify-content:space-between;backface-visibility:hidden;opacity:0;will-change:transform,opacity}}
+.tc-pair{{font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:700;color:var(--text);margin-bottom:4px}}
+.tc-pnl{{font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:700}}
+.tc-badge{{font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:2px;padding:2px 7px;border-radius:20px;font-weight:700;margin-left:8px}}
+.tc-badge.win{{background:rgba(0,255,136,.15);color:var(--green);border:1px solid rgba(0,255,136,.3)}}
+.tc-badge.loss{{background:rgba(255,51,85,.15);color:var(--red);border:1px solid rgba(255,51,85,.3)}}
+.deck-hint{{font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--muted);text-align:center;letter-spacing:1.5px}}
 
-/* SHOES PINWHEEL */
-.pinwheel-wrap{{perspective:700px;height:160px;position:relative;margin:14px 16px 4px;cursor:pointer}}
-.pw-card{{
-  position:absolute;top:0;left:0;right:0;
-  padding:12px 14px;
-  background:linear-gradient(135deg,#0d1825,#0a1520);
-  border:1px solid #ffffff0e;border-radius:3px;
-  transform-origin:top center;
-  transition:transform .5s cubic-bezier(.34,1.56,.64,1),opacity .4s ease;
-  backface-visibility:hidden;will-change:transform,opacity
-}}
-.pw-card[data-idx="0"]{{transform:rotateX(0deg) translateZ(0) scale(1);z-index:5;opacity:1}}
-.pw-card[data-idx="1"]{{transform:rotateX(5deg) translateZ(-18px) scale(.96);z-index:4;opacity:.78}}
-.pw-card[data-idx="2"]{{transform:rotateX(10deg) translateZ(-34px) scale(.92);z-index:3;opacity:.58}}
-.pw-card[data-idx="3"]{{transform:rotateX(14deg) translateZ(-46px) scale(.88);z-index:2;opacity:.40}}
-.pw-card[data-idx="4"]{{transform:rotateX(18deg) translateZ(-56px) scale(.84);z-index:1;opacity:.24}}
-.pw-card.fly-off{{
-  transform:rotateX(-45deg) translateZ(60px) translateY(-50px) scale(.75)!important;
-  opacity:0!important;
-  transition:transform .3s ease-in,opacity .25s ease-in!important;
-  z-index:10!important
-}}
-.pw-top{{display:flex;align-items:center;gap:8px;margin-bottom:5px}}
-.pw-sym{{font-family:'Bebas Neue',sans-serif;font-size:1.25rem;color:var(--cyan)}}
-.pw-side{{font-size:.6rem;font-weight:900;padding:1px 6px;border:1px solid;letter-spacing:.05em}}
-.pw-pnl{{font-family:'JetBrains Mono',monospace;font-size:.88rem;font-weight:700;margin-left:auto}}
-.pw-detail{{font-size:.56rem;color:#2a3a4a;font-family:'JetBrains Mono',monospace}}
-.pw-hint{{text-align:center;font-size:.48rem;color:#1a2535;letter-spacing:.14em;
-  text-transform:uppercase;padding:4px 0 10px}}
+/* PROGRESS BAR */
+.goal-label{{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--muted);letter-spacing:1.5px;margin-bottom:6px;display:flex;justify-content:space-between}}
+.goal-label span{{color:var(--cyan)}}
+.progress-track{{background:var(--bg3);border-radius:8px;height:12px;border:1px solid rgba(0,229,255,.1);overflow:hidden;margin-bottom:10px;position:relative}}
+.progress-fill{{height:100%;width:0%;background:linear-gradient(90deg,var(--cyan),var(--green));border-radius:8px;transition:width 1.2s cubic-bezier(.22,1,.36,1);position:relative;overflow:hidden}}
+.progress-shine{{position:absolute;top:0;left:-60%;width:60%;height:100%;background:linear-gradient(90deg,transparent,rgba(255,255,255,.4),transparent);animation:shineSlide 2s linear infinite 1.5s}}
+@keyframes shineSlide{{0%{{left:-60%}}100%{{left:120%}}}}
+.milestones{{display:flex;justify-content:space-between}}
+.milestone{{font-family:'JetBrains Mono',monospace;font-size:8px;letter-spacing:1px;text-align:center;color:var(--muted)}}
+.milestone.hit{{color:var(--cyan);animation:msGlow 2s ease-in-out infinite}}
+@keyframes msGlow{{0%,100%{{text-shadow:0 0 4px rgba(0,229,255,.2)}}50%{{text-shadow:0 0 12px rgba(0,229,255,.8)}}}}
+.milestone-dot{{width:6px;height:6px;border-radius:50%;background:var(--muted);margin:0 auto 3px}}
+.milestone.hit .milestone-dot{{background:var(--cyan);box-shadow:0 0 8px var(--cyan)}}
+
+/* MANUAL TRADING */
+.market-row{{display:flex;align-items:center;gap:8px;margin-bottom:8px;opacity:0;transform:translateX(-30px)}}
+.market-row:nth-child(1){{animation:slideLeft .5s ease forwards .2s}}
+.market-row:nth-child(2){{animation:slideLeft .5s ease forwards .35s}}
+.market-row:nth-child(3){{animation:slideLeft .5s ease forwards .5s}}
+.market-row:nth-child(4){{animation:slideLeft .5s ease forwards .65s}}
+@keyframes slideLeft{{to{{opacity:1;transform:translateX(0)}}}}
+.market-label{{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;color:var(--text);width:36px;flex-shrink:0}}
+.trade-btn{{flex:1;padding:9px 0;border:none;border-radius:8px;font-family:'Bebas Neue',sans-serif;font-size:15px;letter-spacing:2px;cursor:pointer;position:relative;overflow:hidden;transition:transform .15s}}
+.trade-btn:active{{transform:scale(.96)}}
+.btn-long{{background:rgba(0,255,136,.12);border:1px solid rgba(0,255,136,.35);color:var(--green);animation:longPulse 2.5s ease-in-out infinite}}
+@keyframes longPulse{{0%,100%{{box-shadow:0 0 4px rgba(0,255,136,.1)}}50%{{box-shadow:0 0 14px rgba(0,255,136,.4)}}}}
+.btn-short{{background:rgba(255,51,85,.12);border:1px solid rgba(255,51,85,.35);color:var(--red);animation:shortPulse 2.5s ease-in-out infinite 1.25s}}
+@keyframes shortPulse{{0%,100%{{box-shadow:0 0 4px rgba(255,51,85,.1)}}50%{{box-shadow:0 0 14px rgba(255,51,85,.4)}}}}
+.ripple-el{{position:absolute;border-radius:50%;transform:scale(0);pointer-events:none;opacity:.4;animation:rippleAnim .6s ease forwards}}
+@keyframes rippleAnim{{to{{transform:scale(4);opacity:0}}}}
+.reset-btn{{width:100%;margin-top:12px;padding:10px;background:transparent;border:1px solid rgba(255,51,85,.3);color:var(--red);font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;letter-spacing:1.5px;cursor:pointer;text-transform:uppercase;border-radius:8px;transition:all .2s}}
+.reset-btn:hover{{background:var(--red);color:#fff}}
 
 /* LIVE FEED */
-.feed-item{{padding:7px 16px;border-bottom:1px solid #ffffff04;font-size:.6rem;
-  font-family:'JetBrains Mono',monospace;display:flex;gap:8px;align-items:flex-start}}
-.feed-time{{color:#1e2d3a;font-size:.54rem;flex-shrink:0;margin-top:1px}}
-.feed-text{{color:#555;line-height:1.5}}
-.feed-text.open{{color:var(--cyan)}}.feed-text.win{{color:var(--green)}}.feed-text.loss{{color:var(--red)}}
+.feed-entry{{font-family:'JetBrains Mono',monospace;font-size:10px;padding:7px 10px;background:var(--bg3);border-left:3px solid var(--muted);border-radius:0 6px 6px 0;margin-bottom:5px;opacity:0;transform:translateX(30px);letter-spacing:.5px;line-height:1.4}}
+.feed-entry.vis{{opacity:1;transform:translateX(0);transition:opacity .4s,transform .4s}}
+.feed-ts{{opacity:.5;margin-right:8px}}
+.feed-cursor{{display:inline-block;width:6px;height:.85em;background:var(--muted);margin-left:2px;vertical-align:text-bottom;animation:blinkCur .8s step-end infinite}}
+@keyframes blinkCur{{0%,100%{{opacity:1}}50%{{opacity:0}}}}
 
-/* PROGRESS */
-.prog-wrap{{padding:12px 16px;background:linear-gradient(180deg,#0a1220,#07101e)}}
-.prog-lbl{{font-size:.56rem;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:.1em;
-  margin-bottom:6px;display:flex;justify-content:space-between}}
-.prog-track{{background:#ffffff07;height:3px;overflow:hidden;border-radius:2px}}
-.prog-fill{{background:linear-gradient(90deg,var(--cyan),var(--green),#ffee00);height:3px;
-  transition:width .8s ease;box-shadow:0 0 8px var(--cyan)}}
-.milestones{{display:flex;flex-wrap:wrap;gap:3px;margin-top:8px}}
-.ms{{font-size:.52rem;padding:2px 6px;font-weight:700;border:1px solid #ffffff08;color:#2a3a4a;background:#ffffff02}}
-.ms.hit{{color:var(--cyan);border-color:#00e5ff35;background:#00e5ff0a;box-shadow:0 0 5px #00e5ff20}}
-
-/* MANUAL */
-.mkt-row{{display:flex;align-items:center;gap:5px;padding:6px 12px;border-bottom:1px solid #ffffff05}}
-.mkt-lbl{{font-family:'Bebas Neue',sans-serif;font-size:.95rem;color:var(--cyan);width:58px;flex-shrink:0}}
-.btn{{padding:5px 11px;font-size:.58rem;font-weight:900;letter-spacing:.06em;border:none;cursor:pointer;
-  text-transform:uppercase;transition:all .15s;flex-shrink:0}}
-.btn-long{{background:var(--green);color:#000}}.btn-short{{background:var(--red);color:#fff}}
-.btn-x{{background:#0d1825;color:#444;border:1px solid #1a2535;padding:5px 9px}}
-.btn-x:active{{color:#fff}}
-
-footer{{padding:12px 16px;text-align:center;font-size:.56rem;color:#1e2d3a;
-  border-top:1px solid #ffffff07;background:#050a14}}
-footer a{{color:#00e5ff60;text-decoration:none}}
-
-/* ANIMATIONS */
-@keyframes glow{{
-  0%,100%{{text-shadow:0 0 30px #00e5ff55,4px 4px 0 #ff3355}}
-  50%{{text-shadow:0 0 60px #00e5ffaa,4px 4px 0 #ff3355,0 0 100px #00e5ff22}}
-}}
-@keyframes shimmer{{0%{{transform:translateX(-100%)}}100%{{transform:translateX(100%)}}}}
-@keyframes slideUp{{from{{opacity:0;transform:translateY(16px)}}to{{opacity:1;transform:translateY(0)}}}}
-@keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.3}}}}
-.dot{{display:inline-block;width:5px;height:5px;border-radius:50%;
-  background:{mode_color};margin-right:5px;animation:pulse 2s infinite}}
+footer{{text-align:center;padding:20px 16px 40px;font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:2px;color:var(--muted);opacity:0;animation:fadeIn .6s ease forwards 1.5s;line-height:1.8}}
+footer a{{color:var(--cyan);text-decoration:none}}
+::-webkit-scrollbar{{width:4px}}
+::-webkit-scrollbar-thumb{{background:var(--muted);border-radius:4px}}
 </style>
 </head>
 <body>
-<img src="/static/tankgirl.png" class="bg-art" alt="">
-<div class="wrap">
+
+<div class="orb orb-cyan"></div>
+<div class="orb orb-red"></div>
+<canvas id="particles"></canvas>
+
+<div class="wrapper">
 
   <nav>
-    <a href="/" class="active">HOME</a>
-    <a href="/monitor">MONITOR</a>
-    <a href="/trades">TRADES</a>
-    <a href="/status/api" target="_blank">API ↗</a>
-    <a href="https://drift.trade" target="_blank">DRIFT ↗</a>
+    <a class="nav-link active" href="/">HOME</a>
+    <a class="nav-link" href="/trades">TRADES</a>
+    <a class="nav-link" href="/monitor">MONITOR</a>
+    <a class="nav-link" href="https://jup.ag" target="_blank">JUPITER ↗</a>
   </nav>
-  <div class="strip">
-    <span class="strip-left"><span class="dot"></span>{exch} · ${PROFIT_GOAL:,.0f} goal</span>
-    <span class="mode-pill">{mode}</span>
+
+  <div class="mode-strip">
+    <div class="bot-name"><div class="blink-dot"></div>{DRIFT_BOT_NAME}</div>
+    <div class="mode-pill">{mode}</div>
   </div>
 
-  <div class="hero">
-    <div class="hero-title">{DRIFT_BOT_NAME}</div>
-    <div id="hero-cap" class="hero-cap">${_capital:.2f}</div>
-    <div class="hero-row">
-      <span id="hero-pnl">$0.00 PnL</span>
-      <span id="hero-trades">0 trades</span>
-      <span id="hero-secured">$0 secured</span>
-    </div>
-  </div>
+  <div class="scroll-area">
 
-  <div class="wave-div" style="background:#0a1220">
-    <svg viewBox="0 0 430 16" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="none">
-      <path d="M0,16 C80,2 180,12 260,5 C340,-2 400,10 430,6 L430,16 Z" fill="#050a14"/>
-    </svg>
-  </div>
-
-  <div class="stats">
-    <div class="stat">
-      <div class="lbl">Win Rate</div>
-      <div class="val" id="stat-wr" style="color:var(--green)">0%</div>
-    </div>
-    <div class="stat">
-      <div class="lbl">Open</div>
-      <div class="val" id="stat-open" style="color:var(--cyan)">0/{DRIFT_MAX_OPEN}</div>
-    </div>
-    <div class="stat">
-      <div class="lbl">Daily PnL</div>
-      <div class="val" id="stat-dpnl" style="color:var(--green)">$0</div>
-    </div>
-  </div>
-
-  <!-- LIVE POSITIONS -->
-  <div class="sec">
-    <div class="sec-hdr">
-      <h2>LIVE POSITIONS</h2>
-      <span id="pos-count">0</span>
-    </div>
-    <div id="pos-wrap">
-      <div class="no-pos" id="no-pos">
-        <div class="no-pos-icon">📡</div>
-        Scanning for signals...
+    <!-- HERO -->
+    <div class="hero">
+      <div class="hero-title" id="heroTitle">{DRIFT_BOT_NAME}</div>
+      <div class="hero-balance" id="heroBalance"></div>
+      <div class="hero-sub">
+        <span>PNL <span class="up" id="heroPnl">+$0.00</span></span>
+        <span>WIN RATE <span class="hi" id="heroWr">0%</span></span>
       </div>
     </div>
-  </div>
 
-  <div class="wave-spacer"></div>
-
-  <!-- RECENT TRADES — SHOES PINWHEEL -->
-  <div class="sec">
-    <div class="sec-hdr"><h2>RECENT TRADES</h2><a href="/trades">ALL →</a></div>
-    <div id="pinwheel" class="pinwheel-wrap" onclick="cyclePinwheel()">
-      <div class="no-pos">No trades yet</div>
+    <!-- WAVE DIVIDER -->
+    <div class="wave-wrap">
+      <svg class="wave-svg" viewBox="0 0 800 32" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0,16 C50,0 100,32 150,16 C200,0 250,32 300,16 C350,0 400,32 450,16 C500,0 550,32 600,16 C650,0 700,32 750,16 C800,0 800,16 800,16" fill="none" stroke="rgba(0,229,255,0.15)" stroke-width="1.5"/>
+        <path d="M0,16 C50,0 100,32 150,16 C200,0 250,32 300,16 C350,0 400,32 450,16 C500,0 550,32 600,16 C650,0 700,32 750,16 C800,0 800,16 800,16" fill="none" stroke="rgba(0,229,255,0.15)" stroke-width="1.5" transform="translate(400,0)"/>
+      </svg>
     </div>
-    <div class="pw-hint" id="pw-hint"></div>
-  </div>
 
-  <!-- LIVE FEED -->
-  <div class="sec">
-    <div class="sec-hdr"><h2>LIVE FEED</h2><span id="feed-ts"></span></div>
-    <div id="feed-wrap"><div class="no-pos">Waiting for signals...</div></div>
-  </div>
-
-  <!-- PROGRESS -->
-  <div class="prog-wrap">
-    <div class="prog-lbl"><span>GOAL PROGRESS</span><span style="color:var(--cyan)" id="prog-pct">0%</span></div>
-    <div class="prog-track"><div class="prog-fill" id="prog-fill" style="width:0%"></div></div>
-    <div class="milestones">
-      {"".join(f'<span class="ms" id="ms-{m}">${m:,}</span>' for m in MILESTONES)}
-    </div>
-  </div>
-
-  <!-- MANUAL CONTROLS -->
-  <div class="sec">
-    <div class="sec-hdr"><h2>MANUAL CONTROLS</h2></div>
-    <div style="padding:12px 12px 4px">
-      <select id="mkt-sel" style="
-        width:100%;padding:9px 12px;background:#0d1825;color:var(--cyan);
-        border:1px solid #00e5ff30;font-size:.8rem;font-weight:700;
-        font-family:'Bebas Neue',sans-serif;letter-spacing:.08em;
-        border-radius:2px;outline:none;margin-bottom:8px;
-        -webkit-appearance:none;cursor:pointer">
-        {"".join(f'<option value="{mk}">{mk}-PERP</option>' for mk in markets_list)}
-      </select>
-      <div style="display:flex;gap:6px">
-        <button onclick="manualTrade(document.getElementById('mkt-sel').value,'long')" style="
-          flex:1;padding:10px;background:var(--green);color:#000;border:none;
-          font-size:.65rem;font-weight:900;letter-spacing:.08em;cursor:pointer;
-          text-transform:uppercase;border-radius:2px">▲ LONG</button>
-        <button onclick="manualTrade(document.getElementById('mkt-sel').value,'short')" style="
-          flex:1;padding:10px;background:var(--red);color:#fff;border:none;
-          font-size:.65rem;font-weight:900;letter-spacing:.08em;cursor:pointer;
-          text-transform:uppercase;border-radius:2px">▼ SHORT</button>
-        <button onclick="closePos(document.getElementById('mkt-sel').value)" style="
-          padding:10px 14px;background:#0d1825;color:#555;border:1px solid #1a2535;
-          font-size:.65rem;font-weight:900;cursor:pointer;border-radius:2px">✕</button>
+    <!-- STATS GRID -->
+    <div class="stats-grid">
+      <div class="stat-cell">
+        <div class="stat-label">TRADES</div>
+        <div class="stat-val" id="statTrades">0</div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-label">OPEN</div>
+        <div class="stat-val" id="statOpen">0</div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-label">DAILY PNL</div>
+        <div class="stat-val" id="statDpnl">$0</div>
       </div>
     </div>
-    <div style="padding:10px 12px 12px;border-top:1px solid #ffffff06;margin-top:8px">
-      <button onclick="resetCapital()" style="
-        width:100%;padding:10px;background:transparent;
-        border:1px solid #ff335540;color:#ff3355;
-        font-size:.62rem;font-weight:900;letter-spacing:.1em;
-        cursor:pointer;text-transform:uppercase;border-radius:2px">
-        ⟳ RESET CAPITAL TO ${STARTING_CAPITAL:.0f}
-      </button>
+
+    <!-- OPEN POSITIONS -->
+    <div class="section-header">OPEN POSITIONS<div class="scan-bar"></div></div>
+    <div id="pos-wrap"><div class="no-pos" id="no-pos">📡 Scanning for signals...</div></div>
+
+    <!-- RECENT TRADES DECK -->
+    <div class="section-header">RECENT TRADES<div class="scan-bar"></div></div>
+    <div class="deck-wrap" id="deck" onclick="cycleDeck()"></div>
+    <div class="deck-hint" id="deckHint"></div>
+
+    <!-- GOAL PROGRESS -->
+    <div class="section-header">GOAL PROGRESS<div class="scan-bar"></div></div>
+    <div class="goal-label">
+      <span id="goalCap">${_capital:,.2f} / ${PROFIT_GOAL:,.0f}</span>
+      <span id="goalPct">{cap_pct}%</span>
     </div>
+    <div class="progress-track">
+      <div class="progress-fill" id="progFill" style="width:{cap_pct}%">
+        <div class="progress-shine"></div>
+      </div>
+    </div>
+    <div class="milestones">{milestone_html}</div>
+
+    <!-- MANUAL TRADING -->
+    <div class="section-header" style="margin-top:20px">MANUAL TRADE<div class="scan-bar"></div></div>
+    <div id="market-rows">{market_rows}</div>
+    <button class="reset-btn" onclick="resetCapital()">⟳ RESET CAPITAL TO ${STARTING_CAPITAL:.0f}</button>
+
+    <!-- LIVE FEED -->
+    <div class="section-header">LIVE FEED<div class="scan-bar"></div></div>
+    <div id="feed-wrap"></div>
+
   </div>
 
   <footer>{DRIFT_BOT_NAME} · {exch} · <a href="/monitor">Monitor</a> · <a href="/trades">All Trades</a></footer>
 </div>
 
 <script>
-const charts = {{}}, pnlH = {{}};
-const MS = {json.dumps(MILESTONES)};
-const START_CAP = {STARTING_CAPITAL};
-const GOAL = {PROFIT_GOAL};
-const MAX_OPEN = {DRIFT_MAX_OPEN};
+/* ── PARTICLES ─────────────────────────────────────────────── */
+(function() {{
+  const c = document.getElementById('particles');
+  const ctx = c.getContext('2d');
+  let W, H;
+  const pts = Array.from({{length:20}}, () => ({{
+    x: Math.random()*430, y: Math.random()*window.innerHeight,
+    vy: -(0.25+Math.random()*.55), opacity: .15+Math.random()*.45, size: 1+Math.random()
+  }}));
+  const resize = () => {{ W=c.width=window.innerWidth; H=c.height=window.innerHeight; }};
+  window.addEventListener('resize', resize); resize();
+  const ox = () => Math.max(0,(window.innerWidth-430)/2);
+  (function draw() {{
+    ctx.clearRect(0,0,W,H);
+    pts.forEach(p => {{
+      ctx.beginPath(); ctx.arc(ox()+p.x, p.y, p.size, 0, Math.PI*2);
+      ctx.fillStyle=`rgba(0,229,255,${{p.opacity}})`; ctx.fill();
+      p.y+=p.vy;
+      if(p.y<-4){{p.y=H+4;p.x=Math.random()*430;}}
+    }});
+    requestAnimationFrame(draw);
+  }})();
+}})();
 
-// ── SHOES PINWHEEL ──
-let _allTrades = [], _tradeOffset = 0;
-
-function buildPinwheel(tradeList) {{
-  _allTrades = tradeList;
-  renderPinwheel();
-}}
-
-function renderPinwheel() {{
-  const wrap = document.getElementById('pinwheel');
-  const hint = document.getElementById('pw-hint');
-  if (!_allTrades.length) {{
-    wrap.innerHTML = '<div class="no-pos">No trades yet</div>';
-    if (hint) hint.textContent = '';
-    return;
+/* ── SLOT-MACHINE BALANCE ───────────────────────────────────── */
+(function() {{
+  const target = '{cap_str}';
+  const container = document.getElementById('heroBalance');
+  for(let i=0;i<target.length;i++) {{
+    const ch = target[i];
+    if('$,.'.includes(ch)) {{
+      const s=document.createElement('span'); s.textContent=ch; container.appendChild(s);
+    }} else {{
+      const fd=parseInt(ch);
+      const wrap=document.createElement('span'); wrap.className='digit-reel-wrap';
+      const reel=document.createElement('span'); reel.className='digit-reel';
+      for(let d=0;d<=9;d++){{const dc=document.createElement('span');dc.className='digit-char';dc.textContent=d;reel.appendChild(dc);}}
+      wrap.appendChild(reel); container.appendChild(wrap);
+      const delay=500+i*70, dur=900;
+      setTimeout(()=>{{
+        const t0=performance.now();
+        (function tick(now){{
+          const p=Math.min((now-t0)/dur,1), e=1-Math.pow(1-p,3);
+          reel.style.transform=`translateY(${{-e*fd*1.1}}em)`;
+          if(p<1) requestAnimationFrame(tick);
+        }})(performance.now());
+      }},delay);
+    }}
   }}
-  const total = _allTrades.length;
-  const shown = Math.min(5, total);
-  let html = '';
-  for (let i = 0; i < shown; i++) {{
-    const t = _allTrades[(_tradeOffset + i) % total];
-    const sc = t.side === 'long' ? '#00ff88' : '#ff3355';
-    const pc = t.pnl >= 0 ? '#00ff88' : '#ff3355';
-    const dur = t.duration_s ? Math.floor(t.duration_s / 60) + 'm' : '';
-    html += `<div class="pw-card" data-idx="${{i}}">
-      <div class="pw-top">
-        <span class="pw-sym">${{t.market}}</span>
-        <span class="pw-side" style="color:${{sc}};border-color:${{sc}}">${{t.side.toUpperCase()}}</span>
-        <span class="pw-pnl" style="color:${{pc}}">${{t.pnl>=0?'+':''}}$${{t.pnl.toFixed(2)}}</span>
-      </div>
-      <div class="pw-detail">$${{t.entry.toFixed(4)}} → $${{t.exit.toFixed(4)}} · ${{t.reason}}</div>
-      <div class="pw-detail" style="color:#1a2535;margin-top:2px">${{t.ts}}${{dur?' · '+dur:''}}</div>
-    </div>`;
+  setTimeout(()=>{{const t=document.getElementById('heroTitle');t.style.borderRightColor='transparent';t.style.borderRightWidth='0';}},1300);
+}})();
+
+/* ── DECK ───────────────────────────────────────────────────── */
+const STACK=[{{z:5,ty:0,sc:1}},{{z:4,ty:6,sc:.97}},{{z:3,ty:12,sc:.94}}];
+let _trades=[], _offset=0, _deckBusy=false;
+
+function renderDeck() {{
+  const wrap=document.getElementById('deck');
+  const hint=document.getElementById('deckHint');
+  if(!_trades.length){{wrap.innerHTML='<div class="no-pos">No trades yet</div>';hint.textContent='';return;}}
+  const total=_trades.length, shown=Math.min(3,total);
+  wrap.innerHTML='';
+  for(let i=0;i<shown;i++) {{
+    const t=_trades[(_offset+i)%total];
+    const pc=t.pnl>=0?'var(--green)':'var(--red)';
+    const badge=t.pnl>=0?'win':'loss';
+    const card=document.createElement('div'); card.className='trade-card'; card.id='tc'+i;
+    card.innerHTML=`<div><div class="tc-pair">${{t.market}}-PERP</div><div style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--muted);letter-spacing:1px">${{t.ts.slice(-5)}}</div></div>
+      <div style="display:flex;align-items:center"><span class="tc-pnl" style="color:${{pc}}">${{t.pnl>=0?'+':''}}$${{t.pnl.toFixed(2)}}</span><span class="tc-badge ${{badge}}">${{badge.toUpperCase()}}</span></div>`;
+    wrap.appendChild(card);
+    const pos=STACK[i];
+    setTimeout(()=>{{card.style.transition='transform .5s cubic-bezier(.22,1,.36,1),opacity .5s ease';card.style.zIndex=pos.z;card.style.opacity='1';card.style.transform=`translateY(${{pos.ty}}px) scale(${{pos.sc}})`;card.style.transformOrigin='top center';}},80+i*80);
   }}
-  wrap.innerHTML = html;
-  if (hint) hint.textContent = total > 1 ? '▸ TAP TO CYCLE · ' + total + ' TRADES' : '';
+  hint.textContent=total>1?`▸ TAP TO CYCLE · ${{total}} TRADES`:'';
 }}
 
-function cyclePinwheel() {{
-  if (_allTrades.length <= 1) return;
-  const top = document.querySelector('#pinwheel .pw-card[data-idx="0"]');
-  if (!top) return;
-  top.classList.add('fly-off');
-  setTimeout(() => {{
-    _tradeOffset = (_tradeOffset + 1) % _allTrades.length;
-    renderPinwheel();
-  }}, 300);
+function cycleDeck() {{
+  if(_deckBusy||_trades.length<2) return; _deckBusy=true;
+  const front=document.getElementById('tc0');
+  if(!front){{_deckBusy=false;return;}}
+  front.style.transition='transform .4s ease,opacity .4s ease';
+  front.style.transform='rotateX(-90deg) translateY(-20px) scale(.88)';
+  front.style.opacity='0';
+  setTimeout(()=>{{_offset=(_offset+1)%_trades.length;renderDeck();_deckBusy=false;}},420);
 }}
 
-// ── POSITION CARD TAP TO EXPAND ──
-function toggleCard(el, event) {{
-  if (event.target.classList.contains('close-btn')) return;
-  el.classList.toggle('expanded');
-}}
+/* ── LIVE DATA ──────────────────────────────────────────────── */
+const charts={{}}, pnlH={{}};
+const MS={json.dumps(MILESTONES)};
+const START_CAP={STARTING_CAPITAL};
+const GOAL={PROFIT_GOAL};
+const MAX_OPEN={DRIFT_MAX_OPEN};
 
-// ── POLLS ──
 async function poll() {{
   try {{
-    const d = await fetch('/status/api').then(r => r.json());
-    updateHero(d);
-    updatePositions(d.positions || {{}});
-    updateProgress(d.capital);
+    const d=await fetch('/status/api').then(r=>r.json());
+    // hero
+    const pnl=d.total_pnl||0;
+    const pnlEl=document.getElementById('heroPnl');
+    pnlEl.textContent=(pnl>=0?'+':'')+' $'+Math.abs(pnl).toFixed(2);
+    pnlEl.className=pnl>=0?'up':'dn'; pnlEl.style.color=pnl>=0?'var(--green)':'var(--red)';
+    const wr=d.win_rate||0;
+    document.getElementById('heroWr').textContent=wr+'%';
+    // stats
+    document.getElementById('statTrades').textContent=d.total_trades||0;
+    document.getElementById('statOpen').textContent=Object.keys(d.positions||{{}}).length+'/'+MAX_OPEN;
+    const dp=d.daily_pnl||0;
+    const dpEl=document.getElementById('statDpnl');
+    dpEl.textContent=(dp>=0?'+':'')+' $'+Math.abs(dp).toFixed(2);
+    dpEl.style.color=dp>=0?'var(--green)':'var(--red)';
+    // positions
+    updatePositions(d.positions||{{}});
+    // progress
+    const cap=d.capital||START_CAP;
+    const next=MS.find(m=>m>cap)||GOAL;
+    const pct=Math.max(0,Math.min(100,Math.round((cap-START_CAP)/Math.max(next-START_CAP,1)*100)));
+    document.getElementById('progFill').style.width=pct+'%';
+    document.getElementById('goalPct').textContent=pct+'%';
+    document.getElementById('goalCap').textContent='$'+cap.toFixed(2)+' / $'+GOAL.toLocaleString();
+    MS.forEach(m=>{{const el=document.getElementById('ms-'+m);if(el)el.className=cap>=m?'milestone hit':'milestone';}});
   }} catch(e) {{}}
+}}
+
+function updatePositions(positions) {{
+  const wrap=document.getElementById('pos-wrap');
+  const noPos=document.getElementById('no-pos');
+  const keys=Object.keys(positions);
+  noPos.style.display=keys.length?'none':'block';
+  keys.forEach((market,i)=>{{
+    const pos=positions[market]; const pnl=pos.pnl||0;
+    if(!pnlH[market]) pnlH[market]=[];
+    pnlH[market].push(pnl); if(pnlH[market].length>80) pnlH[market].shift();
+    let card=document.getElementById('pc-'+market);
+    if(!card) {{
+      card=document.createElement('div'); card.id='pc-'+market;
+      card.className='pos-card '+(pnl>=0?'profit':'loss');
+      card.innerHTML=buildCard(market,pos); wrap.appendChild(card);
+      setTimeout(()=>initChart(market),80);
+    }} else {{
+      const pnlEl=document.getElementById('pp-'+market);
+      if(pnlEl){{pnlEl.textContent=(pnl>=0?'+':'')+' $'+Math.abs(pnl).toFixed(2);pnlEl.className='pos-pnl '+(pnl>=0?'up':'dn');}}
+      updateChart(market,pnl);
+      card.className='pos-card '+(pnl>=0?'profit':'loss');
+    }}
+  }});
+  document.querySelectorAll('.pos-card').forEach(el=>{{
+    const m=el.id.replace('pc-','');
+    if(!positions[m]){{if(charts[m]){{charts[m].destroy();delete charts[m];}}delete pnlH[m];el.remove();}}
+  }});
+}}
+
+function buildCard(market,pos) {{
+  const side=pos.side||'long';
+  const sc=side==='long'?'var(--green)':'var(--red)';
+  const pnl=pos.pnl||0;
+  const sparkId='spark-'+market;
+  return `<div class="pos-info">
+    <div class="pos-pair">${{market}}-PERP</div>
+    <div class="pos-dir ${{side}}">● ${{side.toUpperCase()}}</div>
+  </div>
+  <canvas class="sparkline-wrap" id="${{sparkId}}" width="72" height="40"></canvas>
+  <div class="pos-pnl ${{pnl>=0?'up':'dn'}}" id="pp-${{market}}">${{pnl>=0?'+':''}} $${{Math.abs(pnl).toFixed(2)}}</div>`;
+}}
+
+function initChart(market) {{
+  const el=document.getElementById('spark-'+market);
+  if(!el||charts[market]) return;
+  charts[market]=new Chart(el.getContext('2d'),{{
+    type:'line',
+    data:{{labels:[],datasets:[{{data:[],borderColor:'#00ff88',borderWidth:1.5,pointRadius:0,tension:.4,fill:true,backgroundColor:'rgba(0,255,136,.08)'}}]}},
+    options:{{responsive:false,animation:{{duration:300}},plugins:{{legend:{{display:false}},tooltip:{{enabled:false}}}},scales:{{x:{{display:false}},y:{{display:false}}}}}}
+  }});
+}}
+
+function updateChart(market,latestPnl) {{
+  const c=charts[market]; if(!c) return;
+  const hist=pnlH[market]||[];
+  const col=latestPnl>=0?'#00ff88':'#ff3355';
+  c.data.labels=hist.map((_,i)=>i);
+  c.data.datasets[0].data=hist;
+  c.data.datasets[0].borderColor=col;
+  c.data.datasets[0].backgroundColor=latestPnl>=0?'rgba(0,255,136,.08)':'rgba(255,51,85,.08)';
+  c.update('none');
 }}
 
 async function pollTrades() {{
   try {{
-    const trades = await fetch('/trades/api').then(r => r.json());
-    buildPinwheel(trades);
+    const trades=await fetch('/trades/api').then(r=>r.json());
+    _trades=trades; _offset=0; renderDeck();
   }} catch(e) {{}}
 }}
 
 async function pollFeed() {{
   try {{
-    const d = await fetch('/notify/api').then(r => r.json());
-    document.getElementById('feed-ts').textContent = new Date().toLocaleTimeString();
-    const wrap = document.getElementById('feed-wrap');
-    if (!d.length) {{ wrap.innerHTML = '<div class="no-pos">Waiting for signals...</div>'; return; }}
-    wrap.innerHTML = d.slice(0,5).map(n => {{
-      const txt = n.text || '';
-      const cls = txt.includes('OPEN') ? 'open'
-        : txt.includes('+$') && txt.includes('CLOSE') ? 'win'
-        : txt.includes('CLOSE') ? 'loss' : '';
-      const clean = txt.replace(/\*/g,'').replace(/\\n/g,' · ');
-      return `<div class="feed-item">
-        <span class="feed-time">${{n.time}}</span>
-        <span class="feed-text ${{cls}}">${{clean}}</span>
+    const d=await fetch('/notify/api').then(r=>r.json());
+    const wrap=document.getElementById('feed-wrap');
+    if(!d.length){{wrap.innerHTML='<div class="no-pos">Waiting for signals...</div>';return;}}
+    wrap.innerHTML=d.slice(0,5).map((n,i)=>{{
+      const txt=n.text||'';
+      const isOpen=txt.includes('OPEN'),isClose=txt.includes('CLOSE');
+      const colMap=isClose&&txt.includes('+')?'#00ff88':isClose?'#ff3355':isOpen?'#00e5ff':'var(--muted)';
+      const clean=txt.replace(/\*/g,'').replace(/\\n/g,' · ');
+      return `<div class="feed-entry vis" style="border-left-color:${{colMap}};color:${{colMap}};animation-delay:${{i*.08}}s">
+        <span class="feed-ts">${{n.time}}</span>${{clean}}
       </div>`;
     }}).join('');
   }} catch(e) {{}}
 }}
 
-function updateHero(d) {{
-  document.getElementById('hero-cap').textContent = '$' + d.capital.toFixed(2);
-  const pnl = d.total_pnl || 0;
-  const pnlEl = document.getElementById('hero-pnl');
-  pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2) + ' PnL';
-  pnlEl.style.color = pnl >= 0 ? '#00ff88' : '#ff3355';
-  document.getElementById('hero-trades').textContent = d.total_trades + ' trades';
-  document.getElementById('hero-secured').textContent = '$' + (d.profit_secured || 0).toFixed(0) + ' secured';
-  const wr = d.win_rate || 0;
-  const wrEl = document.getElementById('stat-wr');
-  wrEl.textContent = wr + '%';
-  wrEl.style.color = wr >= 50 ? '#00ff88' : '#ff3355';
-  document.getElementById('stat-open').textContent = Object.keys(d.positions || {{}}).length + '/' + MAX_OPEN;
-  const dp = d.daily_pnl || 0;
-  const dpEl = document.getElementById('stat-dpnl');
-  dpEl.textContent = (dp >= 0 ? '+' : '') + '$' + dp.toFixed(2);
-  dpEl.style.color = dp >= 0 ? '#00ff88' : '#ff3355';
-}}
+/* ── RIPPLE ─────────────────────────────────────────────────── */
+document.addEventListener('click',function(e){{
+  const btn=e.target.closest('.trade-btn');
+  if(!btn) return;
+  const r=btn.getBoundingClientRect();
+  const x=e.clientX-r.left, y=e.clientY-r.top;
+  const size=Math.max(r.width,r.height)*1.5;
+  const rip=document.createElement('div'); rip.className='ripple-el';
+  const col=btn.classList.contains('btn-long')?'var(--green)':'var(--red)';
+  rip.style.cssText=`width:${{size}}px;height:${{size}}px;left:${{x-size/2}}px;top:${{y-size/2}}px;background:${{col}}`;
+  btn.appendChild(rip); rip.addEventListener('animationend',()=>rip.remove());
+}});
 
-function updatePositions(positions) {{
-  const wrap = document.getElementById('pos-wrap');
-  const noPos = document.getElementById('no-pos');
-  const keys = Object.keys(positions);
-  document.getElementById('pos-count').textContent = keys.length;
-  noPos.style.display = keys.length ? 'none' : 'block';
-
-  keys.forEach((market, i) => {{
-    const pos = positions[market];
-    const pnl = pos.pnl || 0;
-    if (!pnlH[market]) pnlH[market] = [];
-    pnlH[market].push(pnl);
-    if (pnlH[market].length > 80) pnlH[market].shift();
-
-    let card = document.getElementById('pc-' + market);
-    if (!card) {{
-      card = document.createElement('div');
-      card.id = 'pc-' + market;
-      card.className = 'pos-card';
-      card.setAttribute('onclick', 'toggleCard(this, event)');
-      card.innerHTML = buildCard(market, pos);
-      card.style.animation = 'slideUp .4s ease ' + (i * 0.08) + 's both';
-      wrap.appendChild(card);
-      setTimeout(() => initChart(market), 80);
-    }} else {{
-      const pnlEl = document.getElementById('pp-' + market);
-      const c = pnl >= 0 ? '#00ff88' : '#ff3355';
-      const margin = (pos.size || 0) / (pos.leverage || 1);
-      const pct = margin > 0 ? (pnl / margin * 100).toFixed(1) : '0.0';
-      if (pnlEl) {{
-        pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2) + ' (' + (pnl >= 0 ? '+' : '') + pct + '%)';
-        pnlEl.style.color = c;
-      }}
-      const curEl = document.getElementById('cur-' + market);
-      if (curEl) curEl.textContent = '$' + (pos.current_price || pos.entry || 0).toFixed(4);
-      const durEl = document.getElementById('dur-' + market);
-      if (durEl && pos.opened_at) {{
-        durEl.textContent = Math.floor((Date.now() / 1000 - pos.opened_at) / 60) + 'm open';
-      }}
-      const isExpanded = card.classList.contains('expanded');
-      card.className = 'pos-card' + (isExpanded ? ' expanded' : '') + (pnl >= 0 ? ' profit' : ' loss');
-      updateChart(market, pnl);
-    }}
-  }});
-
-  document.querySelectorAll('.pos-card').forEach(el => {{
-    const m = el.id.replace('pc-', '');
-    if (!positions[m]) {{
-      if (charts[m]) {{ charts[m].destroy(); delete charts[m]; }}
-      delete pnlH[m];
-      el.remove();
-    }}
-  }});
-}}
-
-function buildCard(market, pos) {{
-  const side = pos.side || 'long';
-  const sc = side === 'long' ? '#00ff88' : '#ff3355';
-  const pnl = pos.pnl || 0;
-  const pc = pnl >= 0 ? '#00ff88' : '#ff3355';
-  const margin = (pos.size || 0) / (pos.leverage || 1);
-  const pct = margin > 0 ? (pnl / margin * 100).toFixed(1) : '0.0';
-  const cur = pos.current_price || pos.entry || 0;
-  const openedAt = pos.opened_at || 0;
-  const openedStr = openedAt ? new Date(openedAt * 1000).toLocaleTimeString() : '—';
-  const mins = openedAt ? Math.floor((Date.now() / 1000 - openedAt) / 60) : 0;
-  return `
-  <div class="pos-body">
-    <div class="pos-top">
-      <span class="pos-sym">${{market}}-PERP</span>
-      <span class="pos-side" style="color:${{sc}};border-color:${{sc}}">${{side.toUpperCase()}}</span>
-      <span class="pos-pnl" id="pp-${{market}}" style="color:${{pc}}">${{pnl>=0?'+':''}}$${{pnl.toFixed(2)}} (${{pnl>=0?'+':''}}${{pct}}%)</span>
-    </div>
-    <div class="pos-meta">
-      <span><b>Entry</b> $${{(pos.entry||0).toFixed(4)}}</span>
-      <span><b>Now</b> <span id="cur-${{market}}">$${{cur.toFixed(4)}}</span></span>
-      <span><b>TP</b> <span style="color:#00ff8870">$${{(pos.tp||0).toFixed(4)}}</span></span>
-      <span><b>SL</b> <span style="color:#ff335570">$${{(pos.sl||0).toFixed(4)}}</span></span>
-    </div>
-    <canvas id="chart-${{market}}" class="mini" height="60"></canvas>
-  </div>
-  <div class="pos-detail">
-    <div class="pos-ts-row">
-      <span>Opened ${{openedStr}}</span>
-      <span id="dur-${{market}}">${{mins}}m open</span>
-    </div>
-    <div class="pos-notional">$${{(pos.size||0).toFixed(2)}} @ ${{pos.leverage||1}}x leverage</div>
-  </div>
-  <div class="pos-hint">TAP FOR DETAILS <span class="pos-chevron">▾</span></div>
-  <button class="close-btn" onclick="closePos('${{market}}')">✕ CLOSE ${{market}}</button>`;
-}}
-
-function initChart(market) {{
-  const el = document.getElementById('chart-' + market);
-  if (!el || charts[market]) return;
-  charts[market] = new Chart(el.getContext('2d'), {{
-    type: 'line',
-    data: {{ labels: [], datasets: [{{
-      data: [], borderColor: '#00e5ff',
-      backgroundColor: 'rgba(0,229,255,0.1)',
-      borderWidth: 1.5, pointRadius: 0, tension: 0.45, fill: true
-    }}]}},
-    options: {{
-      responsive: true, animation: {{ duration: 350 }},
-      plugins: {{ legend: {{ display: false }},
-        tooltip: {{ callbacks: {{ label: c => (c.parsed.y>=0?'+':'')+'$'+c.parsed.y.toFixed(2) }} }} }},
-      scales: {{
-        x: {{ display: false }},
-        y: {{ grid: {{ color: '#ffffff06' }}, ticks: {{ color: '#333', font: {{ size: 8 }}, callback: v => '$'+v.toFixed(1) }} }}
-      }}
-    }}
-  }});
-  updateChart(market, pnlH[market]?.[pnlH[market].length-1] || 0);
-}}
-
-function updateChart(market, latestPnl) {{
-  const c = charts[market]; if (!c) return;
-  const hist = pnlH[market] || [];
-  const col = latestPnl >= 0 ? '#00ff88' : '#ff3355';
-  const ctx = c.canvas.getContext('2d');
-  const g = ctx.createLinearGradient(0, 0, 0, 60);
-  g.addColorStop(0, latestPnl >= 0 ? 'rgba(0,255,136,0.22)' : 'rgba(255,51,85,0.22)');
-  g.addColorStop(1, 'rgba(0,0,0,0)');
-  c.data.labels = hist.map((_,i) => i);
-  c.data.datasets[0].data = hist;
-  c.data.datasets[0].borderColor = col;
-  c.data.datasets[0].backgroundColor = g;
-  c.update('none');
-}}
-
-function updateProgress(cap) {{
-  const next = MS.find(m => m > cap) || GOAL;
-  const pct = Math.max(0, Math.min(100, Math.round((cap - START_CAP) / Math.max(next - START_CAP, 1) * 100)));
-  document.getElementById('prog-fill').style.width = pct + '%';
-  document.getElementById('prog-pct').textContent = pct + '%';
-  MS.forEach(m => {{
-    const el = document.getElementById('ms-' + m);
-    if (el) el.className = cap >= m ? 'ms hit' : 'ms';
-  }});
-}}
-
-function manualTrade(market, side) {{
-  if (!confirm('Open ' + side.toUpperCase() + ' ' + market + '?')) return;
-  fetch('/api/manual-' + side + '/' + market, {{ method: 'POST' }})
-    .then(r => r.json()).then(d => alert(d.msg || d.error)).catch(e => alert(e));
+/* ── CONTROLS ───────────────────────────────────────────────── */
+function manualTrade(market,side) {{
+  if(!confirm('Open '+side.toUpperCase()+' '+market+'?')) return;
+  fetch('/api/manual-'+side+'/'+market,{{method:'POST'}})
+    .then(r=>r.json()).then(d=>alert(d.msg||d.error)).catch(e=>alert(e));
 }}
 function closePos(market) {{
-  if (!confirm('Close ' + market + '?')) return;
-  fetch('/api/close/' + market, {{ method: 'POST' }})
-    .then(r => r.json()).then(d => alert(d.msg || d.error)).catch(e => alert(e));
+  if(!confirm('Close '+market+'?')) return;
+  fetch('/api/close/'+market,{{method:'POST'}})
+    .then(r=>r.json()).then(d=>alert(d.msg||d.error)).catch(e=>alert(e));
 }}
 function resetCapital() {{
-  if (!confirm('Reset capital to ${STARTING_CAPITAL:.0f} and clear all trade history?\\nThis cannot be undone.')) return;
-  fetch('/api/reset-capital', {{ method: 'POST' }})
-    .then(r => r.json()).then(d => {{ alert(d.msg || d.error); poll(); pollTrades(); }})
-    .catch(e => alert(e));
+  if(!confirm('Reset capital to ${STARTING_CAPITAL:.0f} and clear all trade history?\\nThis cannot be undone.')) return;
+  fetch('/api/reset-capital',{{method:'POST'}})
+    .then(r=>r.json()).then(d=>{{alert(d.msg||d.error);poll();pollTrades();}}).catch(e=>alert(e));
 }}
 
+/* ── KICK OFF ───────────────────────────────────────────────── */
 poll(); pollTrades(); pollFeed();
-setInterval(poll, 3000);
-setInterval(pollTrades, 5000);
-setInterval(pollFeed, 4000);
+setInterval(poll,3000); setInterval(pollTrades,5000); setInterval(pollFeed,4000);
 </script>
 </body></html>"""
 
