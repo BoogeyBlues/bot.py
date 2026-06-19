@@ -4,3 +4,5 @@ solders>=0.18.0
 solana>=0.30.0
 base58>=2.1.1,<3.0.0
 anchorpy>=0.20.0
+anthropic>=0.40.0,<2.0.0
+pyflakes>=3.0.0,<4.0.0
