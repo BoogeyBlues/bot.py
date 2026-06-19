@@ -30,6 +30,10 @@ DRIFT_TP_USD       = float(os.environ.get("DRIFT_TP_USD",    str(DRIFT_MARGIN_US
 DRIFT_SL_MARGIN_PCT = float(os.environ.get("DRIFT_SL_MARGIN_PCT", "0.75"))  # close when loss = 75% of margin
 DRIFT_TUNE_EVERY   = int(os.environ.get("DRIFT_TUNE_EVERY",   "3")) # retune after every N closed trades
 DRIFT_COMPOUND_PCT = float(os.environ.get("DRIFT_COMPOUND_PCT", "0.10"))  # % of profit reinvested
+DAILY_TRADE_MIN    = int(os.environ.get("DAILY_TRADE_MIN",  "3"))   # must reach this before any stop
+DAILY_WIN_TARGET   = int(os.environ.get("DAILY_WIN_TARGET", "3"))   # once wins >= this, allow up to DAILY_LOSS_MAX
+DAILY_LOSS_SOFT    = int(os.environ.get("DAILY_LOSS_SOFT",  "1"))   # default stop: 1 loss after min trades
+DAILY_LOSS_MAX     = int(os.environ.get("DAILY_LOSS_MAX",   "3"))   # hard cap: always stop at 3 losses
 REDIS_URL          = os.environ.get("UPSTASH_REDIS_REST_URL", "")
 REDIS_TOKEN        = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
 BYBIT_API_KEY      = os.environ.get("BYBIT_API_KEY", "")
@@ -46,6 +50,9 @@ _capital         = STARTING_CAPITAL
 _profit_secured  = 0.0   # total profit taken out
 _daily_pnl     = 0.0
 _day_start     = ""
+_daily_wins    = 0
+_daily_losses  = 0
+_daily_trades  = 0
 _price_history = {}
 _milestones_hit = set()
 _state_lock    = threading.Lock()
@@ -1111,6 +1118,15 @@ def close_position(market, exit_price, reason=""):
 
     # ── Record market stats for adaptive learning ──────────────────
     won = pnl_usd > 0
+    global _daily_wins, _daily_losses, _daily_trades
+    with _state_lock:
+        _daily_trades += 1
+        if won:
+            _daily_wins += 1
+        else:
+            _daily_losses += 1
+        log("ok" if won else "err",
+            f"Daily: {_daily_trades} trades | {_daily_wins}W {_daily_losses}L", market)
     with _state_lock:
         s = _market_stats.setdefault(market, {
             "wins": 0, "losses": 0,
@@ -1283,16 +1299,29 @@ def run_trading_loop():
 
             # Daily PnL reset
             today = time.strftime("%Y-%m-%d")
-            global _day_start, _daily_pnl
+            global _day_start, _daily_pnl, _daily_wins, _daily_losses, _daily_trades
             with _state_lock:
                 if _day_start != today:
                     _day_start = today
                     _daily_pnl = 0.0
+                    _daily_wins = 0
+                    _daily_losses = 0
+                    _daily_trades = 0
+                    log("ok", f"New day {today} — daily counters reset")
 
             # Open new positions if slots available
             with _state_lock:
                 n_open = len(_positions)
                 cap    = _capital
+
+            # ── Daily trading gate ──────────────────────────────────
+            with _state_lock:
+                dt, dw, dl = _daily_trades, _daily_wins, _daily_losses
+            loss_limit = DAILY_LOSS_MAX if dw >= DAILY_WIN_TARGET else DAILY_LOSS_SOFT
+            if dt >= DAILY_TRADE_MIN and dl >= loss_limit:
+                log("info", f"Daily gate: {dt} trades | {dw}W {dl}L — done for today")
+                time.sleep(60)
+                continue
 
             if n_open < DRIFT_MAX_OPEN:
                 for market in markets:
