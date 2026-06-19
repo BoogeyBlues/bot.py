@@ -579,7 +579,6 @@ def get_signal(market):
     vals = [p for _, p in prices]
 
     # ── Indicators ────────────────────────────────────────────────
-    ema20     = sum(vals[-20:]) / 20
     rsi       = _calc_rsi(vals, 7)
     atr       = _calc_atr(vals, 7)
     st_bull, st_lvl = _supertrend(vals, 7, 3.0)
@@ -592,30 +591,22 @@ def get_signal(market):
     # ── Market regime: must have enough volatility to be worth trading ──
     atr_pct = atr / cur
     if atr_pct < 0.001:   # market is frozen / ranging — skip
-        _st_prev[market] = st_bull  # consume flip so it doesn't linger
+        _st_prev[market] = st_bull
         return None, 0, None
 
     # ── Direction from Supertrend ──────────────────────────────────
     trend = "long" if st_bull else "short"
 
-    # ── Factor 1: EMA-20 trend filter (no counter-trend entries) ──
-    ema_ok = (trend == "long" and cur > ema20) or (trend == "short" and cur < ema20)
-    if not ema_ok:
-        _st_prev[market] = st_bull  # consume flip so stale flip doesn't persist
-        return None, 0, None
-
-    # ── Factor 2: RSI exhaustion check ────────────────────────────
-    # Hard block only on clear exhaustion (overbought long or oversold short).
-    # Mid-range RSI adds a confidence point; extreme-but-not-exhausted passes with lower confidence.
+    # ── RSI exhaustion check — only hard block at extremes ────────
     rsi_exhausted = (trend == "long" and rsi > 78) or (trend == "short" and rsi < 22)
     if rsi_exhausted:
         _st_prev[market] = st_bull
         return None, 0, None
 
     # ── Confidence scoring ─────────────────────────────────────────
-    confidence = 1  # base: ST + EMA agree and RSI not exhausted
+    confidence = 1  # base: Supertrend direction + RSI not exhausted
     if 35 < rsi < 65:
-        confidence += 1  # RSI in neutral zone — momentum has room to run
+        confidence += 1  # RSI neutral — momentum has room
 
     prev_bull = _st_prev.get(market)
     just_flipped = prev_bull is not None and prev_bull != st_bull
@@ -623,9 +614,6 @@ def get_signal(market):
         confidence += 1  # fresh flip = highest quality entry
 
     _st_prev[market] = st_bull
-
-    if confidence < 1:
-        return None, 0, None
 
     return trend, confidence, atr
 
