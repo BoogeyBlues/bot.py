@@ -2691,6 +2691,5 @@ if __name__ == "__main__":
         f"Capital: ${_capital:.2f}"
     )
 
-    # Use PORT (Railway's exposed port) when running standalone; fall back to DRIFT_PORT when sidecar
     _port = int(os.environ.get("PORT", DRIFT_PORT))
     app.run(host="0.0.0.0", port=_port, debug=False)
