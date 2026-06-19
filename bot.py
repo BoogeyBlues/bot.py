@@ -1376,68 +1376,107 @@ def lock_profit_to_usdc(profit_usd):
         log("warn", f"USDC lock error: {e}", "USDC")
 
 # ── TRADE EXECUTION ──────────────────────────────────────────────
+def _sign_and_send(raw_tx_b64, symbol):
+    """Decode a base64 transaction, sign with WALLET_PRIVATE_KEY, broadcast."""
+    import base64
+    tx_bytes = base64.b64decode(raw_tx_b64)
+    keypair  = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+    tx       = VersionedTransaction(VersionedTransaction.from_bytes(tx_bytes).message, [keypair])
+    client   = Client(SOL_RPC)
+    result   = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True, preflight_commitment="confirmed"))
+    sig      = str(result.value)
+    if sig and len(sig) > 10:
+        log("ok", f"https://solscan.io/tx/{sig}", symbol)
+        return sig
+    return None
+
+def _gmgn_swap(token_in, token_out, in_amount, symbol, slippage=15):
+    """Route a swap through GMGN. Returns sig or None."""
+    try:
+        res = _session.get(
+            GMGN_ROUTE,
+            params={"token_in_address": token_in, "token_out_address": token_out,
+                    "in_amount": in_amount, "from_address": WALLET, "slippage": slippage},
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://gmgn.ai/"},
+            timeout=12,
+        )
+        if res.status_code != 200:
+            log("warn", f"GMGN route {res.status_code}: {res.text[:80]}", symbol)
+            return None
+        raw_tx = res.json().get("data", {}).get("raw_tx", {}).get("swapTransaction", "")
+        if not raw_tx:
+            log("warn", "GMGN returned no transaction", symbol)
+            return None
+        return _sign_and_send(raw_tx, symbol)
+    except Exception as e:
+        log("warn", f"GMGN swap error: {e}", symbol)
+        return None
+
+def _pumpportal_swap(action, mint, amount_or_tokens, symbol, pool="pump"):
+    """Fallback: PumpPortal for bonding-curve tokens not yet routable via GMGN."""
+    try:
+        res = _session.post(
+            PUMPPORTAL,
+            headers={"Content-Type": "application/json"},
+            json={"publicKey": WALLET, "action": action, "mint": mint,
+                  "denominatedInSol": "true" if action == "buy" else "false",
+                  "amount": amount_or_tokens,
+                  "slippage": 20, "priorityFee": 0.001, "pool": pool},
+            timeout=15,
+        )
+        if res.status_code != 200:
+            log("err", f"PumpPortal {action} {res.status_code}: {res.text[:80]}", symbol)
+            return None
+        keypair = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+        tx      = VersionedTransaction(VersionedTransaction.from_bytes(res.content).message, [keypair])
+        client  = Client(SOL_RPC)
+        result  = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True, preflight_commitment="confirmed"))
+        sig     = str(result.value)
+        return sig if sig and len(sig) > 10 else None
+    except Exception as e:
+        log("err", f"PumpPortal {action} error: {e}", symbol)
+        return None
+
 def execute_buy(mint, symbol, amount, pool="pump"):
     if PAPER_MODE:
-        log("ok", f"[PAPER] Buy ${amount:.2f} -> {symbol} [{pool}]", symbol)
+        log("ok", f"[PAPER] Buy ${amount:.2f} -> {symbol}", symbol)
         return "PAPER_TX"
     try:
         sol_price = get_sol_price()
         if not sol_price:
             log("err", "Cannot get SOL price — buy aborted", symbol)
             return None
-        sol_amount = round(amount / sol_price, 6)
-
-        res = _session.post(
-            PUMPPORTAL,
-            headers={"Content-Type": "application/json"},
-            json={"publicKey": WALLET, "action": "buy", "mint": mint,
-                  "denominatedInSol": "true", "amount": sol_amount,
-                  "slippage": 20, "priorityFee": 0.001, "pool": pool},
-            timeout=15
-        )
-        if res.status_code != 200:
-            log("err", f"PumpPortal buy {res.status_code}: {res.text[:80]}", symbol)
-            return None
-
-        keypair = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
-        tx      = VersionedTransaction(VersionedTransaction.from_bytes(res.content).message, [keypair])
-        client  = Client(SOL_RPC)
-        result  = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True, preflight_commitment="confirmed"))
-        sig     = str(result.value)
-        if sig and len(sig) > 10:
-            log("ok", f"Bought! sig={sig[:20]}...", symbol)
-            log("ok", f"https://solscan.io/tx/{sig}", symbol)
+        lamports = int((amount / sol_price) * 1_000_000_000)
+        sig = _gmgn_swap(WSOL_MINT, mint, lamports, symbol)
+        if sig:
+            log("ok", f"Bought via GMGN! sig={sig[:20]}...", symbol)
             return sig
-        return None
+        # Fallback for pre-graduation bonding curve tokens
+        log("warn", "GMGN route failed — trying PumpPortal", symbol)
+        sig = _pumpportal_swap("buy", mint, round(amount / sol_price, 6), symbol, pool)
+        if sig:
+            log("ok", f"Bought via PumpPortal! sig={sig[:20]}...", symbol)
+        return sig
     except Exception as e:
         log("err", f"Buy error: {e}", symbol)
         return None
 
 def execute_sell(tokens, mint, symbol, pool="pump"):
     if PAPER_MODE:
-        log("ok", f"[PAPER] Sell {symbol} [{pool}]", symbol)
+        log("ok", f"[PAPER] Sell {symbol}", symbol)
         return "PAPER_TX"
     try:
-        res = _session.post(
-            PUMPPORTAL,
-            headers={"Content-Type": "application/json"},
-            json={"publicKey": WALLET, "action": "sell", "mint": mint,
-                  "denominatedInSol": "false", "amount": tokens,
-                  "slippage": 20, "priorityFee": 0.001, "pool": pool},
-            timeout=15
-        )
-        if res.status_code != 200:
-            log("err", f"PumpPortal sell {res.status_code}: {res.text[:80]}", symbol)
-            return None
-        keypair = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
-        tx      = VersionedTransaction(VersionedTransaction.from_bytes(res.content).message, [keypair])
-        client  = Client(SOL_RPC)
-        result  = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True, preflight_commitment="confirmed"))
-        sig     = str(result.value)
-        if sig and len(sig) > 10:
-            log("ok", f"Sold! sig={sig[:20]}...", symbol)
+        token_units = int(tokens * 1_000_000)  # PumpFun tokens = 6 decimals
+        sig = _gmgn_swap(mint, WSOL_MINT, token_units, symbol)
+        if sig:
+            log("ok", f"Sold via GMGN! sig={sig[:20]}...", symbol)
             return sig
-        return None
+        # Fallback for bonding curve tokens
+        log("warn", "GMGN route failed — trying PumpPortal", symbol)
+        sig = _pumpportal_swap("sell", mint, tokens, symbol, pool)
+        if sig:
+            log("ok", f"Sold via PumpPortal! sig={sig[:20]}...", symbol)
+        return sig
     except Exception as e:
         log("err", f"Sell error: {e}", symbol)
         return None
