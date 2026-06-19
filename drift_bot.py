@@ -571,16 +571,6 @@ def get_signal(market):
     if just_flipped:
         confidence += 1  # fresh flip = highest quality entry
 
-    # GMGN only tracks meme coins — skip for institutional perp markets
-    if market.upper() not in _JPERP_MARKETS:
-        gmgn_bias = _get_gmgn_signal(market)
-        if gmgn_bias == trend:
-            confidence += 1
-        elif gmgn_bias and gmgn_bias != trend:
-            log("info", f"{market} ST={trend} but GMGN={gmgn_bias} — suppressed", "SIG")
-            _st_prev[market] = st_bull
-            return None, 0, None
-
     _st_prev[market] = st_bull
 
     if confidence < 1:
