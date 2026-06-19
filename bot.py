@@ -70,8 +70,11 @@ _CAP_TIERS = _RISK_TIERS.get(RISK_LEVEL, _RISK_TIERS["standard"])
 MAX_DAILY_LOSS_PCT = float(os.environ.get("MAX_DAILY_LOSS_PCT", "20"))  # stop day if down >20% of start capital
 
 # Risk limits
-DAILY_LOSS_MAX    = int(os.environ.get("DAILY_LOSS_MAX",  "3"))   # retune after N consecutive losses
-LOSS_COOLDOWN_HRS = float(os.environ.get("LOSS_COOLDOWN_HRS", "0.5")) # 30-min pause then resume
+DAILY_TRADE_MIN   = int(os.environ.get("DAILY_TRADE_MIN",  "3"))   # minimum trades before stop rules apply
+DAILY_WIN_TARGET  = int(os.environ.get("DAILY_WIN_TARGET", "3"))   # once wins >= this, allow up to DAILY_LOSS_MAX
+DAILY_LOSS_SOFT   = int(os.environ.get("DAILY_LOSS_SOFT",  "1"))   # default: stop after 1 loss (2W 1L target)
+DAILY_LOSS_MAX    = int(os.environ.get("DAILY_LOSS_MAX",   "3"))   # hard cap: always stop at 3 losses
+LOSS_COOLDOWN_HRS = float(os.environ.get("LOSS_COOLDOWN_HRS", "0.5")) # kept for retune timing
 ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # retune every 5 trades for faster learning
 
 # Bond Runner strategy
@@ -427,10 +430,15 @@ def daily_limit_reached():
     with capital_lock:
         cap_now = capital  # snapshot outside _daily_lock to avoid lock-order inversion
     with _daily_lock:
-        if _pause_until > time.time():
-            resume = time.strftime("%H:%M", time.localtime(_pause_until))
-            log("info", f"Cooling down after {_daily_losses} losses — resumes {resume}")
-            return True
+        dt = _daily_trades
+        dw = _daily_wins
+        dl = _daily_losses
+        # Daily loss gate — only applies after minimum trades reached
+        if dt >= DAILY_TRADE_MIN:
+            loss_limit = DAILY_LOSS_MAX if dw >= DAILY_WIN_TARGET else DAILY_LOSS_SOFT
+            if dl >= loss_limit:
+                log("info", f"Daily gate: {dt} trades | {dw}W {dl}L — done for today (resets midnight)")
+                return True
         # Capital-tiered daily trade cap
         limit = daily_trade_limit()
         if _daily_trades >= limit:
@@ -445,22 +453,23 @@ def daily_limit_reached():
         return False
 
 def record_daily_trade(won):
-    global _daily_wins, _daily_losses, _pause_until
+    global _daily_wins, _daily_losses
     with _daily_lock:
         if won:
             _daily_wins += 1
         else:
             _daily_losses += 1
+        dt, dw, dl = _daily_trades, _daily_wins, _daily_losses
         log("ok" if won else "info",
-            f"Daily: {_daily_trades} trades | {_daily_wins}W {_daily_losses}L")
-        if not won and _daily_losses % DAILY_LOSS_MAX == 0:
-            resume_ts   = time.time() + LOSS_COOLDOWN_HRS * 3600
-            _pause_until = resume_ts
-            resume_str   = time.strftime("%H:%M", time.localtime(resume_ts))
-            log("warn", f"{_daily_losses} losses — pausing 30min to retune. Resumes {resume_str}")
-            notify("🔧 Retuning",
-                   f"{_daily_losses} losses hit.\nPausing 30min, retuning strategy.\nResumes: {resume_str}")
-            threading.Thread(target=_retune_strategies, daemon=True).start()
+            f"Daily: {dt} trades | {dw}W {dl}L")
+        # Notify when we hit the loss limit (after min trades)
+        if not won and dt >= DAILY_TRADE_MIN:
+            loss_limit = DAILY_LOSS_MAX if dw >= DAILY_WIN_TARGET else DAILY_LOSS_SOFT
+            if dl >= loss_limit:
+                log("warn", f"Daily limit reached: {dt} trades {dw}W {dl}L — stopping until midnight")
+                notify("🛑 Daily limit hit",
+                       f"{dl} losses after {dt} trades.\nStopping until midnight.\n{dw}W {dl}L today.")
+                threading.Thread(target=_retune_strategies, daemon=True).start()
     _save_daily_state()
 
 def _retune_strategies():
