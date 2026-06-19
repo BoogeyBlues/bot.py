@@ -1933,114 +1933,304 @@ def trades_page():
     with _state_lock:
         all_trades = list(_trades)
 
-    wins   = [t for t in all_trades if t["pnl"] >= 0]
-    total  = len(all_trades)
-    wr     = round(len(wins) / max(total, 1) * 100, 1)
-    total_pnl = sum(t["pnl"] for t in all_trades)
-    sign        = "+" if total_pnl >= 0 else ""
-    wr_color    = "#00ff88" if wr >= 50 else "#ff3355"
-    pnl_color   = "#00ff88" if total_pnl >= 0 else "#ff3355"
-    rows_empty  = '<tr><td colspan="9" class="empty">No trades yet</td></tr>'
+    wins       = [t for t in all_trades if t["pnl"] >= 0]
+    total      = len(all_trades)
+    wr         = round(len(wins) / max(total, 1) * 100, 1)
+    total_pnl  = sum(t["pnl"] for t in all_trades)
+    best_pnl   = max((t["pnl"] for t in all_trades), default=0)
+    sign       = "+" if total_pnl >= 0 else ""
+    best_sign  = "+" if best_pnl >= 0 else ""
+    wr_color   = "#00ff88" if wr >= 50 else "#ff3355"
+    pnl_color  = "#00ff88" if total_pnl >= 0 else "#ff3355"
+    best_color = "#00ff88" if best_pnl >= 0 else "#ff3355"
+    badge_txt  = f"{total} TRADES · {len(wins)} WINS" if total else "ANALYST DESK — STANDING BY"
+
+    ticker_items = ""
+    for t in all_trades[-20:]:
+        cls = "ti-g" if t["pnl"] >= 0 else "ti-r"
+        sgn = "+" if t["pnl"] >= 0 else ""
+        ticker_items += f'<span class="ti {cls}">&#x25CF; {t["market"]} {t.get("reason","?")} {sgn}${t["pnl"]:.0f}</span>'
+    if ticker_items:
+        ticker_items = ticker_items + ticker_items
+    else:
+        ticker_items = '<span class="ti" style="color:var(--muted)">&#x25CF; No trades yet &#x25CF; Analysts standing by &#x25CF; Waiting for signals</span>' * 2
+
+    WIN_FIG = (
+        '<svg viewBox="0 0 58 46" width="58" height="46" style="display:block;margin:0 auto">'
+        '<line x1="2" y1="38" x2="56" y2="38" stroke="#0d1e30" stroke-width="1.2"/>'
+        '<rect x="30" y="6" width="20" height="15" rx="1.5" fill="#040810" stroke="#00ff88" stroke-width="1.2"/>'
+        '<rect x="32" y="8" width="16" height="11" fill="#00ff88" fill-opacity=".12"/>'
+        '<text x="35" y="16" fill="#00ff88" font-size="8" font-family="sans-serif">&#x2191;</text>'
+        '<line x1="40" y1="21" x2="40" y2="27" stroke="#0d1e30" stroke-width="1"/>'
+        '<line x1="36" y1="27" x2="44" y2="27" stroke="#0d1e30" stroke-width="1.2"/>'
+        '<rect x="18" y="34" width="14" height="3" rx=".5" fill="#0a1628"/>'
+        '<circle cx="10" cy="9" r="5.5" fill="none" stroke="#00ff88" stroke-width="1.5"/>'
+        '<line x1="10" y1="14.5" x2="10" y2="28" stroke="#00ff88" stroke-width="1.5"/>'
+        '<line x1="10" y1="20" x2="2" y2="12" stroke="#00ff88" stroke-width="1.5"/>'
+        '<line x1="10" y1="20" x2="18" y2="12" stroke="#00ff88" stroke-width="1.5"/>'
+        '<line x1="10" y1="28" x2="6" y2="38" stroke="#00ff88" stroke-width="1.5"/>'
+        '<line x1="6" y1="38" x2="3" y2="38" stroke="#00ff88" stroke-width="1"/>'
+        '<line x1="10" y1="28" x2="14" y2="38" stroke="#00ff88" stroke-width="1.5"/>'
+        '<line x1="14" y1="38" x2="18" y2="38" stroke="#00ff88" stroke-width="1"/>'
+        '</svg>'
+    )
+
+    LOSS_FIG = (
+        '<svg viewBox="0 0 58 46" width="58" height="46" style="display:block;margin:0 auto">'
+        '<line x1="2" y1="38" x2="56" y2="38" stroke="#0d1e30" stroke-width="1.2"/>'
+        '<rect x="30" y="6" width="20" height="15" rx="1.5" fill="#040810" stroke="#ff3355" stroke-width="1.2"/>'
+        '<rect x="32" y="8" width="16" height="11" fill="#ff3355" fill-opacity=".1"/>'
+        '<text x="35" y="16" fill="#ff3355" font-size="8" font-family="sans-serif">&#x2193;</text>'
+        '<line x1="40" y1="21" x2="40" y2="27" stroke="#0d1e30" stroke-width="1"/>'
+        '<line x1="36" y1="27" x2="44" y2="27" stroke="#0d1e30" stroke-width="1.2"/>'
+        '<rect x="18" y="34" width="14" height="3" rx=".5" fill="#0a1628"/>'
+        '<circle cx="10" cy="13" r="5.5" fill="none" stroke="#ff3355" stroke-width="1.5"/>'
+        '<line x1="10" y1="18.5" x2="9" y2="30" stroke="#ff3355" stroke-width="1.5"/>'
+        '<g>'
+        '<line x1="9" y1="24" x2="18" y2="34" stroke="#ff3355" stroke-width="1.5"/>'
+        '<line x1="9" y1="24" x2="22" y2="34" stroke="#ff3355" stroke-width="1.5"/>'
+        '<animateTransform attributeName="transform" type="translate" values="0 0;0 -1.5;0 0" dur="0.35s" repeatCount="indefinite"/>'
+        '</g>'
+        '<line x1="9" y1="30" x2="5" y2="38" stroke="#ff3355" stroke-width="1.5"/>'
+        '<line x1="5" y1="38" x2="2" y2="38" stroke="#ff3355" stroke-width="1"/>'
+        '<line x1="9" y1="30" x2="13" y2="38" stroke="#ff3355" stroke-width="1.5"/>'
+        '<line x1="13" y1="38" x2="17" y2="38" stroke="#ff3355" stroke-width="1"/>'
+        '</svg>'
+    )
 
     rows = ""
-    for t in all_trades:
-        t_color    = "#00ff88" if t["pnl"] >= 0 else "#ff3355"
-        t_icon     = "▲" if t["pnl"] >= 0 else "▼"
-        t_sign     = "+" if t["pnl"] >= 0 else ""
-        t_side_clr = "#00ff88" if t["side"] == "long" else "#ff3355"
-        t_badge    = "win" if t["pnl"] >= 0 else "loss"
-        dur_m      = round(t.get("duration_s", 0) / 60, 1)
-        rows += (
-            f'<tr>'
-            f'<td class="sym">{t["market"]}</td>'
-            f'<td style="color:{t_side_clr};font-weight:900">{t["side"].upper()}</td>'
-            f'<td class="mono">${t["entry"]:.4f}</td>'
-            f'<td class="mono">${t["exit"]:.4f}</td>'
-            f'<td class="mono" style="color:{t_color}">{t_icon} {t_sign}${t["pnl"]:.2f}</td>'
-            f'<td class="mono" style="color:{t_color}">{t_sign}{t["pnl_pct"]:.1f}%</td>'
-            f'<td><span class="badge {t_badge}">{t["reason"]}</span></td>'
-            f'<td class="muted">{dur_m}m</td>'
-            f'<td class="muted">{t["ts"]}</td>'
-            f'</tr>'
+    if not all_trades:
+        rows = (
+            '<tr><td class="c-fig"></td>'
+            '<td colspan="9" style="text-align:center;padding:24px;color:var(--muted);font-size:11px">'
+            'No trades yet — analysts are standing by</td></tr>'
         )
+    else:
+        for i, t in enumerate(all_trades, 1):
+            win       = t["pnl"] >= 0
+            fig       = WIN_FIG if win else LOSS_FIG
+            pnl_cls   = "win" if win else "los"
+            pnl_bg    = "win-bg" if win else "los-bg"
+            s_color   = "#00ff88" if t["side"] == "long" else "#ff3355"
+            s_sign    = "+" if win else ""
+            reason    = t.get("reason", "?")
+            badge_cls = "rbadge-tp" if reason == "TP" else "rbadge-sl"
+            dur_m     = round(t.get("duration_s", 0) / 60, 1)
+            rows += (
+                f'<tr>'
+                f'<td class="c-fig">{fig}</td>'
+                f'<td class="c-num">{i}</td>'
+                f'<td class="c-market">{t["market"]}</td>'
+                f'<td class="c-side" style="color:{s_color}">{t["side"].upper()}</td>'
+                f'<td class="c-mono">${t["entry"]:.4f}</td>'
+                f'<td class="c-mono">${t["exit"]:.4f}</td>'
+                f'<td class="c-pnl {pnl_cls} {pnl_bg}">{s_sign}${t["pnl"]:.2f}</td>'
+                f'<td class="c-pct {pnl_cls}">{s_sign}{t["pnl_pct"]:.1f}%</td>'
+                f'<td><span class="rbadge {badge_cls}">{reason}</span></td>'
+                f'<td class="c-mono" style="color:var(--muted)">{dur_m}m</td>'
+                f'</tr>'
+            )
 
-    html = f"""<!DOCTYPE html>
+    return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<meta http-equiv="refresh" content="30">
-<title>Trades — {DRIFT_BOT_NAME}</title>
+<title>Trade Log — {DRIFT_BOT_NAME}</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
-  *{{box-sizing:border-box;margin:0;padding:0}}
-  :root{{--cyan:#00e5ff;--green:#00ff88;--red:#ff3355;--bg:#050a14;--card:#0a1220;--border:#ffffff15}}
-  body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
-  .bg-art{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.30;pointer-events:none;z-index:0}}
-  .wrap{{position:relative;z-index:1}}
-  nav{{display:flex;gap:0;border-bottom:2px solid var(--cyan);overflow-x:auto;scrollbar-width:none}}
-  nav::-webkit-scrollbar{{display:none}}
-  nav a{{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;
-    white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;border-right:1px solid var(--border);transition:all .15s}}
-  nav a:hover{{background:var(--cyan);color:#000}}
-  .page-title{{font-family:'Bebas Neue',sans-serif;font-size:3rem;color:var(--cyan);
-    text-shadow:0 0 24px #00e5ff88;padding:18px 16px 8px;line-height:1;letter-spacing:.04em}}
-  .stats-bar{{display:flex;gap:2px;background:var(--cyan);margin:0 0 2px}}
-  .stat-item{{background:var(--card);padding:12px 16px;flex:1}}
-  .stat-item .lbl{{font-size:.56rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em}}
-  .stat-item .val{{font-family:'Bebas Neue',sans-serif;font-size:1.6rem;margin-top:2px}}
-  .cyan{{color:var(--cyan)}} .green{{color:var(--green)}} .red{{color:var(--red)}} .muted{{color:#888}}
-  .section{{background:var(--card);border-bottom:2px solid var(--border)}}
-  .tbl-wrap{{overflow-x:auto}}
-  table{{width:100%;border-collapse:collapse;font-size:.68rem}}
-  th{{padding:8px 10px;font-size:.54rem;font-weight:700;color:#888;text-transform:uppercase;
-    letter-spacing:.08em;text-align:left;border-bottom:1px solid var(--border);
-    white-space:nowrap;background:#080f1a}}
-  td{{padding:8px 10px;border-bottom:1px solid #ffffff05;vertical-align:middle}}
-  .sym{{font-weight:900;font-size:.78rem}}
-  .mono{{font-family:'JetBrains Mono',monospace;font-size:.64rem}}
-  .badge{{display:inline-block;padding:2px 6px;font-size:.54rem;font-weight:900;letter-spacing:.06em;border:1px solid}}
-  .badge.win{{color:var(--green);border-color:var(--green);background:#00ff8815}}
-  .badge.loss{{color:var(--red);border-color:var(--red);background:#ff335515}}
-  .empty{{text-align:center;padding:24px;color:#444;font-size:.75rem}}
-  footer{{padding:14px 16px;text-align:center;font-size:.6rem;color:#444;border-top:1px solid var(--border)}}
-  footer a{{color:var(--cyan);text-decoration:none}}
+*{{margin:0;padding:0;box-sizing:border-box}}
+:root{{--bg:#050a14;--bg2:#080f1e;--bg3:#0d1628;--cyan:#00e5ff;--green:#00ff88;--red:#ff3355;--yellow:#ffee00;--text:#c8d8f0;--muted:#4a6080}}
+body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
+.orb{{position:fixed;border-radius:50%;pointer-events:none;z-index:0;filter:blur(80px);opacity:.15}}
+.orb-cyan{{width:320px;height:320px;top:-60px;left:calc(50% - 160px);background:radial-gradient(circle,var(--cyan),transparent 70%);animation:orbF 9s ease-in-out infinite}}
+.orb-green{{width:260px;height:260px;bottom:-40px;right:calc(50% - 220px);background:radial-gradient(circle,var(--green),transparent 70%);animation:orbF 9s ease-in-out infinite reverse}}
+@keyframes orbF{{0%,100%{{transform:translate(0,0)}}50%{{transform:translate(20px,30px)}}}}
+#particles{{position:fixed;inset:0;z-index:0;pointer-events:none}}
+.wrapper{{max-width:430px;margin:0 auto;position:relative;z-index:1;min-height:100vh}}
+nav{{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(5,10,20,.92);backdrop-filter:blur(12px);border-bottom:1px solid rgba(0,229,255,.12);display:flex;align-items:center;justify-content:space-between;padding:0 18px;height:50px;max-width:430px;margin:0 auto}}
+.nav-logo{{font-family:'Bebas Neue',sans-serif;font-size:19px;color:var(--cyan);letter-spacing:2px;text-shadow:0 0 12px rgba(0,229,255,.5)}}
+.nav-links{{display:flex;gap:14px}}
+.nav-link{{font-size:10px;font-weight:600;letter-spacing:1.5px;color:var(--muted);text-decoration:none;text-transform:uppercase;transition:color .2s}}
+.nav-link.active,.nav-link:hover{{color:var(--cyan)}}
+.scroll-area{{padding-top:50px;padding-bottom:60px}}
+.hero-scene{{display:flex;align-items:center;gap:10px;padding:18px 14px 6px}}
+.page-title{{font-family:'Bebas Neue',sans-serif;font-size:46px;line-height:.95;color:var(--cyan);text-shadow:0 0 22px rgba(0,229,255,.5);letter-spacing:2px}}
+.page-sub{{font-size:9px;font-weight:700;letter-spacing:2.5px;color:var(--muted);text-transform:uppercase;margin-top:5px}}
+.live-badge{{display:inline-flex;align-items:center;gap:5px;background:rgba(0,229,255,.07);border:1px solid rgba(0,229,255,.18);padding:3px 9px;border-radius:20px;font-size:9px;font-weight:700;letter-spacing:1px;color:var(--cyan);margin-top:8px}}
+.bdot{{width:5px;height:5px;border-radius:50%;background:var(--green);animation:blink 1.2s ease-in-out infinite}}
+@keyframes blink{{0%,100%{{opacity:1}}50%{{opacity:.15}}}}
+.stats-row{{display:grid;grid-template-columns:repeat(4,1fr);gap:2px;padding:8px 12px;margin-bottom:2px}}
+.stat{{background:rgba(13,22,40,.8);border:1px solid rgba(0,229,255,.07);padding:9px 6px;text-align:center}}
+.stat-lbl{{font-size:7.5px;font-weight:700;letter-spacing:1.5px;color:var(--muted);text-transform:uppercase}}
+.stat-val{{font-family:'Bebas Neue',sans-serif;font-size:19px;margin-top:2px}}
+.cyan{{color:var(--cyan)}}.green{{color:var(--green)}}.red{{color:var(--red)}}
+.ticker-wrap{{overflow:hidden;background:rgba(0,229,255,.03);border-top:1px solid rgba(0,229,255,.09);border-bottom:1px solid rgba(0,229,255,.09);padding:5px 0;margin-bottom:14px}}
+.ticker-track{{display:flex;gap:28px;white-space:nowrap;animation:tick 20s linear infinite}}
+@keyframes tick{{0%{{transform:translateX(0)}}100%{{transform:translateX(-50%)}}}}
+.ti{{font-size:10px;font-weight:700;letter-spacing:.8px;font-family:'JetBrains Mono',monospace}}
+.ti-g{{color:var(--green)}}.ti-r{{color:var(--red)}}
+.sheet-section{{padding:0 12px 24px}}
+.sheet-label{{font-size:9px;font-weight:700;letter-spacing:2px;color:var(--muted);text-transform:uppercase;margin-bottom:8px;padding-left:2px}}
+.sheet-outer{{border-radius:5px;background:#05091a;box-shadow:0 0 0 1px rgba(0,229,255,.16),0 16px 50px rgba(0,0,0,.85),6px 6px 0 rgba(0,229,255,.05),12px 12px 0 rgba(0,229,255,.025);overflow:hidden}}
+.sheet-titlebar{{background:#0a1525;border-bottom:1px solid rgba(0,229,255,.12);padding:6px 10px;display:flex;align-items:center;gap:6px}}
+.tl{{width:8px;height:8px;border-radius:50%}}
+.tl-r{{background:#ff5f56}}.tl-y{{background:#ffbd2e}}.tl-g{{background:#27c93f}}
+.sheet-name{{font-size:9.5px;font-weight:600;color:var(--muted);letter-spacing:.5px;margin:0 auto;font-family:'JetBrains Mono',monospace}}
+.formula-bar{{background:#06091a;border-bottom:1px solid rgba(255,255,255,.05);padding:4px 10px;display:flex;align-items:center;gap:8px;font-family:'JetBrains Mono',monospace;font-size:9px}}
+.fx-label{{color:var(--cyan);font-weight:700;font-size:10px}}
+.fx-val{{color:rgba(0,229,255,.5)}}
+.tbl-scroll{{overflow-x:auto;-webkit-overflow-scrolling:touch}}
+table{{width:100%;border-collapse:collapse;font-size:9.5px;min-width:500px}}
+.col-hdr{{background:#06091a;border-bottom:1px solid rgba(255,255,255,.05)}}
+.col-hdr th{{font-family:'JetBrains Mono',monospace;font-size:8px;font-weight:600;color:#2a3a50;text-align:center;padding:2px 0;border-right:1px solid rgba(255,255,255,.03);letter-spacing:0}}
+.fld-hdr th{{background:#080f1c;color:#5a7090;font-size:7.5px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;padding:6px 8px;border-bottom:2px solid rgba(0,229,255,.14);border-right:1px solid rgba(255,255,255,.04);text-align:left;white-space:nowrap}}
+.fld-hdr th.c-fig{{text-align:center}}
+.fld-hdr th.c-num{{text-align:center;color:#253545}}
+td{{padding:0 7px;height:46px;border-bottom:1px solid rgba(255,255,255,.04);border-right:1px solid rgba(255,255,255,.03);vertical-align:middle;white-space:nowrap}}
+td.c-fig{{padding:0;text-align:center;border-right:1px solid rgba(0,229,255,.08);background:#04081a}}
+td.c-num{{color:#253545;font-family:'JetBrains Mono',monospace;font-size:8px;text-align:center}}
+tr:nth-child(even) td{{background:rgba(255,255,255,.012)}}
+tr:hover td{{background:rgba(0,229,255,.04)!important}}
+.c-market{{font-weight:700;font-size:11px;letter-spacing:.5px}}
+.c-side{{font-weight:900;font-size:10px}}
+.c-mono{{font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text)}}
+.c-pnl{{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:11px;padding-left:6px!important;padding-right:6px!important}}
+.c-pct{{font-family:'JetBrains Mono',monospace;font-size:9px}}
+.win{{color:var(--green)}}.los{{color:var(--red)}}
+.win-bg{{background:rgba(0,255,136,.05)!important}}.los-bg{{background:rgba(255,51,85,.05)!important}}
+.rbadge{{display:inline-block;font-size:7px;font-weight:900;letter-spacing:1px;padding:2px 5px;border:1px solid;border-radius:2px}}
+.rbadge-tp{{color:var(--green);border-color:var(--green);background:rgba(0,255,136,.08)}}
+.rbadge-sl{{color:var(--red);border-color:var(--red);background:rgba(255,51,85,.08)}}
+footer{{padding:18px 16px;text-align:center;font-size:9px;color:var(--muted);border-top:1px solid rgba(255,255,255,.04)}}
+footer a{{color:var(--cyan);text-decoration:none}}
 </style>
 </head>
 <body>
-<img src="/static/tankgirl.png" class="bg-art" alt="">
-<div class="wrap">
-  <nav>
-    <a href="/">HOME</a>
-    <a href="/trades">TRADES</a>
-    <a href="/status/api">API</a>
-    <a href="https://drift.trade" target="_blank">DRIFT</a>
-  </nav>
-  <div class="page-title">TRADE HISTORY</div>
-  <div class="stats-bar">
-    <div class="stat-item">
-      <div class="lbl">Total</div>
-      <div class="val cyan">{total}</div>
-    </div>
-    <div class="stat-item">
-      <div class="lbl">Win Rate</div>
-      <div class="val" style="color:{wr_color}">{wr}%</div>
-    </div>
-    <div class="stat-item">
-      <div class="lbl">Total PnL</div>
-      <div class="val" style="color:{pnl_color}">{sign}${total_pnl:.2f}</div>
-    </div>
+<div class="orb orb-cyan"></div>
+<div class="orb orb-green"></div>
+<canvas id="particles"></canvas>
+<div class="wrapper">
+<nav>
+  <span class="nav-logo">{DRIFT_BOT_NAME}</span>
+  <div class="nav-links">
+    <a href="/" class="nav-link">HOME</a>
+    <a href="/trades" class="nav-link active">TRADES</a>
+    <a href="/monitor" class="nav-link">MONITOR</a>
+    <a href="https://jup.ag" class="nav-link" target="_blank">JUPITER ↗</a>
   </div>
-  <div class="section">
-    <div class="tbl-wrap"><table>
-      <thead><tr><th>Market</th><th>Side</th><th>Entry</th><th>Exit</th><th>PnL $</th><th>PnL %</th><th>Reason</th><th>Dur</th><th>Time</th></tr></thead>
-      <tbody>{rows if rows else rows_empty}</tbody>
-    </table></div>
+</nav>
+<div class="scroll-area">
+<div class="hero-scene">
+  <div style="flex-shrink:0">
+    <svg viewBox="0 0 158 118" width="158" height="118" style="display:block">
+      <line x1="6" y1="88" x2="152" y2="88" stroke="#0d1e30" stroke-width="3"/>
+      <line x1="18" y1="88" x2="18" y2="108" stroke="#0d1e30" stroke-width="2.5"/>
+      <line x1="140" y1="88" x2="140" y2="108" stroke="#0d1e30" stroke-width="2.5"/>
+      <rect x="50" y="32" width="36" height="28" rx="2" fill="#040810" stroke="#00e5ff" stroke-width="1.4"/>
+      <rect x="52" y="34" width="32" height="24" rx="1" fill="#00e5ff" fill-opacity=".04"/>
+      <polyline points="55,52 61,46 67,48 73,40 79,44 83,38" fill="none" stroke="#00ff88" stroke-width="1.2"/>
+      <rect x="52" y="34" width="32" height="24" fill="#00e5ff" fill-opacity="0"><animate attributeName="fill-opacity" values="0;.07;0" dur="3s" repeatCount="indefinite"/></rect>
+      <line x1="68" y1="60" x2="68" y2="70" stroke="#0d1e30" stroke-width="2"/>
+      <line x1="62" y1="70" x2="74" y2="70" stroke="#0d1e30" stroke-width="2.2"/>
+      <rect x="94" y="24" width="44" height="36" rx="2" fill="#040810" stroke="#00e5ff" stroke-width="1.4"/>
+      <rect x="96" y="26" width="40" height="32" rx="1" fill="#00e5ff" fill-opacity=".03"/>
+      <text x="99" y="36" fill="{pnl_color}" font-family="monospace" font-size="5.5">{sign}${total_pnl:.0f} PNL</text>
+      <text x="99" y="44" fill="{wr_color}" font-family="monospace" font-size="5.5">{wr}% WIN RATE</text>
+      <text x="99" y="52" fill="#c8d8f0" font-family="monospace" font-size="5.5">{total} TRADES</text>
+      <rect x="96" y="26" width="40" height="32" fill="#00e5ff" fill-opacity="0"><animate attributeName="fill-opacity" values="0;.06;0" dur="3s" begin="1.5s" repeatCount="indefinite"/></rect>
+      <line x1="116" y1="60" x2="116" y2="70" stroke="#0d1e30" stroke-width="2"/>
+      <line x1="108" y1="70" x2="124" y2="70" stroke="#0d1e30" stroke-width="2.2"/>
+      <rect x="56" y="80" width="50" height="7" rx="1.5" fill="#0a1628"/>
+      <rect x="58" y="81.5" width="46" height="4" rx="1" fill="#0d1e30"/>
+      <rect x="32" y="78" width="11" height="10" rx="1.5" fill="#0d1e30" stroke="#253545" stroke-width="1"/>
+      <path d="M43,81 Q48,81 48,84 Q48,87 43,87" fill="none" stroke="#253545" stroke-width="1"/>
+      <line x1="35" y1="77" x2="34" y2="72" stroke="#253545" stroke-width="1" opacity=".5"><animate attributeName="opacity" values=".5;.1;.5" dur="1.8s" repeatCount="indefinite"/></line>
+      <line x1="39" y1="77" x2="40" y2="72" stroke="#253545" stroke-width="1" opacity=".4"><animate attributeName="opacity" values=".3;.7;.3" dur="2.1s" repeatCount="indefinite"/></line>
+      <line x1="14" y1="54" x2="14" y2="80" stroke="#0d1e30" stroke-width="3"/>
+      <line x1="14" y1="58" x2="26" y2="58" stroke="#0d1e30" stroke-width="2.5"/>
+      <circle cx="28" cy="40" r="10" fill="none" stroke="#c8d8f0" stroke-width="2"/>
+      <circle cx="35" cy="39" r="2" fill="#c8d8f0"/>
+      <line x1="28" y1="50" x2="28" y2="74" stroke="#c8d8f0" stroke-width="2.5"/>
+      <g><line x1="28" y1="58" x2="56" y2="80" stroke="#c8d8f0" stroke-width="2"/><animateTransform attributeName="transform" type="translate" values="0 0;0 -2;0 0" dur="0.32s" repeatCount="indefinite"/></g>
+      <line x1="28" y1="58" x2="20" y2="70" stroke="#c8d8f0" stroke-width="2"/>
+      <line x1="20" y1="70" x2="50" y2="80" stroke="#c8d8f0" stroke-width="1.5"/>
+      <line x1="28" y1="74" x2="16" y2="88" stroke="#c8d8f0" stroke-width="2"/>
+      <line x1="16" y1="88" x2="6" y2="88" stroke="#c8d8f0" stroke-width="1.5"/>
+      <line x1="28" y1="74" x2="38" y2="88" stroke="#c8d8f0" stroke-width="2"/>
+      <line x1="38" y1="88" x2="50" y2="88" stroke="#c8d8f0" stroke-width="1.5"/>
+    </svg>
   </div>
-  <footer>{DRIFT_BOT_NAME} &nbsp;·&nbsp; <a href="/">← Back</a></footer>
+  <div style="flex:1">
+    <div class="page-title">TRADE<br>LOG</div>
+    <div class="page-sub">ANALYST DESK</div>
+    <div class="live-badge"><div class="bdot"></div>{badge_txt}</div>
+  </div>
 </div>
+<div class="stats-row">
+  <div class="stat"><div class="stat-lbl">TOTAL</div><div class="stat-val cyan">{total}</div></div>
+  <div class="stat"><div class="stat-lbl">WIN RATE</div><div class="stat-val" style="color:{wr_color}">{wr}%</div></div>
+  <div class="stat"><div class="stat-lbl">TOT PNL</div><div class="stat-val" style="color:{pnl_color}">{sign}${total_pnl:.2f}</div></div>
+  <div class="stat"><div class="stat-lbl">BEST</div><div class="stat-val" style="color:{best_color}">{best_sign}${best_pnl:.2f}</div></div>
+</div>
+<div class="ticker-wrap"><div class="ticker-track">{ticker_items}</div></div>
+<div class="sheet-section">
+  <div class="sheet-label">&#x25C6; ANALYST DESK — TRADE HISTORY</div>
+  <div class="sheet-outer">
+    <div class="sheet-titlebar">
+      <div class="tl tl-r"></div><div class="tl tl-y"></div><div class="tl tl-g"></div>
+      <div class="sheet-name">TRADES_LOG.xlsx</div>
+    </div>
+    <div class="formula-bar">
+      <span class="fx-label">fx</span>
+      <span class="fx-val">=TRADE_LOG!A1:J{total + 1}</span>
+    </div>
+    <div class="tbl-scroll">
+      <table>
+        <thead>
+          <tr class="col-hdr">
+            <th style="width:58px"></th><th style="width:28px">A</th>
+            <th style="width:80px">B</th><th style="width:52px">C</th>
+            <th style="width:72px">D</th><th style="width:72px">E</th>
+            <th style="width:70px">F</th><th style="width:52px">G</th>
+            <th style="width:44px">H</th><th style="width:36px">I</th>
+          </tr>
+          <tr class="fld-hdr">
+            <th class="c-fig">ANALYST</th><th class="c-num">#</th>
+            <th>MARKET</th><th>SIDE</th><th>ENTRY</th><th>EXIT</th>
+            <th>PNL</th><th>%</th><th>CLOSE</th><th>DUR</th>
+          </tr>
+        </thead>
+        <tbody>{rows}</tbody>
+      </table>
+    </div>
+  </div>
+</div>
+</div>
+<footer>{DRIFT_BOT_NAME} &nbsp;&#x00B7;&nbsp; <a href="https://jup.ag" target="_blank">JUPITER ↗</a> &nbsp;&#x00B7;&nbsp; {'PAPER' if DRIFT_PAPER_MODE else 'LIVE'}</footer>
+</div>
+<script>
+const canvas=document.getElementById('particles');
+const ctx=canvas.getContext('2d');
+let W,H,pts=[];
+function resize(){{W=canvas.width=window.innerWidth;H=canvas.height=window.innerHeight;}}
+function mkPt(){{return{{x:Math.random()*W,y:Math.random()*H,vx:(Math.random()-.5)*.3,vy:(Math.random()-.5)*.3,r:Math.random()*1.4+.4,a:Math.random()*.4+.1}};}}
+function initPts(){{pts=Array.from({{length:55}},mkPt);}}
+function drawPts(){{
+  ctx.clearRect(0,0,W,H);
+  pts.forEach(p=>{{
+    p.x+=p.vx;p.y+=p.vy;
+    if(p.x<0||p.x>W)p.vx*=-1;if(p.y<0||p.y>H)p.vy*=-1;
+    ctx.beginPath();ctx.arc(p.x,p.y,p.r,0,Math.PI*2);
+    ctx.fillStyle=`rgba(0,229,255,${{p.a}})`;ctx.fill();
+  }});
+  requestAnimationFrame(drawPts);
+}}
+window.addEventListener('resize',()=>{{resize();initPts();}});
+resize();initPts();drawPts();
+</script>
 </body></html>"""
-    return html, 200
+
 
 
 @app.route("/status/api", methods=["GET"])
