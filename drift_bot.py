@@ -2376,12 +2376,8 @@ def run_position_price_updater():
 
 @app.route("/monitor", methods=["GET"])
 def monitor():
-    mode = "PAPER" if DRIFT_PAPER_MODE else "LIVE"
+    mode       = "PAPER" if DRIFT_PAPER_MODE else "LIVE"
     mode_color = "#ffee00" if DRIFT_PAPER_MODE else "#39ff14"
-    markets_list = [m.strip().upper() for m in DRIFT_MARKETS.split(",")]
-    close_btns = "".join(
-        f'<option value="{m}">{m}</option>' for m in markets_list
-    )
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2389,96 +2385,354 @@ def monitor():
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>Monitor — {DRIFT_BOT_NAME}</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
-*{{box-sizing:border-box;margin:0;padding:0}}
-:root{{--cyan:#00e5ff;--green:#00ff88;--red:#ff3355;--yellow:#ffee00;--bg:#050a14;--card:#0a1220;--border:#ffffff15}}
-body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh}}
-nav{{display:flex;border-bottom:2px solid var(--cyan);overflow-x:auto;scrollbar-width:none}}
-nav a{{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;border-right:1px solid var(--border);transition:background .15s}}
-nav a:hover,nav a.active{{background:var(--cyan);color:#000}}
-.strip{{background:var(--card);border-bottom:2px solid var(--border);padding:5px 16px;display:flex;justify-content:space-between;align-items:center}}
-.strip-left{{font-size:.6rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em}}
-.pill{{font-size:.65rem;font-weight:900;padding:3px 10px;background:{mode_color};color:#000}}
-.dot{{display:inline-block;width:6px;height:6px;border-radius:50%;background:{mode_color};margin-right:5px;animation:pulse 2s infinite}}
-@keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.4}}}}
-.section{{margin-bottom:2px;background:var(--card)}}
-.sec-hdr{{padding:10px 16px;border-bottom:1px solid var(--border);font-size:.6rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em;display:flex;justify-content:space-between;align-items:center}}
-.sec-hdr span{{color:var(--cyan)}}
-.pos-card{{padding:14px 16px;border-bottom:1px solid var(--border)}}
-.pos-top{{display:flex;align-items:baseline;gap:10px;margin-bottom:6px}}
-.pos-sym{{font-family:'Bebas Neue',sans-serif;font-size:1.4rem;color:var(--cyan)}}
-.pos-side{{font-size:.68rem;font-weight:900;padding:2px 7px;border:1px solid}}
-.pos-pnl{{font-family:'JetBrains Mono',monospace;font-size:1.1rem;font-weight:700;margin-left:auto}}
-.pos-meta{{display:grid;grid-template-columns:1fr 1fr;gap:3px 12px;font-size:.62rem;color:#666;font-family:'JetBrains Mono',monospace;margin-bottom:10px}}
+:root{{--cyan:#00e5ff;--green:#00ff88;--red:#ff3355;--yellow:#ffee00;--bg:#050a14;--bg2:#080f1e;--bg3:#0d1628;--text:#c8d8f0;--muted:#4a6080}}
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
+nav{{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(5,10,20,.92);backdrop-filter:blur(12px);border-bottom:1px solid rgba(0,229,255,.12);display:flex;align-items:center;justify-content:space-between;padding:0 20px;height:52px;max-width:430px;margin:0 auto}}
+.nav-logo{{font-family:'Bebas Neue',sans-serif;font-size:22px;color:var(--cyan);letter-spacing:2px;text-shadow:0 0 14px rgba(0,229,255,.6)}}
+.nav-links{{display:flex;gap:16px}}
+.nav-link{{font-size:11px;font-weight:600;letter-spacing:1.5px;color:var(--muted);text-decoration:none;text-transform:uppercase;transition:color .2s;animation:slideInLeft .4s both}}
+.nav-link:nth-child(1){{animation-delay:.05s}}
+.nav-link:nth-child(2){{animation-delay:.15s;color:var(--cyan)}}
+.nav-link:nth-child(3){{animation-delay:.25s}}
+.nav-link:hover{{color:var(--cyan)}}
+@keyframes slideInLeft{{from{{opacity:0;transform:translateX(-20px)}}to{{opacity:1;transform:translateX(0)}}}}
+.page{{max-width:430px;margin:0 auto;padding:68px 16px 40px}}
+.mode-toggle-bar{{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;animation:fadeUp .5s .1s both}}
+.mode-pill{{display:inline-flex;align-items:center;gap:6px;background:rgba(0,229,255,.08);border:1px solid rgba(0,229,255,.25);border-radius:20px;padding:5px 14px;font-size:11px;font-weight:700;letter-spacing:1.5px;color:var(--cyan);text-transform:uppercase;animation:breatheGlow 2.5s ease-in-out infinite}}
+.mode-pill::before{{content:'';width:7px;height:7px;border-radius:50%;background:{mode_color};box-shadow:0 0 8px {mode_color};animation:dotPulse 2.5s ease-in-out infinite}}
+@keyframes breatheGlow{{0%,100%{{box-shadow:0 0 8px rgba(0,229,255,.2)}}50%{{box-shadow:0 0 20px rgba(0,229,255,.5)}}}}
+@keyframes dotPulse{{0%,100%{{opacity:1}}50%{{opacity:.3}}}}
+.pnl-toggle-btn{{display:inline-flex;align-items:center;gap:8px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);border-radius:8px;padding:7px 14px;font-size:11px;font-weight:700;letter-spacing:1px;color:var(--text);cursor:pointer;text-transform:uppercase;transition:all .2s}}
+.pnl-toggle-btn:hover{{border-color:var(--cyan);color:var(--cyan)}}
+.scene-wrapper{{background:linear-gradient(180deg,rgba(0,229,255,.03) 0%,rgba(5,10,20,0) 100%);border:1px solid rgba(0,229,255,.1);border-radius:16px;padding:16px 0 0;margin-bottom:16px;overflow:hidden;animation:fadeUp .5s .2s both}}
+.scene-pnl{{text-align:center;font-family:'Bebas Neue',sans-serif;font-size:42px;letter-spacing:2px;line-height:1;margin-bottom:4px;transition:color .6s}}
+.scene-pnl.profit{{color:var(--green);text-shadow:0 0 20px rgba(0,255,136,.5)}}
+.scene-pnl.loss{{color:var(--red);text-shadow:0 0 20px rgba(255,51,85,.5)}}
+.scene-label{{text-align:center;font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;margin-bottom:8px;transition:color .6s}}
+.scene-label.profit{{color:var(--green)}}
+.scene-label.loss{{color:var(--red)}}
+#stickScene{{display:block;width:100%;height:200px}}
+.mini-stats{{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px}}
+.mini-stat{{background:var(--bg3);border:1px solid rgba(0,229,255,.08);border-radius:10px;padding:10px 8px;text-align:center;animation:fadeUp .5s both}}
+.mini-stat:nth-child(1){{animation-delay:.1s}}
+.mini-stat:nth-child(2){{animation-delay:.2s}}
+.mini-stat:nth-child(3){{animation-delay:.3s}}
+.mini-stat-val{{font-family:'Bebas Neue',sans-serif;font-size:20px;letter-spacing:1px;color:var(--cyan);display:block}}
+.mini-stat-lbl{{font-size:9px;font-weight:600;letter-spacing:1px;color:var(--muted);text-transform:uppercase;margin-top:2px;display:block}}
+.card{{background:var(--bg2);border:1px solid rgba(0,229,255,.1);border-radius:14px;padding:16px;margin-bottom:12px}}
+.sec-hdr{{font-family:'Bebas Neue',sans-serif;font-size:16px;letter-spacing:2px;color:var(--cyan);margin-bottom:12px;position:relative;overflow:hidden;display:inline-block;padding-right:8px}}
+.sec-hdr::after{{content:'';position:absolute;top:0;left:-100%;width:60%;height:100%;background:linear-gradient(90deg,transparent,rgba(0,229,255,.5),transparent);animation:scanLine 4s linear infinite}}
+@keyframes scanLine{{0%{{left:-60%}}100%{{left:160%}}}}
+.pos-card{{background:var(--bg3);border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:12px 14px;margin-bottom:8px;position:relative;overflow:hidden;animation:slideInRight .5s both}}
+@keyframes slideInRight{{from{{opacity:0;transform:translateX(30px)}}to{{opacity:1;transform:translateX(0)}}}}
+.pos-top{{display:flex;align-items:center;gap:10px;margin-bottom:8px}}
+.pos-sym{{font-family:'Bebas Neue',sans-serif;font-size:22px;color:var(--cyan);letter-spacing:1px}}
+.pos-side{{font-size:10px;font-weight:700;letter-spacing:1.5px;padding:2px 7px;border-radius:4px}}
+.pos-pnl{{font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:700;margin-left:auto}}
+.pos-meta{{display:grid;grid-template-columns:1fr 1fr;gap:3px 12px;font-size:10px;color:var(--muted);font-family:'JetBrains Mono',monospace;margin-bottom:10px}}
 .pos-meta b{{color:#aaa;font-weight:400}}
 canvas{{width:100%!important;display:block;margin-bottom:10px}}
-.close-btn{{width:100%;padding:9px;background:transparent;border:1px solid var(--red);color:var(--red);font-size:.65rem;font-weight:900;letter-spacing:.08em;cursor:pointer;text-transform:uppercase;transition:all .15s}}
+.close-btn{{width:100%;padding:9px;background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;font-weight:900;letter-spacing:1px;cursor:pointer;text-transform:uppercase;transition:all .15s;border-radius:6px}}
 .close-btn:hover{{background:var(--red);color:#fff}}
-.empty{{text-align:center;padding:30px 16px;color:#444;font-size:.75rem}}
-.log-box{{height:220px;overflow-y:auto;padding:10px 16px;font-family:'JetBrains Mono',monospace;font-size:.62rem;line-height:1.7;background:#040810}}
-.log-ok{{color:#00ff88}}.log-err{{color:#ff3355}}.log-warn{{color:#ffee00}}.log-info{{color:#888}}
-.trade-row{{display:grid;grid-template-columns:2fr 1fr 1fr 1.2fr 1fr;gap:4px;padding:8px 16px;border-bottom:1px solid var(--border);font-size:.65rem;font-family:'JetBrains Mono',monospace;align-items:center}}
-.trade-row.hdr{{font-size:.56rem;color:#666;font-weight:700;text-transform:uppercase;letter-spacing:.06em;padding:7px 16px;background:#080f1a}}
-.badge{{display:inline-block;padding:1px 5px;font-size:.54rem;font-weight:900;border:1px solid}}
+.log-feed{{background:var(--bg);border:1px solid rgba(0,229,255,.08);border-radius:10px;padding:10px 12px;max-height:180px;overflow-y:auto;font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.7}}
+.log-feed::-webkit-scrollbar{{width:3px}}
+.log-feed::-webkit-scrollbar-thumb{{background:var(--muted);border-radius:3px}}
+.log-entry{{border-left:2px solid;padding:5px 10px;margin-bottom:5px;border-radius:0 6px 6px 0}}
+.trade-table{{width:100%;border-collapse:collapse;font-size:12px}}
+.trade-table th{{font-size:10px;font-weight:700;letter-spacing:1px;color:var(--muted);text-transform:uppercase;padding:6px 8px;text-align:left;border-bottom:1px solid rgba(255,255,255,.06)}}
+.trade-table td{{padding:9px 8px;font-family:'JetBrains Mono',monospace;font-size:11px;border-bottom:1px solid rgba(255,255,255,.04)}}
+.orb{{position:fixed;border-radius:50%;pointer-events:none;filter:blur(80px);z-index:0;opacity:.12}}
+.orb-cyan{{width:300px;height:300px;background:radial-gradient(circle,var(--cyan),transparent 70%);top:-80px;left:-60px;animation:orb8 10s ease-in-out infinite}}
+.orb-red{{width:250px;height:250px;background:radial-gradient(circle,var(--red),transparent 70%);bottom:30px;right:-60px;animation:orb8 10s ease-in-out infinite reverse;animation-delay:-4s}}
+@keyframes orb8{{0%{{transform:translate(0,0)}}25%{{transform:translate(30px,20px)}}50%{{transform:translate(60px,0)}}75%{{transform:translate(30px,-20px)}}100%{{transform:translate(0,0)}}}}
+#particles{{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0}}
+.empty{{text-align:center;padding:30px;color:var(--muted);font-size:13px}}
+.badge{{display:inline-block;padding:1px 7px;font-size:10px;font-weight:700;border-radius:3px;border:1px solid}}
 .badge.win{{color:var(--green);border-color:var(--green)}}.badge.loss{{color:var(--red);border-color:var(--red)}}
+@keyframes fadeUp{{from{{opacity:0;transform:translateY(18px)}}to{{opacity:1;transform:translateY(0)}}}}
 </style>
 </head>
 <body>
+
+<div class="orb orb-cyan"></div>
+<div class="orb orb-red"></div>
+<canvas id="particles"></canvas>
+
 <nav>
-  <a href="/">HOME</a>
-  <a href="/monitor" class="active">MONITOR</a>
-  <a href="/trades">TRADES</a>
-  <a href="/status/api" target="_blank">API ↗</a>
-  <a href="https://drift.trade" target="_blank">DRIFT ↗</a>
+  <div class="nav-logo">DRIFT BOT</div>
+  <div class="nav-links">
+    <a class="nav-link" href="/">HOME</a>
+    <a class="nav-link" href="/monitor">MONITOR</a>
+    <a class="nav-link" href="/trades">TRADES</a>
+  </div>
 </nav>
-<div class="strip">
-  <span class="strip-left"><span class="dot"></span>LIVE MONITOR</span>
-  <span class="pill">{mode}</span>
-</div>
 
-<div class="section">
-  <div class="sec-hdr">OPEN POSITIONS <span id="pos-count">0</span></div>
-  <div id="pos-wrap"><div class="empty" id="no-pos">Scanning for signals...</div></div>
-</div>
+<div class="page">
 
-<div class="section">
-  <div class="sec-hdr">RECENT TRADES <span id="trade-count">0</span></div>
-  <div class="trade-row hdr"><span>MARKET</span><span>SIDE</span><span>PNL</span><span>RESULT</span><span>TIME</span></div>
-  <div id="trades-wrap"><div class="empty">No trades yet</div></div>
-</div>
+  <div class="mode-toggle-bar">
+    <div class="mode-pill">{mode} MODE</div>
+    <button class="pnl-toggle-btn" onclick="manualToggle()">
+      <span id="toggleIcon">📈</span>
+      <span id="toggleLabel">SHOW LOSS</span>
+    </button>
+  </div>
 
-<div class="section">
-  <div class="sec-hdr">LIVE FEED <span id="log-ts"></span></div>
-  <div class="log-box" id="log-box">Connecting...</div>
+  <!-- STICK FIGURE SCENE -->
+  <div class="scene-wrapper">
+    <div class="scene-pnl profit" id="scenePnl">$0.00</div>
+    <div class="scene-label profit" id="sceneLabel">MONITORING...</div>
+    <svg id="stickScene" viewBox="0 0 430 200" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <radialGradient id="glowGreen" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stop-color="#00ff88" stop-opacity="0.3"/>
+          <stop offset="100%" stop-color="#00ff88" stop-opacity="0"/>
+        </radialGradient>
+        <radialGradient id="glowRed" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stop-color="#ff3355" stop-opacity="0.25"/>
+          <stop offset="100%" stop-color="#ff3355" stop-opacity="0"/>
+        </radialGradient>
+      </defs>
+
+      <ellipse id="sceneGlow" cx="215" cy="175" rx="120" ry="20" fill="url(#glowGreen)" opacity="0.7"/>
+
+      <!-- Terrain -->
+      <path d="M0,175 Q40,170 60,172 Q80,174 90,168 Q100,162 110,160 Q130,155 150,148 Q170,140 180,135 Q200,125 215,108 Q230,125 250,135 Q265,140 280,148 Q300,155 320,160 Q330,162 340,168 Q350,174 360,172 Q380,170 430,175 L430,200 L0,200 Z"
+            fill="#0d1628" stroke="none"/>
+      <path d="M120,175 Q160,140 215,108 Q270,140 310,175"
+            fill="none" stroke="#1a2840" stroke-width="2"/>
+
+      <!-- PROFIT GROUP: 2 miners picking at the peak (SVG animateTransform — no JS needed) -->
+      <g id="profitGroup">
+        <!-- Rising $ above each miner -->
+        <text x="190" y="72" font-size="14" fill="#ffee00" text-anchor="middle" font-family="monospace" font-weight="bold">
+          $<animate attributeName="opacity" values="0;0.9;0" dur="2s" repeatCount="indefinite"/>
+          <animateTransform attributeName="transform" type="translate" from="0 0" to="0 -32" dur="2s" repeatCount="indefinite" additive="sum"/>
+        </text>
+        <text x="240" y="72" font-size="14" fill="#ffee00" text-anchor="middle" font-family="monospace" font-weight="bold">
+          $<animate attributeName="opacity" values="0;0.9;0" dur="2s" begin="0.7s" repeatCount="indefinite"/>
+          <animateTransform attributeName="transform" type="translate" from="0 0" to="0 -32" dur="2s" begin="0.7s" repeatCount="indefinite" additive="sum"/>
+        </text>
+        <!-- Miner 1: left of peak, swings pickaxe right -->
+        <g transform="translate(190,115)">
+          <circle cx="0" cy="-30" r="8" stroke="#00ff88" stroke-width="2.5" fill="rgba(0,255,136,0.12)"/>
+          <line x1="0" y1="-22" x2="0"   y2="-2"  stroke="#00ff88" stroke-width="2.5" stroke-linecap="round"/>
+          <line x1="0" y1="-17" x2="-11" y2="-9"  stroke="#00ff88" stroke-width="2.5" stroke-linecap="round"/>
+          <g>
+            <line x1="0"  y1="-17" x2="13" y2="-8"  stroke="#00ff88" stroke-width="2.5" stroke-linecap="round"/>
+            <line x1="11" y1="-9"  x2="18" y2="-2"  stroke="#ffee00" stroke-width="2.5" stroke-linecap="round"/>
+            <line x1="15" y1="-4"  x2="22" y2="-11" stroke="#ffee00" stroke-width="3"   stroke-linecap="round"/>
+            <animateTransform attributeName="transform" type="rotate" values="-28 0 -17;24 0 -17;-28 0 -17" dur="0.65s" repeatCount="indefinite"/>
+          </g>
+          <line x1="0" y1="-2" x2="-8" y2="14" stroke="#00ff88" stroke-width="2.5" stroke-linecap="round"/>
+          <line x1="0" y1="-2" x2="8"  y2="14" stroke="#00ff88" stroke-width="2.5" stroke-linecap="round"/>
+          <text x="0" y="26" font-size="9" fill="#00e5ff" text-anchor="middle" font-family="monospace" id="miner1Label">—</text>
+        </g>
+        <!-- Miner 2: right of peak, mirrored so pickaxe swings toward center -->
+        <g transform="translate(240,115) scale(-1,1)">
+          <circle cx="0" cy="-30" r="8" stroke="#00ff88" stroke-width="2.5" fill="rgba(0,255,136,0.12)"/>
+          <line x1="0" y1="-22" x2="0"   y2="-2"  stroke="#00ff88" stroke-width="2.5" stroke-linecap="round"/>
+          <line x1="0" y1="-17" x2="-11" y2="-9"  stroke="#00ff88" stroke-width="2.5" stroke-linecap="round"/>
+          <g>
+            <line x1="0"  y1="-17" x2="13" y2="-8"  stroke="#00ff88" stroke-width="2.5" stroke-linecap="round"/>
+            <line x1="11" y1="-9"  x2="18" y2="-2"  stroke="#ffee00" stroke-width="2.5" stroke-linecap="round"/>
+            <line x1="15" y1="-4"  x2="22" y2="-11" stroke="#ffee00" stroke-width="3"   stroke-linecap="round"/>
+            <animateTransform attributeName="transform" type="rotate" values="-28 0 -17;24 0 -17;-28 0 -17" dur="0.65s" begin="0.32s" repeatCount="indefinite"/>
+          </g>
+          <line x1="0" y1="-2" x2="-8" y2="14" stroke="#00ff88" stroke-width="2.5" stroke-linecap="round"/>
+          <line x1="0" y1="-2" x2="8"  y2="14" stroke="#00ff88" stroke-width="2.5" stroke-linecap="round"/>
+          <g transform="scale(-1,1)">
+            <text x="0" y="26" font-size="9" fill="#00e5ff" text-anchor="middle" font-family="monospace" id="miner2Label">—</text>
+          </g>
+        </g>
+        <!-- Impact sparkle at peak -->
+        <circle cx="215" cy="112" r="2.5" fill="#ffee00">
+          <animate attributeName="opacity" values="0.9;0;0.9" dur="0.65s" repeatCount="indefinite"/>
+          <animate attributeName="r"       values="2.5;5;2.5"  dur="0.65s" repeatCount="indefinite"/>
+        </circle>
+      </g>
+
+      <!-- LOSS GROUP: 2 walkers marching off-screen to the right -->
+      <g id="lossGroup" style="display:none">
+        <!-- Walker 1 -->
+        <g>
+          <circle cx="0" cy="-30" r="8" stroke="#ff3355" stroke-width="2.5" fill="rgba(255,51,85,0.1)"/>
+          <line x1="0" y1="-22" x2="3"   y2="-2"  stroke="#ff3355" stroke-width="2.5" stroke-linecap="round"/>
+          <line x1="1" y1="-17" x2="-10" y2="-5"  stroke="#ff3355" stroke-width="2.5" stroke-linecap="round"/>
+          <line x1="1" y1="-17" x2="10"  y2="-5"  stroke="#ff3355" stroke-width="2.5" stroke-linecap="round"/>
+          <g>
+            <line x1="3" y1="-2" x2="-4" y2="14" stroke="#ff3355" stroke-width="2.5" stroke-linecap="round"/>
+            <animateTransform attributeName="transform" type="rotate" values="25 3 -2;-25 3 -2;25 3 -2" dur="0.45s" repeatCount="indefinite" additive="sum"/>
+          </g>
+          <g>
+            <line x1="3" y1="-2" x2="9" y2="14" stroke="#ff3355" stroke-width="2.5" stroke-linecap="round"/>
+            <animateTransform attributeName="transform" type="rotate" values="-25 3 -2;25 3 -2;-25 3 -2" dur="0.45s" repeatCount="indefinite" additive="sum"/>
+          </g>
+          <ellipse cx="9" cy="-32" rx="2" ry="3" fill="#4af" opacity="0">
+            <animate attributeName="opacity" values="0;0.8;0" dur="2s" repeatCount="indefinite"/>
+            <animateTransform attributeName="transform" type="translate" from="0 0" to="2 20" dur="2s" repeatCount="indefinite" additive="sum"/>
+          </ellipse>
+          <text x="0" y="26" font-size="9" fill="#ff3355" text-anchor="middle" font-family="monospace" id="walker1Label">—</text>
+          <animateTransform attributeName="transform" type="translate" from="100 155" to="410 155" dur="3s" repeatCount="indefinite"/>
+          <animate attributeName="opacity" values="1;1;0" keyTimes="0;0.75;1" dur="3s" repeatCount="indefinite"/>
+        </g>
+        <!-- Walker 2 -->
+        <g>
+          <circle cx="0" cy="-30" r="8" stroke="#ff3355" stroke-width="2.5" fill="rgba(255,51,85,0.1)"/>
+          <line x1="0" y1="-22" x2="3"   y2="-2"  stroke="#ff3355" stroke-width="2.5" stroke-linecap="round"/>
+          <line x1="1" y1="-17" x2="-10" y2="-5"  stroke="#ff3355" stroke-width="2.5" stroke-linecap="round"/>
+          <line x1="1" y1="-17" x2="10"  y2="-5"  stroke="#ff3355" stroke-width="2.5" stroke-linecap="round"/>
+          <g>
+            <line x1="3" y1="-2" x2="-4" y2="14" stroke="#ff3355" stroke-width="2.5" stroke-linecap="round"/>
+            <animateTransform attributeName="transform" type="rotate" values="25 3 -2;-25 3 -2;25 3 -2" dur="0.45s" begin="0.22s" repeatCount="indefinite" additive="sum"/>
+          </g>
+          <g>
+            <line x1="3" y1="-2" x2="9" y2="14" stroke="#ff3355" stroke-width="2.5" stroke-linecap="round"/>
+            <animateTransform attributeName="transform" type="rotate" values="-25 3 -2;25 3 -2;-25 3 -2" dur="0.45s" begin="0.22s" repeatCount="indefinite" additive="sum"/>
+          </g>
+          <text x="0" y="26" font-size="9" fill="#ff3355" text-anchor="middle" font-family="monospace" id="walker2Label">—</text>
+          <animateTransform attributeName="transform" type="translate" from="145 155" to="455 155" dur="3s" begin="1.1s" repeatCount="indefinite"/>
+          <animate attributeName="opacity" values="1;1;0" keyTimes="0;0.75;1" dur="3s" begin="1.1s" repeatCount="indefinite"/>
+        </g>
+      </g>
+
+    </svg>
+  </div>
+
+  <!-- MINI STATS -->
+  <div class="mini-stats">
+    <div class="mini-stat">
+      <span class="mini-stat-val" id="statPositions">0</span>
+      <span class="mini-stat-lbl">Positions</span>
+    </div>
+    <div class="mini-stat">
+      <span class="mini-stat-val" id="statPnl" style="color:var(--cyan)">$0</span>
+      <span class="mini-stat-lbl">Open PnL</span>
+    </div>
+    <div class="mini-stat">
+      <span class="mini-stat-val" id="statWinRate">—</span>
+      <span class="mini-stat-lbl">Win Rate</span>
+    </div>
+  </div>
+
+  <!-- OPEN POSITIONS -->
+  <div class="card" style="animation:fadeUp .5s .3s both">
+    <div class="sec-hdr">OPEN POSITIONS</div>
+    <div id="pos-wrap"><div class="empty" id="no-pos">Scanning for signals...</div></div>
+  </div>
+
+  <!-- LIVE FEED -->
+  <div class="card" style="animation:fadeUp .5s .4s both">
+    <div class="sec-hdr">SYSTEM LOG</div>
+    <div class="log-feed" id="log-box">Connecting...</div>
+  </div>
+
+  <!-- RECENT TRADES -->
+  <div class="card" style="animation:fadeUp .5s .5s both">
+    <div class="sec-hdr">RECENT TRADES</div>
+    <table class="trade-table">
+      <thead><tr><th>Market</th><th>Side</th><th>PnL</th><th>Result</th><th>Time</th></tr></thead>
+      <tbody id="trades-wrap"><tr><td colspan="5" class="empty">No trades yet</td></tr></tbody>
+    </table>
+  </div>
+
 </div>
 
 <script>
-const charts = {{}};
+// ── PARTICLES ─────────────────────────────────────────────
+const pCanvas = document.getElementById('particles');
+const pCtx    = pCanvas.getContext('2d');
+let particles = [];
+function resizeP() {{ pCanvas.width = window.innerWidth; pCanvas.height = window.innerHeight; }}
+resizeP();
+window.addEventListener('resize', resizeP);
+for (let i = 0; i < 18; i++) {{
+  particles.push({{ x: Math.random()*window.innerWidth, y: Math.random()*window.innerHeight, speed: .4+Math.random()*.6, size: 1.5+Math.random(), opacity: .2+Math.random()*.3 }});
+}}
+(function animP() {{
+  pCtx.clearRect(0, 0, pCanvas.width, pCanvas.height);
+  particles.forEach(p => {{
+    p.y -= p.speed;
+    if (p.y < -4) {{ p.y = pCanvas.height+4; p.x = Math.random()*pCanvas.width; }}
+    pCtx.beginPath(); pCtx.arc(p.x, p.y, p.size, 0, Math.PI*2);
+    pCtx.fillStyle = `rgba(0,229,255,${{p.opacity}})`; pCtx.fill();
+  }});
+  requestAnimationFrame(animP);
+}})();
+
+// ── SCENE ─────────────────────────────────────────────────
+let isProfitMode   = true;
+let manualOverride = false;
+
+function setSceneMode(profit, totalPnl, labels) {{
+  isProfitMode = profit;
+  const profitGroup = document.getElementById('profitGroup');
+  const lossGroup   = document.getElementById('lossGroup');
+  const scenePnl    = document.getElementById('scenePnl');
+  const sceneLabel  = document.getElementById('sceneLabel');
+  const sceneGlow   = document.getElementById('sceneGlow');
+  const toggleIcon  = document.getElementById('toggleIcon');
+  const toggleLabel = document.getElementById('toggleLabel');
+  const pnlStr      = (totalPnl >= 0 ? '+' : '') + '$' + Math.abs(totalPnl).toFixed(2);
+  scenePnl.textContent = pnlStr;
+  if (profit) {{
+    profitGroup.style.display = '';
+    lossGroup.style.display   = 'none';
+    scenePnl.className        = 'scene-pnl profit';
+    sceneLabel.textContent    = 'MINING PROFITS';
+    sceneLabel.className      = 'scene-label profit';
+    sceneGlow.setAttribute('fill', 'url(#glowGreen)');
+    toggleIcon.textContent    = '📈';
+    toggleLabel.textContent   = 'SHOW LOSS';
+    if (labels[0]) document.getElementById('miner1Label').textContent = labels[0];
+    if (labels[1]) document.getElementById('miner2Label').textContent = labels[1];
+  }} else {{
+    profitGroup.style.display = 'none';
+    lossGroup.style.display   = '';
+    scenePnl.className        = 'scene-pnl loss';
+    sceneLabel.textContent    = 'CUTTING LOSSES...';
+    sceneLabel.className      = 'scene-label loss';
+    sceneGlow.setAttribute('fill', 'url(#glowRed)');
+    toggleIcon.textContent    = '📉';
+    toggleLabel.textContent   = 'SHOW PROFIT';
+    if (labels[0]) document.getElementById('walker1Label').textContent = labels[0];
+    if (labels[1]) document.getElementById('walker2Label').textContent = labels[1];
+  }}
+}}
+
+function manualToggle() {{
+  manualOverride = true;
+  setSceneMode(!isProfitMode, 0, []);
+  setTimeout(() => {{ manualOverride = false; }}, 30000);
+}}
+
+// ── CHARTS ────────────────────────────────────────────────
+const charts  = {{}};
 const pnlHist = {{}};
 
+// ── POSITIONS ─────────────────────────────────────────────
 async function poll() {{
   try {{
-    const d = await fetch('/status/api').then(r => r.json());
-    const pos = d.positions || {{}};
+    const d    = await fetch('/status/api').then(r => r.json());
+    const pos  = d.positions || {{}};
     const keys = Object.keys(pos);
-
-    document.getElementById('pos-count').textContent = keys.length;
-
-    const wrap = document.getElementById('pos-wrap');
+    document.getElementById('statPositions').textContent = keys.length;
+    const wrap  = document.getElementById('pos-wrap');
     const noPos = document.getElementById('no-pos');
     noPos.style.display = keys.length ? 'none' : 'block';
-
-    // Add / update position cards
+    let totalPnl = 0;
+    const labels = [];
     keys.forEach(market => {{
-      const p = pos[market];
+      const p   = pos[market];
       const pnl = p.pnl || 0;
       const cur = p.current_price || p.entry;
-
+      totalPnl += pnl;
+      labels.push(market.replace(/-?PERP$/i, ''));
       if (!pnlHist[market]) pnlHist[market] = [];
       pnlHist[market].push(pnl);
       if (pnlHist[market].length > 120) pnlHist[market].shift();
-
       let card = document.getElementById('pc-' + market);
       if (!card) {{
         card = document.createElement('div');
@@ -2488,81 +2742,84 @@ async function poll() {{
         wrap.appendChild(card);
         setTimeout(() => initChart(market), 50);
       }} else {{
-        const pnlEl = document.getElementById('pp-' + market);
+        const pnlEl = document.getElementById('pp-'  + market);
         const curEl = document.getElementById('pc2-' + market);
         const c = pnl >= 0 ? '#00ff88' : '#ff3355';
-        if (pnlEl) {{ pnlEl.textContent = (pnl>=0?'+':'') + '$' + pnl.toFixed(2); pnlEl.style.color = c; }}
+        if (pnlEl) {{ pnlEl.textContent = (pnl>=0?'+':'')+'$'+pnl.toFixed(2); pnlEl.style.color = c; }}
         if (curEl) curEl.textContent = '$' + cur.toFixed(4);
         updateChart(market, pnl);
       }}
     }});
-
-    // Remove closed
     document.querySelectorAll('.pos-card').forEach(el => {{
-      const m = el.id.replace('pc-','');
-      if (!pos[m]) {{ if(charts[m]){{charts[m].destroy();delete charts[m];}} delete pnlHist[m]; el.remove(); }}
+      const m = el.id.replace('pc-', '');
+      if (!pos[m]) {{ if (charts[m]) {{ charts[m].destroy(); delete charts[m]; }} delete pnlHist[m]; el.remove(); }}
     }});
-
+    const pnlEl = document.getElementById('statPnl');
+    pnlEl.textContent  = (totalPnl >= 0 ? '+' : '') + '$' + totalPnl.toFixed(2);
+    pnlEl.style.color  = totalPnl >= 0 ? 'var(--green)' : 'var(--red)';
+    if (!manualOverride) setSceneMode(totalPnl >= 0 || keys.length === 0, totalPnl, labels);
   }} catch(e) {{ console.error(e); }}
 }}
 
+// ── TRADES ────────────────────────────────────────────────
 async function pollTrades() {{
   try {{
     const trades = await fetch('/trades/api').then(r => r.json());
-    document.getElementById('trade-count').textContent = trades.length;
-    const wrap = document.getElementById('trades-wrap');
-    if (!trades.length) {{ wrap.innerHTML = '<div class="empty">No trades yet</div>'; return; }}
-    wrap.innerHTML = trades.slice(0,15).map(t => {{
-      const sc = t.side==='long' ? '#00ff88' : '#ff3355';
-      const pc = t.pnl>=0 ? '#00ff88' : '#ff3355';
-      const badge = t.pnl>=0 ? 'win' : 'loss';
-      return `<div class="trade-row">
-        <span style="color:var(--cyan);font-weight:900">${{t.market}}</span>
-        <span style="color:${{sc}}">${{t.side.toUpperCase()}}</span>
-        <span style="color:${{pc}}">${{t.pnl>=0?'+':''}}$${{t.pnl.toFixed(2)}}</span>
-        <span><span class="badge ${{badge}}">${{t.reason}}</span></span>
-        <span style="color:#666">${{t.ts.slice(-5)}}</span>
-      </div>`;
+    const wrap   = document.getElementById('trades-wrap');
+    if (!trades.length) {{ wrap.innerHTML = '<tr><td colspan="5" class="empty">No trades yet</td></tr>'; return; }}
+    const wins = trades.filter(t => t.pnl >= 0).length;
+    document.getElementById('statWinRate').textContent = Math.round(wins / trades.length * 100) + '%';
+    wrap.innerHTML = trades.slice(0, 15).map(t => {{
+      const sc    = t.side === 'long' ? '#00ff88' : '#ff3355';
+      const pc    = t.pnl >= 0 ? '#00ff88' : '#ff3355';
+      const badge = t.pnl >= 0 ? 'win' : 'loss';
+      return `<tr>
+        <td style="color:var(--cyan);font-weight:700">${{t.market}}</td>
+        <td style="color:${{sc}}">${{t.side.toUpperCase()}}</td>
+        <td style="color:${{pc}}">${{t.pnl>=0?'+':''}}$${{t.pnl.toFixed(2)}}</td>
+        <td><span class="badge ${{badge}}">${{t.reason}}</span></td>
+        <td style="color:var(--muted)">${{t.ts.slice(-5)}}</td>
+      </tr>`;
     }}).join('');
   }} catch(e) {{}}
 }}
 
+// ── LOG FEED ──────────────────────────────────────────────
 async function pollLogs() {{
   try {{
-    const d = await fetch('/notify/api').then(r => r.json());
+    const d   = await fetch('/notify/api').then(r => r.json());
     const box = document.getElementById('log-box');
-    document.getElementById('log-ts').textContent = new Date().toLocaleTimeString();
-    if (!d.length) {{ box.innerHTML = '<span style="color:#444">Waiting for first signal...</span>'; return; }}
+    if (!d.length) {{ box.innerHTML = '<span style="color:var(--muted)">Waiting for first signal...</span>'; return; }}
     box.innerHTML = d.map(n => {{
-      const txt = n.text || '';
-      const isOpen = txt.includes('OPEN ');
+      const txt     = n.text || '';
+      const isOpen  = txt.includes('OPEN ');
       const isClose = txt.includes('CLOSE ');
-      const isMile = txt.includes('MILESTONE');
-      const isStart = txt.includes('started');
-      const color = isClose && txt.includes('+') ? '#00ff88' :
-                    isClose && txt.includes('-') ? '#ff3355' :
-                    isOpen ? '#00e5ff' :
-                    isMile ? '#ffee00' : '#888';
-      const icon = isOpen ? '▶' : isClose ? (txt.includes('+') ? '✅' : '❌') : isMile ? '🏆' : '•';
-      const lines = txt.replace(/\*/g,'').split('\\n').filter(Boolean);
-      return `<div style="border-left:2px solid ${{color}};padding:6px 10px;margin-bottom:6px;background:#ffffff05">
-        <div style="font-size:.58rem;color:#555;margin-bottom:3px">[${{n.time}}]</div>
-        ${{lines.map((l,i) => `<div style="color:${{i===0?color:'#aaa'}};font-weight:${{i===0?'700':'400'}}">${{icon}} ${{l}}</div>`).join('')}}
+      const isMile  = txt.includes('MILESTONE');
+      const color   = isClose && txt.includes('+') ? '#00ff88' :
+                      isClose && txt.includes('-') ? '#ff3355' :
+                      isOpen  ? '#00e5ff' : isMile ? '#ffee00' : '#555';
+      const icon    = isOpen ? '▶' : isClose ? (txt.includes('+') ? '✅' : '❌') : isMile ? '🏆' : '•';
+      const lines   = txt.replace(/\*/g, '').split('\\n').filter(Boolean);
+      return `<div class="log-entry" style="border-color:${{color}};background:rgba(255,255,255,.03)">
+        <div style="font-size:10px;color:var(--muted);margin-bottom:2px">${{n.time}}</div>
+        ${{lines.map((l,i) => `<div style="color:${{i===0?color:'#888'}};font-weight:${{i===0?'600':'400'}}">${{icon}} ${{l}}</div>`).join('')}}
       </div>`;
     }}).join('');
+    box.scrollTop = box.scrollHeight;
   }} catch(e) {{}}
 }}
 
+// ── CARD / CHART HELPERS ──────────────────────────────────
 function cardHTML(market, p) {{
   const side = p.side || 'long';
-  const sc = side==='long' ? '#00ff88' : '#ff3355';
-  const pnl = p.pnl || 0;
-  const pc = pnl>=0 ? '#00ff88' : '#ff3355';
-  const cur = p.current_price || p.entry;
+  const sc   = side === 'long' ? '#00ff88' : '#ff3355';
+  const pnl  = p.pnl || 0;
+  const pc   = pnl >= 0 ? '#00ff88' : '#ff3355';
+  const cur  = p.current_price || p.entry;
   return `
     <div class="pos-top">
       <span class="pos-sym">${{market}}-PERP</span>
-      <span class="pos-side" style="color:${{sc}};border-color:${{sc}}">${{side.toUpperCase()}}</span>
+      <span class="pos-side" style="background:${{sc}}20;color:${{sc}}">${{side.toUpperCase()}}</span>
       <span class="pos-pnl" id="pp-${{market}}" style="color:${{pc}}">${{pnl>=0?'+':''}}$${{pnl.toFixed(2)}}</span>
     </div>
     <div class="pos-meta">
@@ -2574,8 +2831,7 @@ function cardHTML(market, p) {{
       <span><b>Leverage</b> ${{p.leverage||3}}x</span>
     </div>
     <canvas id="chart-${{market}}" height="80"></canvas>
-    <button class="close-btn" onclick="closePos('${{market}}')">✕ CLOSE ${{market}}</button>
-  `;
+    <button class="close-btn" onclick="closePos('${{market}}')">✕ CLOSE ${{market}}</button>`;
 }}
 
 function initChart(market) {{
@@ -2583,51 +2839,40 @@ function initChart(market) {{
   if (!el || charts[market]) return;
   charts[market] = new Chart(el.getContext('2d'), {{
     type: 'line',
-    data: {{
-      labels: [],
-      datasets: [{{
-        data: [],
-        borderColor: '#00e5ff',
-        backgroundColor: 'rgba(0,229,255,0.07)',
-        borderWidth: 2, pointRadius: 0, tension: 0.4, fill: true
-      }}]
-    }},
+    data: {{ labels: [], datasets: [{{ data: [], borderColor: '#00e5ff', backgroundColor: 'rgba(0,229,255,.07)', borderWidth: 2, pointRadius: 0, tension: 0.4, fill: true }}] }},
     options: {{
-      responsive: true, animation: {{duration:300}},
-      plugins: {{ legend: {{display:false}}, tooltip: {{ callbacks: {{ label: c => (c.parsed.y>=0?'+':'')+'$'+c.parsed.y.toFixed(2) }} }} }},
-      scales: {{
-        x: {{display:false}},
-        y: {{ grid:{{color:'#ffffff10'}}, ticks:{{color:'#555',font:{{size:9}},callback:v=>'$'+v.toFixed(2)}} }}
-      }}
+      responsive: true, animation: {{ duration: 300 }},
+      plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: c => (c.parsed.y>=0?'+':'')+'$'+c.parsed.y.toFixed(2) }} }} }},
+      scales: {{ x: {{ display: false }}, y: {{ grid: {{ color: '#ffffff10' }}, ticks: {{ color: '#555', font: {{ size: 9 }}, callback: v => '$' + v.toFixed(2) }} }} }}
     }}
   }});
-  updateChart(market, pnlHist[market]?.slice(-1)[0] || 0);
 }}
 
 function updateChart(market, latestPnl) {{
   const c = charts[market];
   if (!c) return;
-  const hist = pnlHist[market] || [];
+  const hist  = pnlHist[market] || [];
   const color = latestPnl >= 0 ? '#00ff88' : '#ff3355';
-  c.data.labels = hist.map((_,i) => i);
-  c.data.datasets[0].data = hist;
-  c.data.datasets[0].borderColor = color;
-  c.data.datasets[0].backgroundColor = latestPnl>=0 ? 'rgba(0,255,136,0.07)' : 'rgba(255,51,85,0.07)';
+  c.data.labels = hist.map((_, i) => i);
+  c.data.datasets[0].data             = hist;
+  c.data.datasets[0].borderColor      = color;
+  c.data.datasets[0].backgroundColor  = latestPnl >= 0 ? 'rgba(0,255,136,.07)' : 'rgba(255,51,85,.07)';
   c.update('none');
 }}
 
 function closePos(market) {{
   if (!confirm('Close ' + market + '?')) return;
-  fetch('/api/close/' + market, {{method:'POST'}})
-    .then(r=>r.json()).then(d=>alert(d.msg||d.error)).catch(e=>alert(e));
+  fetch('/api/close/' + market, {{ method: 'POST' }})
+    .then(r => r.json()).then(d => alert(d.msg || d.error)).catch(e => alert(e));
 }}
 
+// ── KICK OFF ──────────────────────────────────────────────
 poll();
 pollTrades();
 pollLogs();
-setInterval(poll, 3000);
+setInterval(poll,       3000);
 setInterval(pollTrades, 5000);
-setInterval(pollLogs, 3000);
+setInterval(pollLogs,   3000);
 </script>
 </body></html>"""
 
