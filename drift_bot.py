@@ -1589,7 +1589,7 @@ footer a{{color:var(--cyan);text-decoration:none}}
     <a class="nav-link active" href="/">HOME</a>
     <a class="nav-link" href="/trades">TRADES</a>
     <a class="nav-link" href="/monitor">MONITOR</a>
-    <a class="nav-link" href="https://jup.ag/perps" target="_blank">JUPITER ↗</a>
+    <a class="nav-link" href="https://jup.ag/perps/SOL-USD" target="_blank">PERPS ↗</a>
   </nav>
 
   <div class="mode-strip">
@@ -2105,7 +2105,7 @@ footer a{{color:var(--cyan);text-decoration:none}}
     <a href="/" class="nav-link">HOME</a>
     <a href="/trades" class="nav-link active">TRADES</a>
     <a href="/monitor" class="nav-link">MONITOR</a>
-    <a href="https://jup.ag/perps" class="nav-link" target="_blank">JUPITER ↗</a>
+    <a href="https://jup.ag/perps/SOL-USD" class="nav-link" target="_blank">PERPS ↗</a>
   </div>
 </nav>
 <div class="scroll-area">
@@ -2195,7 +2195,7 @@ footer a{{color:var(--cyan);text-decoration:none}}
   </div>
 </div>
 </div>
-<footer>{DRIFT_BOT_NAME} &nbsp;&#x00B7;&nbsp; <a href="https://jup.ag/perps" target="_blank">JUPITER ↗</a> &nbsp;&#x00B7;&nbsp; {'PAPER' if DRIFT_PAPER_MODE else 'LIVE'}</footer>
+<footer>{DRIFT_BOT_NAME} &nbsp;&#x00B7;&nbsp; <a href="https://jup.ag/perps/SOL-USD" target="_blank">PERPS ↗</a> &nbsp;&#x00B7;&nbsp; {'PAPER' if DRIFT_PAPER_MODE else 'LIVE'}</footer>
 </div>
 <script>
 const canvas=document.getElementById('particles');
