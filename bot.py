@@ -179,6 +179,13 @@ REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
 
 MILESTONES = [100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000]
 
+# ── LIVE READINESS THRESHOLDS ─────────────────────────────────────
+LIVE_READY_TRADES   = int(os.environ.get("LIVE_READY_TRADES",  "30"))
+LIVE_READY_WIN_RATE = float(os.environ.get("LIVE_READY_WIN_RATE", "0.55"))
+LIVE_READY_PF       = float(os.environ.get("LIVE_READY_PF",    "1.5"))
+LIVE_READY_DAYS     = int(os.environ.get("LIVE_READY_DAYS",    "3"))
+LIVE_READY_GROWTH   = float(os.environ.get("LIVE_READY_GROWTH","5.0"))
+
 # ── STATE ────────────────────────────────────────────────────────
 capital           = float(os.environ.get("STARTING_CAPITAL", "39.67"))
 STARTING_CAPITAL  = capital  # snapshot of configured start, for UI display
@@ -202,7 +209,8 @@ _daily_wins       = 0
 _daily_losses     = 0
 _day_start_cap    = 0.0    # capital at start of day — used for daily loss % guard
 _pause_until      = 0.0    # Unix timestamp — bot pauses trading until this time
-_daily_cap_notified = False  # prevent Telegram spam when daily cap is active
+_daily_cap_notified  = False  # prevent Telegram spam when daily cap is active
+_live_ready_notified = False  # fire once when paper performance clears all thresholds
 _daily_lock       = threading.Lock()
 _tune_lock        = threading.Lock()
 # Weekly tracking
@@ -672,6 +680,57 @@ def check_milestones():
                 log("ok", f"MILESTONE ${m:,} REACHED! New trade size: ${ts:.2f}", "GOAL")
                 notify(f"🏆 MILESTONE ${m:,} REACHED!",
                        f"Capital: ${cap:.2f}\nNew trade size: ${ts:.2f}\nKeep going!")
+
+# ── LIVE READINESS SELF-ASSESSMENT ───────────────────────────────
+def check_live_readiness():
+    global _live_ready_notified
+    if not PAPER_MODE or _live_ready_notified:
+        return
+    with log_lock:
+        trades = list(completed_trades)
+    with capital_lock:
+        cap = capital
+
+    n = len(trades)
+    if n < LIVE_READY_TRADES:
+        return
+
+    wins       = [t for t in trades if t.get("pnl", 0) > 0]
+    losses     = [t for t in trades if t.get("pnl", 0) <= 0]
+    win_rate   = len(wins) / n
+    gross_win  = sum(t["pnl"] for t in wins)
+    gross_loss = abs(sum(t["pnl"] for t in losses)) or 0.01
+    pf         = gross_win / gross_loss
+    growth_pct = (cap - STARTING_CAPITAL) / max(STARTING_CAPITAL, 0.01) * 100
+    days_set   = set(t.get("date", "") for t in trades if t.get("date"))
+    days       = len(days_set)
+
+    checks = {
+        "trades":   n >= LIVE_READY_TRADES,
+        "win_rate": win_rate >= LIVE_READY_WIN_RATE,
+        "pf":       pf >= LIVE_READY_PF,
+        "days":     days >= LIVE_READY_DAYS,
+        "growth":   growth_pct >= LIVE_READY_GROWTH,
+    }
+    if not all(checks.values()):
+        return
+
+    _live_ready_notified = True
+    log("ok", f"LIVE READY: WR={win_rate*100:.1f}% PF={pf:.2f}x growth={growth_pct:.1f}% days={days}")
+    notify(
+        "🚀 I'm Ready for Real Money",
+        f"I've run {n} paper trades over {days} days.\n"
+        f"My numbers check out:\n\n"
+        f"Win Rate:      {win_rate*100:.1f}%  ✅\n"
+        f"Profit Factor: {pf:.2f}×  ✅\n"
+        f"Capital Growth: +{growth_pct:.1f}%  ✅\n"
+        f"Days of data:  {days}  ✅\n\n"
+        f"To go live, set in Railway:\n"
+        f"  PAPER_MODE = false\n"
+        f"  WALLET = your address\n"
+        f"  WALLET_PRIVATE_KEY = your key\n\n"
+        f"I'll handle the rest. Let's go."
+    )
 
 # ── ADAPTIVE LEARNING ────────────────────────────────────────────
 def record_trade(trade_data):
@@ -1569,6 +1628,7 @@ def exit_trade(mint, price, reason, bond=0):
         completed_trades.append(rec)
     record_trade(rec)
     check_milestones()
+    check_live_readiness()
     _save_daily_state()
 
     # Lock profits into USDC once capital >= threshold
