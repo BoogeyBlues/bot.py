@@ -173,6 +173,16 @@ def _load_state():
         log("ok", f"Restored price history for {ph_count} markets")
 
 # ── LOGGING ───────────────────────────────────────────────────────
+def _fmt_dur(seconds):
+    s = int(seconds)
+    if s >= 3600:
+        h, r = divmod(s, 3600)
+        return f"{h}h {r//60}m"
+    elif s >= 60:
+        m, r = divmod(s, 60)
+        return f"{m}m {r}s"
+    return f"{s}s"
+
 def log(level, msg, symbol=""):
     prefix = f"[{symbol}] " if symbol else ""
     entry  = f"[{time.strftime('%H:%M:%S')}] [{level.upper()}] {prefix}{msg}"
@@ -1167,16 +1177,18 @@ def close_position(market, exit_price, reason=""):
     if is_dollar_tp:
         log("ok", f"SECURED ${secured_amt:.2f} | COMPOUNDED +${compound_amt:.2f} → capital=${cap_after:.2f}", market)
 
+    held  = _fmt_dur(trade["duration_s"])
     emoji = "✅" if pnl_usd >= 0 else "❌"
     log("ok" if pnl_usd >= 0 else "err",
         f"CLOSE {pos['side'].upper()} {market} @ ${exit_price:.4f} "
-        f"PnL={pnl_usd:+.2f} ({pnl_pct*100:+.1f}%) [{reason}]")
+        f"PnL={pnl_usd:+.2f} ({pnl_pct*100:+.1f}%) held={held} [{reason}]")
     if is_dollar_tp:
         notify(
             f"💰 *{DRIFT_BOT_NAME}*\n"
             f"PROFIT TAKEN {market}\n"
             f"Secured: ${secured_amt:.2f}\n"
             f"Compounded: +${compound_amt:.2f} back into capital\n"
+            f"Held: {held}\n"
             f"Capital now: ${cap_after:.2f}"
         )
     else:
@@ -1184,7 +1196,8 @@ def close_position(market, exit_price, reason=""):
             f"{emoji} *{DRIFT_BOT_NAME}*\n"
             f"CLOSE {pos['side'].upper()} {market}\n"
             f"Exit: ${exit_price:.4f}\n"
-            f"PnL: ${pnl_usd:+.2f} ({pnl_pct * 100 * pos['leverage']:+.1f}%) | {reason}"
+            f"PnL: ${pnl_usd:+.2f} ({pnl_pct * 100 * pos['leverage']:+.1f}%) | {reason}\n"
+            f"Held: {held}"
         )
     _save_state()
     _check_milestones()
