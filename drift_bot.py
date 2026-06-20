@@ -454,7 +454,26 @@ def get_market_price(market):
     if price:
         with _price_cache_lock:
             _price_cache[market] = (price, time.time())
-    return price
+        return price
+    # Last resort: CoinGecko simple price (no auth, very reliable)
+    _CG_IDS = {"SOL": "solana", "ETH": "ethereum", "BTC": "bitcoin"}
+    cg_id = _CG_IDS.get(market)
+    if cg_id:
+        try:
+            r = _session.get(
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={"ids": cg_id, "vs_currencies": "usd"},
+                timeout=8,
+            )
+            price = r.json().get(cg_id, {}).get("usd", 0)
+            if price > 0:
+                log("info", f"CoinGecko fallback: ${price}", market)
+                with _price_cache_lock:
+                    _price_cache[market] = (price, time.time())
+                return price
+        except Exception as e:
+            log("warn", f"CoinGecko fallback failed: {e}", market)
+    return None
 
 def get_sol_price():
     return get_market_price("SOL")
@@ -1318,20 +1337,24 @@ def run_trading_loop():
     # Seed price history immediately
     _prefetch_price_history(markets)
 
-    # ── Startup smoke-test: open one paper trade immediately to prove pipeline works
+    # ── Startup smoke-test: force one paper trade to verify the full pipeline
     if DRIFT_PAPER_MODE:
         time.sleep(3)
         refresh_price_cache(markets)
+        smoke_done = False
         for mkt in ["SOL", "ETH", "BTC"]:
             if mkt in markets:
                 p = get_market_price(mkt)
+                log("ok", f"Smoke-test price fetch {mkt}: {'${:.4f}'.format(p) if p else 'FAILED — price=None'}")
                 if p:
-                    log("ok", f"STARTUP PAPER TRADE: opening {mkt} LONG @ ${p:.4f}")
+                    notify(f"🧪 *{DRIFT_BOT_NAME}* smoke-test\nOpening PAPER LONG {mkt} @ ${p:.4f}\nIf this shows up, pipeline works.")
                     open_position(mkt, "long", p,
                                   DRIFT_MARGIN_USD * DRIFT_LEVERAGE,
                                   int(DRIFT_LEVERAGE))
+                    smoke_done = True
                     break
-        log("ok", "Startup smoke-test done — signal engine takes over now")
+        if not smoke_done:
+            notify(f"❌ *{DRIFT_BOT_NAME}* smoke-test FAILED\nAll price APIs returned None.\nCheck Railway logs.")
 
     while True:
         try:
