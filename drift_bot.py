@@ -55,6 +55,7 @@ _day_start     = ""
 _daily_wins    = 0
 _daily_losses  = 0
 _daily_trades  = 0
+_daily_gate_notified = False  # prevent Telegram spam while gate is active
 _price_history = {}
 _milestones_hit = set()
 _state_lock    = threading.Lock()
@@ -1401,15 +1402,24 @@ def run_trading_loop():
 
             # Daily PnL reset
             today = time.strftime("%Y-%m-%d")
-            global _day_start, _daily_pnl, _daily_wins, _daily_losses, _daily_trades
+            global _day_start, _daily_pnl, _daily_wins, _daily_losses, _daily_trades, _daily_gate_notified
             with _state_lock:
                 if _day_start != today:
+                    prev_day = _day_start
                     _day_start = today
                     _daily_pnl = 0.0
                     _daily_wins = 0
                     _daily_losses = 0
                     _daily_trades = 0
+                    _daily_gate_notified = False
                     log("ok", f"New day {today} — daily counters reset")
+                    if prev_day:
+                        notify(
+                            f"🌅 *{DRIFT_BOT_NAME}* — New Day\n"
+                            f"Date: {today}\n"
+                            f"Capital: ${_capital:,.2f}\n"
+                            f"Daily limits reset — trading resumed."
+                        )
 
             # Open new positions if slots available
             with _state_lock:
@@ -1422,6 +1432,17 @@ def run_trading_loop():
             loss_limit = DAILY_LOSS_MAX if dw >= DAILY_WIN_TARGET else DAILY_LOSS_SOFT
             if dt >= DAILY_TRADE_MIN and dl >= loss_limit:
                 log("info", f"Daily gate: {dt} trades | {dw}W {dl}L — done for today")
+                if not _daily_gate_notified:
+                    _daily_gate_notified = True
+                    midnight = time.strftime("%Y-%m-%d 00:00", time.localtime(
+                        time.mktime(time.strptime(today + " 23:59", "%Y-%m-%d %H:%M")) + 60
+                    ))
+                    notify(
+                        f"🔒 *{DRIFT_BOT_NAME}* — Daily Gate\n"
+                        f"{dt} trades | {dw}W {dl}L\n"
+                        f"Done for today. Auto-resumes at midnight.\n"
+                        f"PnL today: ${_daily_pnl:+.2f}"
+                    )
                 time.sleep(60)
                 continue
 
