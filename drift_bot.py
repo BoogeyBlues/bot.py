@@ -44,6 +44,13 @@ BYBIT_BASE_URL     = "https://api.bybit.com"
 
 MILESTONES = [250, 500, 1000, 2500, 5000, 10000, 25000]
 
+# ── LIVE READINESS THRESHOLDS ──────────────────────────────────────
+LIVE_READY_TRADES   = int(os.environ.get("LIVE_READY_TRADES",  "30"))   # min paper trades
+LIVE_READY_WIN_RATE = float(os.environ.get("LIVE_READY_WIN_RATE", "0.55"))  # 55% win rate
+LIVE_READY_PF       = float(os.environ.get("LIVE_READY_PF",    "1.5"))  # profit factor
+LIVE_READY_DAYS     = int(os.environ.get("LIVE_READY_DAYS",    "3"))    # min calendar days
+LIVE_READY_GROWTH   = float(os.environ.get("LIVE_READY_GROWTH","5.0"))  # % capital growth
+
 # ── STATE ─────────────────────────────────────────────────────────
 _positions           = {}
 _trades              = []
@@ -55,7 +62,8 @@ _day_start     = ""
 _daily_wins    = 0
 _daily_losses  = 0
 _daily_trades  = 0
-_daily_gate_notified = False  # prevent Telegram spam while gate is active
+_daily_gate_notified  = False  # prevent Telegram spam while gate is active
+_live_ready_notified  = False  # fire once when paper performance clears all thresholds
 _price_history = {}
 _milestones_hit = set()
 _state_lock    = threading.Lock()
@@ -1179,6 +1187,7 @@ def close_position(market, exit_price, reason=""):
         )
     _save_state()
     _check_milestones()
+    _check_live_readiness()
 
     # ── Record market stats for adaptive learning ──────────────────
     won = pnl_usd > 0
@@ -1262,6 +1271,70 @@ def _check_milestones():
     for m in newly_hit:
         log("ok", f"MILESTONE ${m:,} REACHED! Capital: ${cap:.2f}")
         notify(f"*{DRIFT_BOT_NAME}*\nMILESTONE ${m:,} REACHED!\nCapital: ${cap:.2f}")
+
+# ── LIVE READINESS SELF-ASSESSMENT ────────────────────────────────
+def _check_live_readiness():
+    global _live_ready_notified
+    if not DRIFT_PAPER_MODE or _live_ready_notified:
+        return
+
+    with _state_lock:
+        trades = list(_trades)
+        cap    = _capital
+        stats  = dict(_market_stats)
+
+    n = len(trades)
+    if n < LIVE_READY_TRADES:
+        return
+
+    wins        = [t for t in trades if t["pnl"] > 0]
+    losses      = [t for t in trades if t["pnl"] <= 0]
+    win_rate    = len(wins) / n
+    gross_win   = sum(t["pnl"] for t in wins)
+    gross_loss  = abs(sum(t["pnl"] for t in losses)) or 0.01
+    pf          = gross_win / gross_loss
+    growth_pct  = (cap - STARTING_CAPITAL) / max(STARTING_CAPITAL, 0.01) * 100
+    days_traded = len(set(t["ts"][:10] for t in trades))
+
+    checks = {
+        "trades":   n >= LIVE_READY_TRADES,
+        "win_rate": win_rate >= LIVE_READY_WIN_RATE,
+        "pf":       pf >= LIVE_READY_PF,
+        "days":     days_traded >= LIVE_READY_DAYS,
+        "growth":   growth_pct >= LIVE_READY_GROWTH,
+    }
+    if not all(checks.values()):
+        return
+
+    _live_ready_notified = True
+
+    # Best market by win rate (min 3 trades)
+    best_mkt = max(
+        ((m, s) for m, s in stats.items() if s.get("wins", 0) + s.get("losses", 0) >= 3),
+        key=lambda x: x[1]["wins"] / (x[1]["wins"] + x[1]["losses"]),
+        default=("SOL", {})
+    )[0]
+
+    notify(
+        f"🚀 *{DRIFT_BOT_NAME}* — I'm Ready\n"
+        f"{'━' * 24}\n"
+        f"I've been paper trading for {days_traded} days\n"
+        f"across {n} trades. My numbers check out.\n\n"
+        f"📊 *Performance Report:*\n"
+        f"  Win Rate:      {win_rate*100:.1f}%  ✅\n"
+        f"  Profit Factor: {pf:.2f}×  ✅\n"
+        f"  Capital Growth: +{growth_pct:.1f}%  ✅\n"
+        f"  Days of data:  {days_traded}  ✅\n\n"
+        f"🧠 *What I learned:*\n"
+        f"  Best market: {best_mkt}\n"
+        f"  Strategy: Supertrend scalp · 1% SL / 2% TP\n\n"
+        f"⚡ *To go live, set in Railway:*\n"
+        f"  DRIFT_PAPER_MODE = false\n"
+        f"  WALLET = your wallet address\n"
+        f"  WALLET_PRIVATE_KEY = your key\n\n"
+        f"I'll handle the rest. Let's go."
+    )
+    log("ok", f"LIVE READY: WR={win_rate*100:.1f}% PF={pf:.2f}x growth={growth_pct:.1f}% days={days_traded}")
 
 # ── ADAPTIVE LEARNING ─────────────────────────────────────────────
 def drift_auto_tune():
