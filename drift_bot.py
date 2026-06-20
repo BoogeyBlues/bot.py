@@ -1376,39 +1376,64 @@ def _check_live_readiness():
 
 # ── BLOWUP DETECTION & AUTO-RESTART ──────────────────────────────
 def _check_blowup():
-    global _capital, _trades, _daily_pnl, _profit_secured, _positions
+    global _capital, _daily_pnl, _profit_secured, _positions
     global _daily_wins, _daily_losses, _daily_trades, _daily_gate_notified
     global _live_ready_notified, _blowup_count
 
     with _state_lock:
         cap = _capital
+        # Total account value = free capital + sum of margins locked in open positions
+        locked_margin = sum(pos["size"] / pos["leverage"] for pos in _positions.values())
+        total_value = cap + locked_margin
 
-    if cap >= 1.0:
-        return  # still solvent
+    if total_value >= 1.0:
+        return  # still solvent when open position margins are counted
 
     _blowup_count += 1
-    log("err", f"BLOWUP #{_blowup_count}: capital hit ${cap:.2f} — account wiped")
+    log("err", f"BLOWUP #{_blowup_count}: total value ${total_value:.2f} (free=${cap:.2f} locked=${locked_margin:.2f}) — account wiped")
 
     if not DRIFT_PAPER_MODE:
         # Live mode: halt and alert — can't fabricate real money
         notify(
             f"🔴 *{DRIFT_BOT_NAME}* — ACCOUNT WIPED\n"
-            f"Capital: ${cap:.2f}\n"
+            f"Total value: ${total_value:.2f}\n"
             f"Trading halted. Add funds and set DRIFT_STARTING_CAPITAL to resume."
         )
         # Block the trading loop indefinitely until manual intervention
         while True:
             with _state_lock:
-                if _capital >= 1.0:
+                locked = sum(pos["size"] / pos["leverage"] for pos in _positions.values())
+                if _capital + locked >= 1.0:
                     break
             time.sleep(30)
         return
 
-    # Paper mode: log, notify, then auto-restart
+    # Paper mode: force-close all open positions so losses are recorded, then reset
     with _state_lock:
+        open_markets = list(_positions.keys())
+
+    for market in open_markets:
+        price = get_market_price(market)
+        with _state_lock:
+            if market not in _positions:
+                continue
+            if not price:
+                price = _positions[market]["entry"]  # fallback to entry (break-even exit)
+        close_position(market, price, f"BLOWUP#{_blowup_count}")
+
+    # Insert a marker so the trade log shows where the wipe happened
+    with _state_lock:
+        _trades.insert(0, {
+            "market": "—", "side": "—",
+            "entry": 0, "exit": 0,
+            "pnl": 0, "pnl_pct": 0,
+            "reason": f"💀 BLOWUP #{_blowup_count} — reset to ${STARTING_CAPITAL:,.2f}",
+            "secured": 0, "compounded": 0,
+            "duration_s": 0,
+            "ts": time.strftime("%Y-%m-%d %H:%M"),
+        })
+        # Reset capital and daily counters — preserve _trades history
         _capital        = STARTING_CAPITAL
-        _positions      = {}
-        _trades         = []
         _daily_pnl      = 0.0
         _profit_secured = 0.0
         _daily_wins     = 0
@@ -1422,8 +1447,8 @@ def _check_blowup():
     notify(
         f"💀 *{DRIFT_BOT_NAME}* — PAPER ACCOUNT WIPED\n"
         f"Blowup #{_blowup_count}\n"
-        f"Capital hit ${cap:.2f} — restarting with ${STARTING_CAPITAL:,.2f}\n"
-        f"All positions and trades cleared.\n"
+        f"Total value hit ${total_value:.2f} — restarting with ${STARTING_CAPITAL:,.2f}\n"
+        f"All positions force-closed and losses recorded.\n"
         f"The bot is learning. Back to zero, back to work."
     )
     log("ok", f"Auto-restarted after blowup #{_blowup_count} — capital reset to ${STARTING_CAPITAL:.2f}")
