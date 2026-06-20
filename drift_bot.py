@@ -1315,8 +1315,23 @@ def run_trading_loop():
     markets = [m.strip().upper() for m in DRIFT_MARKETS.split(",")]
     log("ok", f"Trading loop started | markets={markets} | paper={DRIFT_PAPER_MODE}")
 
-    # Seed price history immediately so EMA-50 is ready on the first loop tick
+    # Seed price history immediately
     _prefetch_price_history(markets)
+
+    # ── Startup smoke-test: open one paper trade immediately to prove pipeline works
+    if DRIFT_PAPER_MODE:
+        time.sleep(3)
+        refresh_price_cache(markets)
+        for mkt in ["SOL", "ETH", "BTC"]:
+            if mkt in markets:
+                p = get_market_price(mkt)
+                if p:
+                    log("ok", f"STARTUP PAPER TRADE: opening {mkt} LONG @ ${p:.4f}")
+                    open_position(mkt, "long", p,
+                                  DRIFT_MARGIN_USD * DRIFT_LEVERAGE,
+                                  int(DRIFT_LEVERAGE))
+                    break
+        log("ok", "Startup smoke-test done — signal engine takes over now")
 
     while True:
         try:
