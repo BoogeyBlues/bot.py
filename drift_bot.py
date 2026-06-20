@@ -1314,12 +1314,26 @@ def run_trading_loop():
 
     while True:
         try:
-            # Single batch call to Binance for all markets — one request instead of N
+            # Single batch call for all markets — one request instead of N
             refresh_price_cache(markets)
 
-            # Refresh 1-min candles for signal engine (every 60s per market)
-            # Raw tick prices are NOT appended to price history — only clean 1-min candles
+            # Append live tick price to history every loop tick (primary feed)
+            for market in markets:
+                price = get_market_price(market)
+                if price:
+                    with _state_lock:
+                        if market not in _price_history:
+                            _price_history[market] = deque(maxlen=300)
+                        _price_history[market].append((time.time(), price))
+
+            # Supplement with 1-min OKX candles every 60s (adds historical context)
             _refresh_candles(markets)
+
+            # Log history depth until all markets are warm (25 prices needed)
+            with _state_lock:
+                depths = {m: len(_price_history.get(m, [])) for m in markets}
+            if not all(d >= 25 for d in depths.values()):
+                log("info", f"Warming up — history: {depths}")
 
             # Monitor existing positions for exits
             monitor_positions()
