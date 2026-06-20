@@ -152,7 +152,9 @@ GMGN_TRENDING_URL   = "https://gmgn.ai/defi/quotation/v1/tokens/trending/sol"
 GMGN_HOT_SEARCH_URL = "https://gmgn.ai/defi/quotation/v1/tokens/hot_searches/sol"
 GMGN_COMPLETING_URL = "https://gmgn.ai/defi/quotation/v1/tokens/completing/sol"
 GMGN_NEW_PAIRS_URL  = "https://gmgn.ai/defi/quotation/v1/tokens/new_pairs/sol"
-GMGN_TREND_SCAN_INTERVAL = int(os.environ.get("GMGN_TREND_SCAN_INTERVAL", "120"))  # seconds between trend scans
+GMGN_TREND_SCAN_INTERVAL = int(os.environ.get("GMGN_TREND_SCAN_INTERVAL", "45"))   # seconds between trend scans
+SPIKE_5M_MIN   = float(os.environ.get("SPIKE_5M_MIN",  "10"))  # min 5m price change % to scalp
+SPIKE_1H_MIN   = float(os.environ.get("SPIKE_1H_MIN",  "20"))  # OR min 1h change (catches slower builds)
 
 # Notifications
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
@@ -232,7 +234,8 @@ _gmgn_completing_mints = set()   # bonding curve near completion
 _gmgn_new_pair_mints   = set()   # newly listed pairs
 _gmgn_signal_time      = 0.0     # last signal refresh time
 _signal_lock           = threading.Lock()
-_trend_scanned         = set()   # mints already evaluated by trend scanner (cleared hourly)
+_trend_scanned         = set()   # permanent skips (rug/blacklist/holder) — cleared hourly
+_trend_cooldown        = {}      # mint → expiry ts — temp skip (no spike yet); retried after 90s
 
 # ── LOGGING ─────────────────────────────────────────────────────
 def log(tag, msg, symbol=""):
@@ -1292,13 +1295,18 @@ def gmgn_trending_scan_loop():
     time.sleep(30)  # let signal refresh run first
     while scan_active:
         try:
+            now = time.time()
+
             with _signal_lock:
-                candidates = (
+                pool = (
                     _gmgn_trending_mints |
                     _gmgn_hot_mints |
                     _gmgn_completing_mints |
                     _gmgn_new_pair_mints
                 ) - _trend_scanned
+
+            # Also exclude mints still in temp cooldown
+            candidates = {m for m in pool if _trend_cooldown.get(m, 0) < now}
 
             with trades_lock:
                 num_open = len(open_trades)
@@ -1310,7 +1318,7 @@ def gmgn_trending_scan_loop():
                 time.sleep(GMGN_TREND_SCAN_INTERVAL)
                 continue
 
-            log("info", f"GMGN trend scan: {len(candidates)} new candidates", "GMGN")
+            log("info", f"GMGN spike scan: {len(candidates)} candidates ({len(pool)-len(candidates)} cooling)", "GMGN")
             for mint in list(candidates):
                 if not scan_active or daily_limit_reached():
                     break
@@ -1321,31 +1329,53 @@ def gmgn_trending_scan_loop():
                         _trend_scanned.add(mint)
                         continue
 
+                # ── Permanent filters (blacklist / invalid) ────────────
                 if not mint or len(mint) < 30:
                     _trend_scanned.add(mint)
                     continue
                 if mint in blacklisted_mints:
                     _trend_scanned.add(mint)
                     continue
+
+                # ── Smart money selling = permanent skip ───────────────
                 if gmgn_smart_money_selling(mint):
-                    log("info", f"TREND SKIP: smart money selling", mint[:8])
+                    log("info", f"SPIKE SKIP: smart money selling", mint[:8])
                     _trend_scanned.add(mint)
                     continue
 
+                # ── Market data + SPIKE check ──────────────────────────
                 market = get_market_data(mint)
-                if not market or market["price"] <= 0 or market["liq"] < MIN_LIQ:
-                    _trend_scanned.add(mint)
+                if not market or market["price"] <= 0:
+                    _trend_cooldown[mint] = now + 90   # retry in 90s
+                    continue
+                if market["liq"] < MIN_LIQ:
+                    _trend_cooldown[mint] = now + 90
                     continue
 
+                spike_5m = market.get("change5m", 0)
+                spike_1h = market.get("change1h", 0)
+                if spike_5m < SPIKE_5M_MIN and spike_1h < SPIKE_1H_MIN:
+                    # Not spiking yet — check again next scan, not permanently skipped
+                    log("info",
+                        f"SPIKE WAIT: 5m={spike_5m:+.1f}% 1h={spike_1h:+.1f}% "
+                        f"(need {SPIKE_5M_MIN}% / {SPIKE_1H_MIN}%)", mint[:8])
+                    _trend_cooldown[mint] = now + 90
+                    continue
+                if spike_5m < 0 and spike_1h < 0:
+                    # Both timeframes falling — pass for now
+                    _trend_cooldown[mint] = now + 60
+                    continue
+
+                # ── Bond curve check ───────────────────────────────────
                 details = get_bonding_details(mint)
                 bond = details["bond_pct"] if details else 0
                 if details and details.get("complete"):
-                    _trend_scanned.add(mint)  # already graduated — skip bond check
-                    # fall through to grad runner check below
+                    pass  # graduated — no bond gate
                 elif bond > BOND_ENTRY_MAX:
-                    _trend_scanned.add(mint)
+                    _trend_cooldown[mint] = now + 120
                     continue
 
+                # ── Rug / safety check (permanent) ────────────────────
                 rug = run_rugcheck(mint)
                 if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
                     blacklisted_mints.add(mint)
@@ -1357,10 +1387,11 @@ def gmgn_trending_scan_loop():
 
                 holder_ok, holder_reason = check_holder_concentration(mint)
                 if not holder_ok:
-                    log("info", f"TREND SKIP: {holder_reason}", mint[:8])
+                    log("info", f"SPIKE SKIP: {holder_reason}", mint[:8])
                     _trend_scanned.add(mint)
                     continue
 
+                # ── ALL CLEAR — enter ──────────────────────────────────
                 sig_score = gmgn_signal_score(mint)
                 symbol    = market.get("symbol", mint[:8])
                 amt       = trade_size()
@@ -1370,24 +1401,32 @@ def gmgn_trending_scan_loop():
                            "hot"   if mint in _gmgn_hot_mints else
                            "comp"  if mint in _gmgn_completing_mints else "new")
 
-                log("ok", f"GMGN {src.upper()} | bond={bond:.1f}% | liq=${market['liq']:.0f} | sig={sig_score}", symbol)
-                notify(f"🔥 GMGN {src.upper()} {symbol}",
-                       f"Bond: {bond:.1f}% | Liq: ${market['liq']:.0f}\n"
-                       f"Signal score: {sig_score}/7 | Amount: ${amt:.2f}")
+                log("ok",
+                    f"GMGN SPIKE {src.upper()} | 5m={spike_5m:+.1f}% 1h={spike_1h:+.1f}% "
+                    f"liq=${market['liq']:.0f} sig={sig_score}/7", symbol)
+                notify(f"⚡ SPIKE {src.upper()} — {symbol}",
+                       f"5m: {spike_5m:+.1f}% | 1h: {spike_1h:+.1f}%\n"
+                       f"Liq: ${market['liq']:.0f} | Signal: {sig_score}/7\n"
+                       f"Amount: ${amt:.2f}")
                 enter_trade(mint, symbol, market["price"], amt, f"gmgn_{src}", bond, 0)
                 _trend_scanned.add(mint)
                 time.sleep(1)
 
-            # Clear the scanned set hourly so tokens can be re-evaluated if they're still trending
+            # Expire old cooldowns to free memory
+            expired = [m for m, exp in _trend_cooldown.items() if exp < now]
+            for m in expired:
+                _trend_cooldown.pop(m, None)
+
+            # Clear permanent scanned set for coins no longer in any live feed
             with _signal_lock:
                 still_live = (
                     _gmgn_trending_mints | _gmgn_hot_mints |
                     _gmgn_completing_mints | _gmgn_new_pair_mints
                 )
-            _trend_scanned -= still_live  # only forget tokens no longer in any set
+            _trend_scanned -= still_live
 
         except Exception as e:
-            log("err", f"GMGN trend scan loop: {e}", "GMGN")
+            log("err", f"GMGN spike scan loop: {e}", "GMGN")
         time.sleep(GMGN_TREND_SCAN_INTERVAL)
 
 # ── USDC PROFIT LOCK ─────────────────────────────────────────────
