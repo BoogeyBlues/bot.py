@@ -1366,7 +1366,8 @@ def run_trading_loop():
                     notify(f"🧪 *{DRIFT_BOT_NAME}* smoke-test\nOpening PAPER LONG {mkt} @ ${p:.4f}\nPositions: {n_pos}/{DRIFT_MAX_OPEN} | Capital: ${cap:.2f}")
                     open_position(mkt, "long", p,
                                   DRIFT_MARGIN_USD * DRIFT_LEVERAGE,
-                                  int(DRIFT_LEVERAGE))
+                                  int(DRIFT_LEVERAGE),
+                                  sl_pct=0.010, tp_pct=0.020)
                     smoke_done = True
                     break
         if not smoke_done:
