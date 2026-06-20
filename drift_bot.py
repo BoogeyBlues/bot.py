@@ -555,39 +555,55 @@ def _supertrend(vals, period=10, mult=3.0):
     return bull[-1], lvl
 
 # ── SIGNAL ENGINE ─────────────────────────────────────────────────
+_GMGN_ADDRS = {
+    "SOL": "So11111111111111111111111111111111111111112",
+    "ETH": "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",
+    "BTC": "9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E",
+}
+
 def _get_gmgn_signal(market):
-    """Fetch smart money signal from GMGN for the underlying asset. Returns 'long', 'short', or None."""
-    if not GMGN_API_KEY:
-        return None
+    """
+    Query GMGN smart wallet net buy/sell for the market token.
+    Caches 5 min to avoid rate limits.
+    Returns 'long', 'short', or None (no clear bias or API down).
+    """
     cached = _gmgn_signal_cache.get(market)
     if cached and time.time() - cached["ts"] < 300:
         return cached["result"]
-    result = None
+
+    result  = None
+    addr    = _GMGN_ADDRS.get(market)
+    if not addr:
+        return None
+
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json",
-            "Authorization": f"Bearer {GMGN_API_KEY}",
-        }
+        headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+        if GMGN_API_KEY:
+            headers["Authorization"] = f"Bearer {GMGN_API_KEY}"
+
         r = _session.get(
-            "https://gmgn.ai/defi/quotation/v1/signals/sol",
-            params={"type": "12", "limit": "20"},
+            f"https://gmgn.ai/defi/quotation/v1/smartmoney/sol/token/{addr}",
+            params={"period": "1h"},
             headers=headers,
-            timeout=8
+            timeout=8,
         )
         if r.status_code == 200:
-            signals = r.json().get("data", {}).get("signals", [])
-            for s in signals:
-                sym = (s.get("token_symbol") or "").upper()
-                if sym == market.upper():
-                    action = (s.get("action") or "").lower()
-                    if action in ("buy", "accumulate"):
-                        result = "long"
-                    elif action in ("sell", "dump"):
-                        result = "short"
-                    break
-    except Exception:
-        pass
+            data     = r.json().get("data", {}) or {}
+            buy_vol  = float(data.get("smart_buy_volume_usd",  0) or 0)
+            sell_vol = float(data.get("smart_sell_volume_usd", 0) or 0)
+            total    = buy_vol + sell_vol
+            if total > 0:
+                ratio = buy_vol / total
+                if ratio > 0.60:      # smart wallets >60% buying
+                    result = "long"
+                elif ratio < 0.40:    # smart wallets >60% selling
+                    result = "short"
+                log("info",
+                    f"GMGN smart money: buy=${buy_vol:,.0f} sell=${sell_vol:,.0f} "
+                    f"ratio={ratio:.2f} → {result or 'neutral'}", market)
+    except Exception as e:
+        log("warn", f"GMGN smart signal error: {e}", market)
+
     _gmgn_signal_cache[market] = {"result": result, "ts": time.time()}
     return result
 
@@ -661,6 +677,14 @@ def get_signal(market):
         confidence += 1  # fresh flip = highest quality entry
 
     _st_prev[market] = st_bull
+
+    # +1 if GMGN smart wallets confirm direction
+    gmgn = _get_gmgn_signal(market)
+    if gmgn == trend:
+        confidence += 1
+        log("info", f"{market} GMGN smart money confirms {trend.upper()} (+1 conf)", market)
+    elif gmgn and gmgn != trend:
+        log("info", f"{market} GMGN smart money contradicts: {gmgn.upper()} vs signal {trend.upper()}", market)
 
     return trend, confidence, atr
 
