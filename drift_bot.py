@@ -64,6 +64,7 @@ _daily_losses  = 0
 _daily_trades  = 0
 _daily_gate_notified  = False  # prevent Telegram spam while gate is active
 _live_ready_notified  = False  # fire once when paper performance clears all thresholds
+_blowup_count         = 0      # number of times paper account hit $0 and restarted
 _price_history = {}
 _milestones_hit = set()
 _state_lock    = threading.Lock()
@@ -1336,6 +1337,60 @@ def _check_live_readiness():
     )
     log("ok", f"LIVE READY: WR={win_rate*100:.1f}% PF={pf:.2f}x growth={growth_pct:.1f}% days={days_traded}")
 
+# ── BLOWUP DETECTION & AUTO-RESTART ──────────────────────────────
+def _check_blowup():
+    global _capital, _trades, _daily_pnl, _profit_secured, _positions
+    global _daily_wins, _daily_losses, _daily_trades, _daily_gate_notified
+    global _live_ready_notified, _blowup_count
+
+    with _state_lock:
+        cap = _capital
+
+    if cap >= 1.0:
+        return  # still solvent
+
+    _blowup_count += 1
+    log("err", f"BLOWUP #{_blowup_count}: capital hit ${cap:.2f} — account wiped")
+
+    if not DRIFT_PAPER_MODE:
+        # Live mode: halt and alert — can't fabricate real money
+        notify(
+            f"🔴 *{DRIFT_BOT_NAME}* — ACCOUNT WIPED\n"
+            f"Capital: ${cap:.2f}\n"
+            f"Trading halted. Add funds and set DRIFT_STARTING_CAPITAL to resume."
+        )
+        # Block the trading loop indefinitely until manual intervention
+        while True:
+            with _state_lock:
+                if _capital >= 1.0:
+                    break
+            time.sleep(30)
+        return
+
+    # Paper mode: log, notify, then auto-restart
+    with _state_lock:
+        _capital        = STARTING_CAPITAL
+        _positions      = {}
+        _trades         = []
+        _daily_pnl      = 0.0
+        _profit_secured = 0.0
+        _daily_wins     = 0
+        _daily_losses   = 0
+        _daily_trades   = 0
+        _daily_gate_notified = False
+        _live_ready_notified = False
+
+    _save_state()
+
+    notify(
+        f"💀 *{DRIFT_BOT_NAME}* — PAPER ACCOUNT WIPED\n"
+        f"Blowup #{_blowup_count}\n"
+        f"Capital hit ${cap:.2f} — restarting with ${STARTING_CAPITAL:,.2f}\n"
+        f"All positions and trades cleared.\n"
+        f"The bot is learning. Back to zero, back to work."
+    )
+    log("ok", f"Auto-restarted after blowup #{_blowup_count} — capital reset to ${STARTING_CAPITAL:.2f}")
+
 # ── ADAPTIVE LEARNING ─────────────────────────────────────────────
 def drift_auto_tune():
     """Retune per-market leverage, long/short bias, and market pausing from trade history."""
@@ -1472,6 +1527,7 @@ def run_trading_loop():
 
             # Monitor existing positions for exits
             monitor_positions()
+            _check_blowup()
 
             # Daily PnL reset
             today = time.strftime("%Y-%m-%d")
