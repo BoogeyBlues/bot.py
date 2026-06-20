@@ -1061,9 +1061,11 @@ def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=N
     with _state_lock:
         if len(_positions) >= DRIFT_MAX_OPEN:
             log("warn", f"Max open positions ({DRIFT_MAX_OPEN}) reached — skipping {market}")
+            notify(f"⚠️ *{DRIFT_BOT_NAME}*\nCan't open {market}: max positions ({DRIFT_MAX_OPEN}) full\nOpen: {list(_positions.keys())}")
             return
         if _capital < margin:
             log("warn", f"Insufficient capital ${_capital:.2f} for margin ${margin:.2f} — skipping")
+            notify(f"⚠️ *{DRIFT_BOT_NAME}*\nCan't open {market}: capital ${_capital:.2f} < margin ${margin:.2f}")
             return
 
     if not DRIFT_PAPER_MODE:
@@ -1085,6 +1087,8 @@ def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=N
             if not DRIFT_PAPER_MODE:
                 log("err", f"State changed during live order for {market} — position recorded anyway to match on-chain state")
             else:
+                log("err", f"State changed between checks for {market} — paper position dropped")
+                notify(f"⚠️ *{DRIFT_BOT_NAME}*\nRace condition: {market} position dropped (state changed between checks)")
                 return
         _positions[market] = pos
         _capital -= margin
@@ -1340,6 +1344,12 @@ def run_trading_loop():
     # ── Startup smoke-test: force one paper trade to verify the full pipeline
     if DRIFT_PAPER_MODE:
         time.sleep(3)
+        # Clear stale paper positions from Redis — they're not real, can't reconcile
+        with _state_lock:
+            stale = list(_positions.keys())
+            if stale:
+                log("warn", f"Clearing {len(stale)} stale paper positions from Redis: {stale}")
+                _positions.clear()
         refresh_price_cache(markets)
         smoke_done = False
         for mkt in ["SOL", "ETH", "BTC"]:
@@ -1347,7 +1357,11 @@ def run_trading_loop():
                 p = get_market_price(mkt)
                 log("ok", f"Smoke-test price fetch {mkt}: {'${:.4f}'.format(p) if p else 'FAILED — price=None'}")
                 if p:
-                    notify(f"🧪 *{DRIFT_BOT_NAME}* smoke-test\nOpening PAPER LONG {mkt} @ ${p:.4f}\nIf this shows up, pipeline works.")
+                    with _state_lock:
+                        n_pos = len(_positions)
+                        cap   = _capital
+                    log("ok", f"Smoke-test state: positions={n_pos}/{DRIFT_MAX_OPEN} capital=${cap:.2f}")
+                    notify(f"🧪 *{DRIFT_BOT_NAME}* smoke-test\nOpening PAPER LONG {mkt} @ ${p:.4f}\nPositions: {n_pos}/{DRIFT_MAX_OPEN} | Capital: ${cap:.2f}")
                     open_position(mkt, "long", p,
                                   DRIFT_MARGIN_USD * DRIFT_LEVERAGE,
                                   int(DRIFT_LEVERAGE))
