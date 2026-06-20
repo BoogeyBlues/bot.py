@@ -1728,8 +1728,10 @@ def home():
     mode_color   = "#ffee00" if DRIFT_PAPER_MODE else "#39ff14"
     exch         = DRIFT_EXCHANGE.upper()
     markets_list = [m.strip().upper() for m in DRIFT_MARKETS.split(",")]
-    cap_str      = f"${_capital:,.2f}"
-    cap_pct      = round(max(0, min(100, (_capital - STARTING_CAPITAL) / max(PROFIT_GOAL - STARTING_CAPITAL, 1) * 100)), 1)
+    locked_margin = sum(pos["size"] / pos["leverage"] for pos in _positions.values())
+    total_cap    = _capital + locked_margin
+    cap_str      = f"${total_cap:,.2f}"
+    cap_pct      = round(max(0, min(100, (total_cap - STARTING_CAPITAL) / max(PROFIT_GOAL - STARTING_CAPITAL, 1) * 100)), 1)
     milestone_html = "".join(
         f'<div class="milestone" id="ms-{m}"><div class="milestone-dot"></div>${m:,}</div>'
         for m in MILESTONES
@@ -2543,6 +2545,8 @@ def status_api():
         trades_snap = list(_trades)
         dpnl      = _daily_pnl
         psec      = _profit_secured
+    locked_margin = sum(pos["size"] / pos["leverage"] for pos in pos_snap.values())
+    total_cap = cap + locked_margin
     n_trades  = len(trades_snap)
     wins_n    = sum(1 for t in trades_snap if t["pnl"] >= 0)
     total_pnl = sum(t["pnl"] for t in trades_snap)
@@ -2552,7 +2556,9 @@ def status_api():
         "bot": DRIFT_BOT_NAME,
         "exchange": DRIFT_EXCHANGE,
         "paper_mode": DRIFT_PAPER_MODE,
-        "capital": round(cap, 2),
+        "capital": round(total_cap, 2),
+        "free_capital": round(cap, 2),
+        "locked_margin": round(locked_margin, 2),
         "starting_capital": STARTING_CAPITAL,
         "profit_goal": PROFIT_GOAL,
         "daily_pnl": round(dpnl, 2),
