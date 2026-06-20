@@ -574,7 +574,8 @@ def get_signal(market):
     global _st_prev
     with _state_lock:
         prices = list(_price_history.get(market, []))
-    if len(prices) < 25:   # need 20 for EMA + buffer
+    if len(prices) < 25:
+        log("info", f"{market} no signal: only {len(prices)} prices (need 25)", market)
         return None, 0, None
     vals = [p for _, p in prices]
 
@@ -584,13 +585,15 @@ def get_signal(market):
     st_bull, st_lvl = _supertrend(vals, 7, 3.0)
 
     if rsi is None or atr is None or st_bull is None:
+        log("info", f"{market} no signal: indicator None (rsi={rsi} atr={atr} st={st_bull})", market)
         return None, 0, None
 
     cur = vals[-1]
+    atr_pct = atr / cur
 
     # ── Market regime: must have enough volatility to be worth trading ──
-    atr_pct = atr / cur
-    if atr_pct < 0.001:   # market is frozen / ranging — skip
+    if atr_pct < 0.001:
+        log("info", f"{market} no signal: frozen atr_pct={atr_pct:.4f}", market)
         _st_prev[market] = st_bull
         return None, 0, None
 
@@ -600,8 +603,11 @@ def get_signal(market):
     # ── RSI exhaustion check — only hard block at extremes ────────
     rsi_exhausted = (trend == "long" and rsi > 78) or (trend == "short" and rsi < 22)
     if rsi_exhausted:
+        log("info", f"{market} no signal: RSI exhausted {rsi:.1f} trend={trend}", market)
         _st_prev[market] = st_bull
         return None, 0, None
+
+    log("info", f"{market} SIGNAL {trend.upper()} | rsi={rsi:.1f} atr_pct={atr_pct:.4f} st_bull={st_bull}", market)
 
     # ── Confidence scoring ─────────────────────────────────────────
     confidence = 1  # base: Supertrend direction + RSI not exhausted
@@ -1364,6 +1370,8 @@ def run_trading_loop():
                 time.sleep(60)
                 continue
 
+            log("info", f"Scan: open={n_open}/{DRIFT_MAX_OPEN} cap=${cap:.0f} daily={dt}T {dw}W {dl}L")
+
             if n_open < DRIFT_MAX_OPEN:
                 for market in markets:
                     # Jupiter Perps only supports SOL/ETH/BTC — skip others silently
@@ -1374,6 +1382,7 @@ def run_trading_loop():
                         already_open = market in _positions
                         mparams = dict(_market_params.get(market, {}))
                     if already_open:
+                        log("info", f"{market} already open — skip")
                         continue
 
                     # Respect learned market pause
