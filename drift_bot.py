@@ -1660,7 +1660,7 @@ nav{{position:sticky;top:0;z-index:100;background:rgba(5,10,20,.92);backdrop-fil
 @keyframes navSlide{{to{{opacity:1;transform:translateX(0)}}}}
 
 /* MODE STRIP */
-.mode-strip{{display:flex;align-items:center;justify-content:space-between;padding:8px 16px;background:rgba(8,15,30,.7);border-bottom:1px solid rgba(0,229,255,.07)}}
+.mode-strip{{display:flex;align-items:center;justify-content:space-between;padding:5px 16px;background:rgba(8,15,30,.7);border-bottom:1px solid rgba(0,229,255,.07)}}
 .bot-name{{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--cyan);display:flex;align-items:center;gap:6px}}
 .blink-dot{{width:6px;height:6px;border-radius:50%;background:{mode_color};animation:blinkDot 1s step-end infinite}}
 @keyframes blinkDot{{0%,100%{{opacity:1}}50%{{opacity:0}}}}
@@ -1670,7 +1670,7 @@ nav{{position:sticky;top:0;z-index:100;background:rgba(5,10,20,.92);backdrop-fil
 .scroll-area{{padding:0 16px 80px}}
 
 /* HERO */
-.hero{{padding:28px 0 16px;text-align:center}}
+.hero{{padding:12px 0 6px;text-align:center}}
 .hero-title{{font-family:'Bebas Neue',sans-serif;font-size:42px;letter-spacing:4px;color:var(--cyan);text-shadow:0 0 20px rgba(0,229,255,.4);display:inline-block;overflow:hidden;white-space:nowrap;width:0;border-right:3px solid var(--cyan);animation:typewriter .8s steps(12,end) forwards .3s}}
 @keyframes typewriter{{to{{width:260px}}}}
 .hero-balance{{display:flex;justify-content:center;align-items:baseline;gap:1px;margin:10px 0 6px;font-family:'JetBrains Mono',monospace;font-size:32px;font-weight:700;color:var(--text)}}
@@ -1682,7 +1682,7 @@ nav{{position:sticky;top:0;z-index:100;background:rgba(5,10,20,.92);backdrop-fil
 @keyframes fadeIn{{to{{opacity:1}}}}
 
 /* WAVE */
-.wave-wrap{{height:32px;overflow:hidden;margin:12px -16px;position:relative}}
+.wave-wrap{{height:20px;overflow:hidden;margin:4px -16px;position:relative}}
 .wave-svg{{width:200%;height:100%;animation:waveScroll 4s linear infinite}}
 @keyframes waveScroll{{from{{transform:translateX(0)}}to{{transform:translateX(-50%)}}}}
 
