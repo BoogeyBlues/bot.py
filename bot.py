@@ -175,6 +175,7 @@ _daily_wins       = 0
 _daily_losses     = 0
 _day_start_cap    = 0.0    # capital at start of day — used for daily loss % guard
 _pause_until      = 0.0    # Unix timestamp — bot pauses trading until this time
+_daily_cap_notified = False  # prevent Telegram spam when daily cap is active
 _daily_lock       = threading.Lock()
 # Weekly tracking
 _week_start_date  = ""
@@ -351,6 +352,7 @@ def _reset_daily_if_needed():
             _daily_wins    = 0
             _daily_losses  = 0
             _pause_until   = 0.0
+            _daily_cap_notified = False
             _day_start_cap = capital  # snapshot for daily loss % guard
             limit = daily_trade_limit()
             with capital_lock:
@@ -358,8 +360,16 @@ def _reset_daily_if_needed():
             pct, _ = _cap_tier(cap)
             log("ok", f"New day {today} | Day {len(_week_day_logs)+1} | cap=${cap:.2f} | trade={pct*100:.0f}% (${trade_size():.2f}) | limit={limit}/day")
             _save_daily_state()
+            if len(_week_day_logs) > 0:
+                notify(
+                    f"🌅 *Boogeys Sniper* — New Day\n"
+                    f"Date: {today}\n"
+                    f"Capital: ${cap:,.2f}\n"
+                    f"Daily limits reset — sniping resumed."
+                )
 
 def daily_limit_reached():
+    global _daily_cap_notified
     _reset_daily_if_needed()
     with _daily_lock:
         if _pause_until > time.time():
@@ -370,6 +380,16 @@ def daily_limit_reached():
         limit = daily_trade_limit()
         if _daily_trades >= limit:
             log("info", f"Daily cap: {_daily_trades}/{limit} trades at current capital level — resumes tomorrow")
+            if not _daily_cap_notified:
+                _daily_cap_notified = True
+                with capital_lock:
+                    cap_now = capital
+                notify(
+                    f"🔒 *Boogeys Sniper* — Daily Cap\n"
+                    f"{_daily_trades} trades | {_daily_wins}W {_daily_losses}L\n"
+                    f"Cap: ${cap_now:,.2f}\n"
+                    f"Done for today. Auto-resumes at midnight."
+                )
             return True
         # Max daily loss guard — stop if down >MAX_DAILY_LOSS_PCT% from today's open
         if _day_start_cap > 0:
@@ -378,6 +398,13 @@ def daily_limit_reached():
             loss_pct = (_day_start_cap - cap_now) / _day_start_cap * 100
             if loss_pct >= MAX_DAILY_LOSS_PCT:
                 log("warn", f"Daily loss guard: down {loss_pct:.1f}% today (${_day_start_cap - cap_now:.2f}) — stopping until tomorrow")
+                if not _daily_cap_notified:
+                    _daily_cap_notified = True
+                    notify(
+                        f"🛑 *Boogeys Sniper* — Loss Guard\n"
+                        f"Down {loss_pct:.1f}% today (${_day_start_cap - cap_now:.2f})\n"
+                        f"Stopping to protect capital. Auto-resumes at midnight."
+                    )
                 return True
         return False
 
