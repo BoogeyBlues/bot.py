@@ -2529,7 +2529,7 @@ def home():
                radial-gradient(ellipse at 80% 20%,#0a1a3a22 0%,transparent 60%);
     pointer-events:none;z-index:0}}
 
-  .wrap{{max-width:900px;margin:0 auto;padding:20px 16px;position:relative}}
+  .wrap{{max-width:1200px;margin:0 auto;padding:20px 16px;position:relative}}
 
   /* HEADER */
   header{{text-align:center;padding:16px 0 24px;position:relative}}
@@ -2642,6 +2642,12 @@ def home():
   .pulse-text{{animation:pulse 2s infinite}}
   .empty{{text-align:center;padding:28px;color:var(--muted);font-size:.82rem}}
   .bg-art{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}}
+  @media(min-width:768px){{
+    .cards{{grid-template-columns:repeat(3,1fr)}}
+    .section{{padding:20px 24px}}
+    nav{{gap:12px}}
+    nav a{{padding:8px 18px}}
+  }}
 </style>
 </head>
 <body>
@@ -2809,7 +2815,7 @@ def _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
   :root{{--pink:#ff006e;--cyan:#00f5ff;--yellow:#ffee00;--green:#39ff14;
     --bg:#0a0008;--card:#110010;--border:#ffffff15}}
   body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;
-    max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
+    min-height:100vh;overflow-x:hidden}}
   .vid-wrap{{width:100%;line-height:0;position:relative}}
   .vid-wrap video{{width:100%;display:block;mix-blend-mode:screen}}
   .vid-wrap a{{display:block;cursor:pointer}}
@@ -2880,6 +2886,12 @@ def _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
   footer{{padding:14px 16px;text-align:center;font-size:.6rem;color:#444;border-top:1px solid var(--border)}}
   footer a{{color:var(--cyan);text-decoration:none}}
   .bg-art{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}}
+  @media(min-width:768px){{
+    .wrap{{padding:20px 32px}}
+    .cards{{grid-template-columns:repeat(3,1fr)}}
+    .section{{padding:20px 24px}}
+    nav{{flex-wrap:nowrap;justify-content:center;gap:10px}}
+  }}
 </style>
 </head>
 <body>
@@ -3089,9 +3101,9 @@ def status():
   @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
   *{{box-sizing:border-box;margin:0;padding:0}}
   :root{{--acc:#ffee00;--bg:#0a0008;--card:#110010;--border:#ffffff15}}
-  body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
+  body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;min-height:100vh;overflow-x:hidden}}
   .bg-art{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}}
-  .wrap{{position:relative}}
+  .wrap{{position:relative;max-width:1200px;margin:0 auto}}
   nav{{display:flex;gap:0;border-bottom:2px solid var(--acc);overflow-x:auto;scrollbar-width:none}}
   nav::-webkit-scrollbar{{display:none}}
   nav a{{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;border-right:1px solid var(--border);transition:all .15s}}
@@ -3127,6 +3139,12 @@ def status():
   .mono{{font-family:'JetBrains Mono',monospace;font-size:.68rem}}
   .green{{color:#39ff14}} .red{{color:#ff006e}}
   footer{{padding:14px 16px;text-align:center;font-size:.6rem;color:#444;border-top:1px solid var(--border)}}
+  @media(min-width:768px){{
+    .grid{{grid-template-columns:repeat(4,1fr)}}
+    .section{{padding:18px 24px;margin:0 0 12px}}
+    .page-title{{padding:18px 32px 8px}}
+    .health-banner{{margin:0 0 12px}}
+  }}
 </style>
 </head>
 <body>
@@ -3320,9 +3338,9 @@ def trades():
   @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
   *{{box-sizing:border-box;margin:0;padding:0}}
   :root{{--acc:#39ff14;--bg:#0a0008;--card:#110010;--border:#ffffff15}}
-  body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
+  body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;min-height:100vh;overflow-x:hidden}}
   .bg-art{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}}
-  .wrap{{position:relative}}
+  .wrap{{position:relative;max-width:1200px;margin:0 auto}}
   nav{{display:flex;gap:0;border-bottom:2px solid var(--acc);overflow-x:auto;scrollbar-width:none}}
   nav::-webkit-scrollbar{{display:none}}
   nav a{{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;border-right:1px solid var(--border);transition:all .15s}}
@@ -3374,6 +3392,11 @@ def trades():
   .solscan-btn{{display:block;text-align:center;margin-top:14px;padding:10px;background:#39ff1415;border:1px solid #39ff1430;color:var(--acc);text-decoration:none;font-size:.78rem;font-weight:700;letter-spacing:.06em;transition:all .2s}}
   .solscan-btn:hover{{background:#39ff1425}}
   footer{{padding:14px 16px;text-align:center;font-size:.6rem;color:#444;border-top:1px solid var(--border)}}
+  @media(min-width:768px){{
+    .stat-strip{{grid-template-columns:repeat(3,1fr)}}
+    .section{{padding:18px 24px;margin:0 0 12px}}
+    .page-title{{padding:18px 32px 8px}}
+  }}
 </style>
 </head>
 <body>
@@ -3660,9 +3683,9 @@ def live():
   @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
   *{box-sizing:border-box;margin:0;padding:0}
   :root{--acc:#00f5ff;--bg:#0a0008;--card:#110010;--border:#ffffff15}
-  body{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}
+  body{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;min-height:100vh;overflow-x:hidden}
   .bg-art{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}
-  .wrap{position:relative}
+  .wrap{position:relative;max-width:1200px;margin:0 auto}
   nav{display:flex;gap:0;border-bottom:2px solid var(--acc);overflow-x:auto;scrollbar-width:none}
   nav::-webkit-scrollbar{display:none}
   nav a{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;border-right:1px solid var(--border);transition:all .15s}
@@ -3717,6 +3740,12 @@ def live():
   .empty{text-align:center;padding:28px;color:#888;font-size:.78rem}
   #last-update{font-size:.62rem;color:#888}
   footer{padding:14px 16px;text-align:center;font-size:.6rem;color:#444;border-top:1px solid var(--border)}
+  @media(min-width:768px){
+    .section{padding:18px 24px;margin:0 0 12px}
+    .page-title{padding:18px 32px 8px}
+    .status-bar{padding:0 32px 12px}
+    .cap-display{margin-bottom:12px}
+  }
 </style>
 </head>
 <body>
@@ -3960,9 +3989,9 @@ def learn():
   @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
   *{box-sizing:border-box;margin:0;padding:0}
   :root{--acc:#b44fff;--bg:#080010;--card:#0e0018;--border:#ffffff15}
-  body{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}
+  body{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;min-height:100vh;overflow-x:hidden}
   .bg-art{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}
-  .wrap{position:relative}
+  .wrap{position:relative;max-width:1200px;margin:0 auto}
   nav{display:flex;gap:0;border-bottom:2px solid var(--acc);overflow-x:auto;scrollbar-width:none}
   nav::-webkit-scrollbar{display:none}
   nav a{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;border-right:1px solid var(--border);transition:all .15s}
@@ -4024,6 +4053,12 @@ def learn():
   .purple{color:var(--acc)}
   footer{padding:14px 16px;text-align:center;font-size:.6rem;color:#444;border-top:1px solid var(--border)}
   #last-update{font-size:.62rem;color:#888}
+  @media(min-width:768px){
+    .section{padding:18px 24px;margin:0 0 12px}
+    .page-title{padding:18px 32px 8px}
+    .status-bar{padding:0 32px 12px}
+    .param-grid{grid-template-columns:repeat(3,1fr)}
+  }
 </style>
 </head>
 <body>
@@ -4322,9 +4357,9 @@ def setup():
   @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
   *{{box-sizing:border-box;margin:0;padding:0}}
   :root{{--acc:#ff6b00;--bg:#0a0500;--card:#120900;--border:#ffffff15}}
-  body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
+  body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;min-height:100vh;overflow-x:hidden}}
   .bg-art{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}}
-  .wrap{{position:relative}}
+  .wrap{{position:relative;max-width:1200px;margin:0 auto}}
   nav{{display:flex;gap:0;border-bottom:2px solid var(--acc);overflow-x:auto;scrollbar-width:none}}
   nav::-webkit-scrollbar{{display:none}}
   nav a{{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;border-right:1px solid var(--border);transition:all .15s}}
@@ -4371,6 +4406,11 @@ def setup():
   .result-msg.ok{{background:#39ff1415;border:1px solid #39ff1440;color:#39ff14}}
   .result-msg.err{{background:#ff006e15;border:1px solid #ff006e40;color:#ff006e}}
   footer{{padding:14px 16px;text-align:center;font-size:.6rem;color:#444;border-top:1px solid var(--border)}}
+  @media(min-width:768px){{
+    .section{{padding:18px 24px;margin:0 0 12px}}
+    .page-title{{padding:18px 32px 8px}}
+    .risk-grid{{grid-template-columns:repeat(3,1fr);gap:10px}}
+  }}
 </style>
 </head>
 <body>
