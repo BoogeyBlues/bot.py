@@ -1,5 +1,5 @@
-import os, time, threading, requests, json, re, csv, io, random
-from flask import Flask, jsonify, Response, request as flask_request
+import os, time, threading, requests, json, re, csv, io
+from flask import Flask, jsonify, Response
 from collections import defaultdict
 
 try:
@@ -21,7 +21,7 @@ def _redis_cmd(*args):
     if not REDIS_URL or not REDIS_TOKEN:
         return None
     try:
-        r = _session.post(
+        r = requests.post(
             REDIS_URL,
             headers={"Authorization": f"Bearer {REDIS_TOKEN}"},
             json=list(args),
@@ -61,9 +61,9 @@ FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "0"))  # 0 = use ti
 
 # Capital tiers per risk level: (min_capital, trade_pct, daily_max_trades)
 _RISK_TIERS = {
-    "conservative": [(5_000,0.12,60),(500,0.10,50),(100,0.08,40),(0,0.05,30)],
-    "standard":     [(5_000,0.18,80),(500,0.15,70),(100,0.12,60),(0,0.08,50)],
-    "aggressive":   [(5_000,0.22,100),(500,0.18,90),(100,0.15,75),(0,0.12,60)],
+    "conservative": [(5_000,0.12,15),(500,0.10,12),(100,0.08,10),(0,0.05,8)],
+    "standard":     [(5_000,0.18,20),(500,0.15,15),(100,0.12,12),(0,0.08,12)],
+    "aggressive":   [(5_000,0.22,25),(500,0.18,20),(100,0.15,15),(0,0.12,15)],
 }
 _CAP_TIERS = _RISK_TIERS.get(RISK_LEVEL, _RISK_TIERS["standard"])
 
@@ -75,8 +75,8 @@ LOSS_COOLDOWN_HRS = float(os.environ.get("LOSS_COOLDOWN_HRS", "0.5")) # 30-min p
 ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # retune every 5 trades for faster learning
 
 # Bond Runner strategy
-BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "25"))
-BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "75"))
+BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "58"))
+BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "63"))
 BOND_TP         = float(os.environ.get("BOND_TP",        "67"))
 BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "10"))
 BOND_MAX_SECS   = int(os.environ.get("BOND_MAX_SECS",    "240"))   # 4 min hard cap
@@ -84,31 +84,10 @@ BOND_STALE_SECS = int(os.environ.get("BOND_STALE_SECS",  "120"))   # exit if bon
 
 # Dormant Spike strategy
 SPIKE_MIN_AGE_H = float(os.environ.get("SPIKE_MIN_AGE_H", "12"))
-SPIKE_MIN_1H    = float(os.environ.get("SPIKE_MIN_1H",    "20"))
+SPIKE_MIN_1H    = float(os.environ.get("SPIKE_MIN_1H",    "100"))
 SPIKE_TP_PCT    = float(os.environ.get("SPIKE_TP_PCT",    "40"))
 SPIKE_SL_PCT    = float(os.environ.get("SPIKE_SL_PCT",    "15"))
 SPIKE_MAX_SECS  = int(os.environ.get("SPIKE_MAX_SECS",    "180"))   # 3 min hard cap
-
-# Raydium Runner strategy (post-graduation tokens on Raydium)
-GRAD_MODE        = os.environ.get("GRAD_MODE", "true").lower() == "true"
-GRAD_MAX_AGE_H   = float(os.environ.get("GRAD_MAX_AGE_H",   "4"))     # only tokens graduated in last 4h
-GRAD_MIN_LIQ     = float(os.environ.get("GRAD_MIN_LIQ",     "15000")) # min $15k liquidity
-GRAD_MIN_1H_PCT  = float(os.environ.get("GRAD_MIN_1H_PCT",  "5"))     # min +5% 1h momentum
-GRAD_MIN_5M_PCT  = float(os.environ.get("GRAD_MIN_5M_PCT",  "-5"))    # reject if dumping >5% in last 5m
-GRAD_MIN_VOL_24H = float(os.environ.get("GRAD_MIN_VOL_24H", "10000")) # min $10k 24h volume
-GRAD_MIN_VOL_LIQ = float(os.environ.get("GRAD_MIN_VOL_LIQ", "0.5"))   # min volume/liq ratio
-GRAD_TP_PCT      = float(os.environ.get("GRAD_TP_PCT",      "30"))
-GRAD_SL_PCT      = float(os.environ.get("GRAD_SL_PCT",      "12"))
-GRAD_MAX_SECS    = int(os.environ.get("GRAD_MAX_SECS",      "300"))   # 5 min hard cap
-GRAD_POOL        = os.environ.get("GRAD_POOL", "pumpswap")
-GRAD_SMC_MIN     = int(os.environ.get("GRAD_SMC_MIN", "1"))  # min SMC alignment score (0=off, 1-3)
-
-# Hype Scalp — fires when a coin appears in 2+ GMGN feeds simultaneously
-HYPE_MIN_FEEDS   = int(os.environ.get("HYPE_MIN_FEEDS",   "2"))    # min feeds to trigger
-HYPE_MIN_LIQ     = float(os.environ.get("HYPE_MIN_LIQ",   "5000")) # lower bar — scalp is fast
-HYPE_TP_PCT      = float(os.environ.get("HYPE_TP_PCT",    "15"))   # take profit at 15%
-HYPE_SL_PCT      = float(os.environ.get("HYPE_SL_PCT",    "8"))    # stop loss at 8%
-HYPE_MAX_SECS    = int(os.environ.get("HYPE_MAX_SECS",    "120"))  # 2 min max hold
 
 # Exit protection
 SLIP_TRIGGER   = float(os.environ.get("SLIP_TRIGGER",  "90"))
@@ -134,27 +113,21 @@ COPY_TRADE        = os.environ.get("COPY_TRADE", "true").lower() == "true"
 COPY_WINRATE_MIN  = float(os.environ.get("COPY_WINRATE_MIN",  "60"))
 COPY_WINRATE_MAX  = float(os.environ.get("COPY_WINRATE_MAX",  "99"))
 COPY_MAX_WALLETS  = int(os.environ.get("COPY_MAX_WALLETS",    "5"))
-COPY_MAX_AGE_SECS = int(os.environ.get("COPY_MAX_AGE_SECS",  "60"))   # ignore trades older than 60s
+COPY_MAX_AGE_SECS = int(os.environ.get("COPY_MAX_AGE_SECS",  "120"))  # ignore trades older than 2 min
+# Manually tracked wallets — comma-separated Solana addresses; merged with GMGN auto-discovered wallets
+TRACKED_WALLETS   = [w.strip() for w in os.environ.get("TRACKED_WALLETS", "").split(",") if w.strip()]
 COPY_REFRESH_MINS = int(os.environ.get("COPY_REFRESH_MINS",  "60"))   # refresh wallet list hourly
 COPY_TP_PCT       = float(os.environ.get("COPY_TP_PCT",       "40"))
 COPY_SL_PCT       = float(os.environ.get("COPY_SL_PCT",       "15"))
 COPY_MAX_SECS     = int(os.environ.get("COPY_MAX_SECS",       "180"))
-COPY_PINNED_WALLETS = [a.strip() for a in os.environ.get("COPY_PINNED_WALLETS", "").split(",") if a.strip()]
 GMGN_RANK         = "https://gmgn.ai/defi/quotation/v1/rank/sol/wallets/7d"
 GMGN_ACTIVITY     = "https://gmgn.ai/defi/quotation/v1/wallet_activity/sol"
 GMGN_API_KEY       = os.environ.get("GMGN_API_KEY", "")
 GMGN_TOP_HOLDERS   = "https://gmgn.ai/defi/quotation/v1/tokens/top_holders/sol"
 GMGN_CREATED_TOKENS= "https://gmgn.ai/defi/quotation/v1/portfolio/sol"
 GMGN_SIGNALS_URL   = "https://gmgn.ai/defi/quotation/v1/signals/sol"
-GMGN_KOL_TRACK      = "https://gmgn.ai/defi/quotation/v1/tracks/kol/sol"
-GMGN_SM_TRACK       = "https://gmgn.ai/defi/quotation/v1/tracks/smartmoney/sol"
-GMGN_TRENDING_URL   = "https://gmgn.ai/defi/quotation/v1/tokens/trending/sol"
-GMGN_HOT_SEARCH_URL = "https://gmgn.ai/defi/quotation/v1/tokens/hot_searches/sol"
-GMGN_COMPLETING_URL = "https://gmgn.ai/defi/quotation/v1/tokens/completing/sol"
-GMGN_NEW_PAIRS_URL  = "https://gmgn.ai/defi/quotation/v1/tokens/new_pairs/sol"
-GMGN_TREND_SCAN_INTERVAL = int(os.environ.get("GMGN_TREND_SCAN_INTERVAL", "45"))   # seconds between trend scans
-SPIKE_5M_MIN   = float(os.environ.get("SPIKE_5M_MIN",  "10"))  # min 5m price change % to scalp
-SPIKE_1H_MIN   = float(os.environ.get("SPIKE_1H_MIN",  "20"))  # OR min 1h change (catches slower builds)
+GMGN_KOL_TRACK     = "https://gmgn.ai/defi/quotation/v1/tracks/kol/sol"
+GMGN_SM_TRACK      = "https://gmgn.ai/defi/quotation/v1/tracks/smartmoney/sol"
 
 # Notifications
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
@@ -181,13 +154,6 @@ REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
 
 MILESTONES = [100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000]
 
-# ── LIVE READINESS THRESHOLDS ─────────────────────────────────────
-LIVE_READY_TRADES   = int(os.environ.get("LIVE_READY_TRADES",  "30"))
-LIVE_READY_WIN_RATE = float(os.environ.get("LIVE_READY_WIN_RATE", "0.55"))
-LIVE_READY_PF       = float(os.environ.get("LIVE_READY_PF",    "1.5"))
-LIVE_READY_DAYS     = int(os.environ.get("LIVE_READY_DAYS",    "3"))
-LIVE_READY_GROWTH   = float(os.environ.get("LIVE_READY_GROWTH","5.0"))
-
 # ── STATE ────────────────────────────────────────────────────────
 capital           = float(os.environ.get("STARTING_CAPITAL", "39.67"))
 STARTING_CAPITAL  = capital  # snapshot of configured start, for UI display
@@ -211,31 +177,23 @@ _daily_wins       = 0
 _daily_losses     = 0
 _day_start_cap    = 0.0    # capital at start of day — used for daily loss % guard
 _pause_until      = 0.0    # Unix timestamp — bot pauses trading until this time
-_daily_cap_notified  = False  # prevent Telegram spam when daily cap is active
-_live_ready_notified = False  # fire once when paper performance clears all thresholds
+_daily_cap_notified = False  # prevent Telegram spam when daily cap is active
 _daily_lock       = threading.Lock()
-_tune_lock        = threading.Lock()
 # Weekly tracking
 _week_start_date  = ""
 _week_day_logs    = []     # one entry per day: {date, trades, wins, losses, pnl, start_cap, end_cap}
-_copy_wallets     = [{"address": a, "winrate": "pinned"} for a in COPY_PINNED_WALLETS]
+_copy_wallets     = []   # [{address, winrate}]
 _copy_wallet_time = 0.0
 _copied_mints     = {}   # mint -> timestamp, to avoid double-copy
 _copy_lock        = threading.Lock()
-_gmgn_backoff     = 0    # epoch timestamp — retry GMGN rank after this time (0 = no backoff)
+_gmgn_backoff     = 0    # seconds to wait before retrying GMGN rank
 _sold_mints       = {}   # mint -> timestamp, cooldown after selling to prevent re-buy
 _gmgn_sm_signal_mints  = set()   # smart money buy signal mints (type 12)
 _gmgn_surge_mints      = set()   # price surge signal mints (type 6)
-_gmgn_kol_mints        = set()   # KOL buy mints (entry signal)
-_gmgn_sm_sell_mints    = set()   # smart money sell mints (exit/skip signal)
-_gmgn_trending_mints   = set()   # trending tokens (1h/4h movers)
-_gmgn_hot_mints        = set()   # hot search mints
-_gmgn_completing_mints = set()   # bonding curve near completion
-_gmgn_new_pair_mints   = set()   # newly listed pairs
+_gmgn_kol_mints        = set()   # KOL buy mints
+_gmgn_sm_sell_mints    = set()   # smart money sell mints (used for exit filter)
 _gmgn_signal_time      = 0.0     # last signal refresh time
 _signal_lock           = threading.Lock()
-_trend_scanned         = set()   # permanent skips (rug/blacklist/holder) — cleared hourly
-_trend_cooldown        = {}      # mint → expiry ts — temp skip (no spike yet); retried after 90s
 
 # ── LOGGING ─────────────────────────────────────────────────────
 def log(tag, msg, symbol=""):
@@ -254,8 +212,7 @@ _notify_q_lock = threading.Lock()
 def notify(title, body):
     """Queue a notification — sent by dedicated thread to avoid Telegram rate limits."""
     with _notify_q_lock:
-        if len(_notify_queue) < 100:
-            _notify_queue.append((title, body))
+        _notify_queue.append((title, body))
 
 def _notify_worker():
     """Single thread sends queued notifications 1/sec so nothing gets dropped."""
@@ -271,7 +228,7 @@ def _notify_worker():
                     _session.post(
                         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                         json={"chat_id": TELEGRAM_CHAT_ID,
-                              "text": f"*{BOT_NAME}* · {title}\n{body}",
+                              "text": f"*{title}*\n{body}",
                               "parse_mode": "Markdown"},
                         timeout=8
                     )
@@ -316,15 +273,13 @@ def daily_trade_limit():
 
 # ── DAILY LIMITS ─────────────────────────────────────────────────
 def _save_daily_state():
-    with capital_lock:
-        cap_snapshot = capital
     state = {
         "date":         _daily_date,
         "trades":       _daily_trades,
         "wins":         _daily_wins,
         "losses":       _daily_losses,
         "pause_until":  _pause_until,
-        "capital":      cap_snapshot,
+        "capital":      capital,
         "week_start":   _week_start_date,
         "week_logs":    _week_day_logs,
     }
@@ -338,7 +293,6 @@ def _save_daily_state():
 def _load_daily_state():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses
     global _pause_until, capital, _week_start_date, _week_day_logs, completed_trades
-    global _day_start_cap
     today = time.strftime("%Y-%m-%d")
 
     # Try Redis first (survives redeploys), fall back to local file
@@ -380,74 +334,46 @@ def _load_daily_state():
         completed_trades.extend(trades_data)
         log("ok", f"Reloaded {len(completed_trades)} completed trades")
 
-    # Restore auto-tuned params (Redis > local file > defaults)
-    global BOND_ENTRY_MIN, BOND_ENTRY_MAX, BOND_SL_PCT, BOND_STALE_SECS, BOND_MAX_SECS, SPIKE_TP_PCT
-    tuned = redis_load("bot_tuned_params")
-    if not tuned:
-        try:
-            tuned_file = LEARN_FILE.replace(".json", "_tuned.json")
-            if os.path.exists(tuned_file):
-                with open(tuned_file) as f:
-                    tuned = json.load(f)
-        except Exception:
-            tuned = {}
-    if tuned:
-        try:
-            BOND_ENTRY_MIN  = float(tuned.get("BOND_ENTRY_MIN",  BOND_ENTRY_MIN))
-            BOND_ENTRY_MAX  = float(tuned.get("BOND_ENTRY_MAX",  BOND_ENTRY_MAX))
-            BOND_SL_PCT     = float(tuned.get("BOND_SL_PCT",     BOND_SL_PCT))
-            BOND_STALE_SECS = int(tuned.get("BOND_STALE_SECS",   BOND_STALE_SECS))
-            BOND_MAX_SECS   = int(tuned.get("BOND_MAX_SECS",     BOND_MAX_SECS))
-            SPIKE_TP_PCT    = float(tuned.get("SPIKE_TP_PCT",    SPIKE_TP_PCT))
-            log("ok", f"Restored tuned params: bond={BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% sl={BOND_SL_PCT}% stale={BOND_STALE_SECS}s")
-        except (ValueError, TypeError) as e:
-            log("warn", f"Corrupted tuned params — using defaults: {e}")
-
-    _day_start_cap = capital  # initialize daily loss guard from loaded capital
-
 def _reset_daily_if_needed():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses, _pause_until
-    global _week_start_date, _week_day_logs, _day_start_cap, _daily_cap_notified
+    global _week_start_date, _week_day_logs, _day_start_cap
     today = time.strftime("%Y-%m-%d")
-    with capital_lock:
-        cap_snap = capital  # snapshot before _daily_lock to respect lock ordering
     with _daily_lock:
         if _daily_date != today:
-            prev_day = _daily_date
             if _daily_date:
                 _week_day_logs.append({
                     "date":    _daily_date,
                     "trades":  _daily_trades,
                     "wins":    _daily_wins,
                     "losses":  _daily_losses,
-                    "capital": cap_snap,
+                    "capital": capital,
                 })
             if not _week_start_date:
                 _week_start_date = today
-            _daily_date         = today
-            _daily_trades       = 0
-            _daily_wins         = 0
-            _daily_losses       = 0
-            _pause_until        = 0.0
+            _daily_date    = today
+            _daily_trades  = 0
+            _daily_wins    = 0
+            _daily_losses  = 0
+            _pause_until   = 0.0
             _daily_cap_notified = False
-            _day_start_cap      = cap_snap
+            _day_start_cap = capital  # snapshot for daily loss % guard
             limit = daily_trade_limit()
-            pct, _ = _cap_tier(cap_snap)
-            log("ok", f"New day {today} | Day {len(_week_day_logs)+1} | cap=${cap_snap:.2f} | trade={pct*100:.0f}% (${trade_size():.2f}) | limit={limit}/day")
+            with capital_lock:
+                cap = capital
+            pct, _ = _cap_tier(cap)
+            log("ok", f"New day {today} | Day {len(_week_day_logs)+1} | cap=${cap:.2f} | trade={pct*100:.0f}% (${trade_size():.2f}) | limit={limit}/day")
             _save_daily_state()
-            if prev_day:
+            if len(_week_day_logs) > 0:
                 notify(
                     f"🌅 *Boogeys Sniper* — New Day\n"
                     f"Date: {today}\n"
-                    f"Capital: ${cap_snap:,.2f}\n"
+                    f"Capital: ${cap:,.2f}\n"
                     f"Daily limits reset — sniping resumed."
                 )
 
 def daily_limit_reached():
     global _daily_cap_notified
     _reset_daily_if_needed()
-    with capital_lock:
-        cap_now = capital  # snapshot outside _daily_lock to avoid lock-order inversion
     with _daily_lock:
         if _pause_until > time.time():
             resume = time.strftime("%H:%M", time.localtime(_pause_until))
@@ -459,6 +385,8 @@ def daily_limit_reached():
             log("info", f"Daily cap: {_daily_trades}/{limit} trades at current capital level — resumes tomorrow")
             if not _daily_cap_notified:
                 _daily_cap_notified = True
+                with capital_lock:
+                    cap_now = capital
                 notify(
                     f"🔒 *Boogeys Sniper* — Daily Cap\n"
                     f"{_daily_trades} trades | {_daily_wins}W {_daily_losses}L\n"
@@ -468,6 +396,8 @@ def daily_limit_reached():
             return True
         # Max daily loss guard — stop if down >MAX_DAILY_LOSS_PCT% from today's open
         if _day_start_cap > 0:
+            with capital_lock:
+                cap_now = capital
             loss_pct = (_day_start_cap - cap_now) / _day_start_cap * 100
             if loss_pct >= MAX_DAILY_LOSS_PCT:
                 log("warn", f"Daily loss guard: down {loss_pct:.1f}% today (${_day_start_cap - cap_now:.2f}) — stopping until tomorrow")
@@ -510,9 +440,7 @@ def _retune_strategies():
                 history = json.load(f)
         if len(history) >= 5:
             auto_tune(history)
-            with _daily_lock:
-                resume_ts = _pause_until
-            resume_str = time.strftime("%H:%M", time.localtime(resume_ts))
+            resume_str = time.strftime("%H:%M", time.localtime(_pause_until))
             notify("✅ Strategy Retuned",
                    f"New bond entry: {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%\n"
                    f"Stale exit: {BOND_STALE_SECS}s\n"
@@ -531,9 +459,7 @@ def _send_daily_summary():
         today_pnl = cap - _day_start_cap if _day_start_cap > 0 else 0
         wr = round(_daily_wins / max(_daily_trades, 1) * 100, 1)
         # Today's exit breakdown
-        with log_lock:
-            trades_snap = list(completed_trades)
-        today_trades = [t for t in trades_snap if t.get("date", "") == time.strftime("%Y-%m-%d")]
+        today_trades = [t for t in completed_trades if t.get("date", "") == time.strftime("%Y-%m-%d")]
         exit_counts = {}
         for t in today_trades:
             r = t.get("result", "?")
@@ -544,7 +470,7 @@ def _send_daily_summary():
         to_go = goal - cap
         day_num = len(_week_day_logs) + 1
         # Next tune in N trades
-        total_done = len(trades_snap)
+        total_done = len(completed_trades)
         next_tune_in = ANALYZE_EVERY - (total_done % ANALYZE_EVERY)
         pct_tier, _ = _cap_tier(cap)
         msg = (f"Day {day_num} wrap-up\n"
@@ -605,15 +531,14 @@ def _send_weekly_report():
         # Day-by-day capital
         cap_progression = " → ".join(f"${d['capital']:.0f}" for d in _week_day_logs) if _week_day_logs else "N/A"
 
-        with capital_lock:
-            cap = capital
-
-        # Apply best bond range from weekly bucket analysis, then let auto_tune refine further
-        global BOND_ENTRY_MIN, BOND_ENTRY_MAX
+        # Apply best settings for week 2
         if best_bucket:
             best_b = best_bucket[0]
-            BOND_ENTRY_MIN = max(50.0, best_b - 2)
-            BOND_ENTRY_MAX = min(78.0, best_b + 4)
+            BOND_ENTRY_MIN_new = max(50.0, best_b - 2)
+            BOND_ENTRY_MAX_new = min(78.0, best_b + 4)
+        else:
+            BOND_ENTRY_MIN_new = BOND_ENTRY_MIN
+            BOND_ENTRY_MAX_new = BOND_ENTRY_MAX
 
         auto_tune(history)
 
@@ -623,7 +548,7 @@ def _send_weekly_report():
             f"Trades: {total} | {len(wins)}W {len(losses)}L\n"
             f"Win rate: {wr}%\n"
             f"Total PnL: ${total_pnl:+.2f}\n"
-            f"Capital: ${cap:.2f}\n\n"
+            f"Capital: ${capital:.2f}\n\n"
             f"Best bond range: {best_bucket[0] if best_bucket else '?'}%\n"
             f"Best hour: {best_hour}:00\n"
             f"Top loss reason: {top_loss}\n\n"
@@ -632,7 +557,7 @@ def _send_weekly_report():
             f"Bond: {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%\n"
             f"Stale: {BOND_STALE_SECS}s | SL: {BOND_SL_PCT}%"
         )
-        log("ok", f"WEEK 1 DONE | {wr}% WR | PnL ${total_pnl:+.2f} | cap ${cap:.2f}", "WEEK")
+        log("ok", f"WEEK 1 DONE | {wr}% WR | PnL ${total_pnl:+.2f} | cap ${capital:.2f}", "WEEK")
         notify("📈 Week 1 Complete!", report)
 
         # Save full report
@@ -641,7 +566,7 @@ def _send_weekly_report():
                 json.dump({
                     "week": 1, "trades": total, "wins": len(wins), "losses": len(losses),
                     "win_rate": wr, "total_pnl": round(total_pnl, 4),
-                    "final_capital": round(cap, 2),
+                    "final_capital": round(capital, 2),
                     "best_bond_bucket": best_bucket[0] if best_bucket else None,
                     "best_hour": best_hour, "top_loss_reason": top_loss,
                     "day_logs": _week_day_logs,
@@ -661,13 +586,9 @@ def daily_summary_loop():
         now = time.localtime()
         secs_to_midnight = (23 - now.tm_hour) * 3600 + (59 - now.tm_min) * 60 + (60 - now.tm_sec)
         time.sleep(secs_to_midnight + 5)
-        _reset_daily_if_needed()  # ensure today's entry is in week_day_logs before counting
         _send_daily_summary()
-        if COPY_PINNED_WALLETS:
-            time.sleep(5)
-            _send_wallet_report()
         # Weekly deep report every 7 days — then keeps running
-        if len(_week_day_logs) > 0 and len(_week_day_logs) % 7 == 0:
+        if len(_week_day_logs) % 7 == 6:
             time.sleep(10)
             _send_weekly_report()
 
@@ -684,83 +605,27 @@ def check_milestones():
                 notify(f"🏆 MILESTONE ${m:,} REACHED!",
                        f"Capital: ${cap:.2f}\nNew trade size: ${ts:.2f}\nKeep going!")
 
-# ── LIVE READINESS SELF-ASSESSMENT ───────────────────────────────
-def check_live_readiness():
-    global _live_ready_notified
-    if not PAPER_MODE or _live_ready_notified:
-        return
-    with log_lock:
-        trades = list(completed_trades)
-    with capital_lock:
-        cap = capital
-
-    n = len(trades)
-    if n < LIVE_READY_TRADES:
-        return
-
-    wins       = [t for t in trades if t.get("pnl", 0) > 0]
-    losses     = [t for t in trades if t.get("pnl", 0) <= 0]
-    win_rate   = len(wins) / n
-    gross_win  = sum(t["pnl"] for t in wins)
-    gross_loss = abs(sum(t["pnl"] for t in losses)) or 0.01
-    pf         = gross_win / gross_loss
-    growth_pct = (cap - STARTING_CAPITAL) / max(STARTING_CAPITAL, 0.01) * 100
-    days_set   = set(t.get("date", "") for t in trades if t.get("date"))
-    days       = len(days_set)
-
-    checks = {
-        "trades":   n >= LIVE_READY_TRADES,
-        "win_rate": win_rate >= LIVE_READY_WIN_RATE,
-        "pf":       pf >= LIVE_READY_PF,
-        "days":     days >= LIVE_READY_DAYS,
-        "growth":   growth_pct >= LIVE_READY_GROWTH,
-    }
-    if not all(checks.values()):
-        return
-
-    _live_ready_notified = True
-    log("ok", f"LIVE READY: WR={win_rate*100:.1f}% PF={pf:.2f}x growth={growth_pct:.1f}% days={days}")
-    notify(
-        "🚀 I'm Ready for Real Money",
-        f"I've run {n} paper trades over {days} days.\n"
-        f"My numbers check out:\n\n"
-        f"Win Rate:      {win_rate*100:.1f}%  ✅\n"
-        f"Profit Factor: {pf:.2f}×  ✅\n"
-        f"Capital Growth: +{growth_pct:.1f}%  ✅\n"
-        f"Days of data:  {days}  ✅\n\n"
-        f"To go live, set in Railway:\n"
-        f"  PAPER_MODE = false\n"
-        f"  WALLET = your address\n"
-        f"  WALLET_PRIVATE_KEY = your key\n\n"
-        f"I'll handle the rest. Let's go."
-    )
-
 # ── ADAPTIVE LEARNING ────────────────────────────────────────────
 def record_trade(trade_data):
     try:
         history = []
         if os.path.exists(LEARN_FILE):
-            try:
-                with open(LEARN_FILE, "r") as f:
-                    history = json.load(f)
-            except json.JSONDecodeError as e:
-                log("warn", f"Corrupted learn file — starting fresh: {e}")
+            with open(LEARN_FILE, "r") as f:
+                history = json.load(f)
         history.append(trade_data)
         trimmed = history[-200:]
         with open(LEARN_FILE, "w") as f:
             json.dump(trimmed, f)
         redis_save("bot_trades", trimmed)
-        if len(trimmed) % ANALYZE_EVERY == 0:
+        if len(history) % ANALYZE_EVERY == 0:
             log("ok", f"Analyzing last {ANALYZE_EVERY} trades — retuning strategy...", "TUNE")
-            auto_tune(trimmed)
+            auto_tune(history)
             log("ok", f"Tuned: bond={BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% stale={BOND_STALE_SECS}s SL={BOND_SL_PCT}% spikeTP={SPIKE_TP_PCT}%", "TUNE")
     except Exception as e:
         log("warn", f"Learning record: {e}")
 
 def auto_tune(history):
     global BOND_ENTRY_MIN, BOND_ENTRY_MAX, SPIKE_TP_PCT, BOND_STALE_SECS, BOND_SL_PCT, BOND_MAX_SECS
-    if not _tune_lock.acquire(blocking=False):
-        return  # already tuning — skip concurrent call
     try:
         recent = history[-60:]
         wins   = [t for t in recent if t.get("pnl", 0) > 0]
@@ -778,7 +643,7 @@ def auto_tune(history):
         # Tune bond entry range toward what's winning
         if bond_wins:
             avg_win_entry = sum(t.get("bond_entry", BOND_ENTRY_MIN) for t in bond_wins) / len(bond_wins)
-            BOND_ENTRY_MIN = round(min(max(avg_win_entry - 2, 25), 72), 1)
+            BOND_ENTRY_MIN = round(min(max(avg_win_entry - 2, 50), 72), 1)
             BOND_ENTRY_MAX = round(min(BOND_ENTRY_MIN + 6, 78), 1)
         elif bond_wr < 0.35 and len(bond_all) >= 5:
             # Poor win rate — tighten entry, look for higher momentum
@@ -795,10 +660,10 @@ def auto_tune(history):
             avg_win_hold_secs = (sum(t.get("hold_m", 2) for t in bond_wins) / len(bond_wins)) * 60
             BOND_MAX_SECS = max(180, min(480, int(avg_win_hold_secs * 1.5)))
 
-        # >60% of bond losses are hitting SL — give price more room to breathe
+        # Loosen SL if losses are all from price drop (not stale/timeout)
         sl_losses = [t for t in bond_losses if t.get("result") == "BOND_SL"]
-        if len(sl_losses) > len(bond_losses) * 0.6 and BOND_SL_PCT < 15:
-            BOND_SL_PCT = round(BOND_SL_PCT + 1, 1)  # widen SL — too many premature stop-outs
+        if len(sl_losses) > len(bond_losses) * 0.6 and BOND_SL_PCT > 6:
+            BOND_SL_PCT = round(BOND_SL_PCT - 1, 1)  # tighten SL to cut losses faster
 
         # Spike tuning
         if spike_wr > bond_wr + 0.2 and SPIKE_TP_PCT < 80:
@@ -829,21 +694,6 @@ def auto_tune(history):
                f"Bond entry: {BOND_ENTRY_MIN}–{BOND_ENTRY_MAX}%\n"
                f"Stale exit: {BOND_STALE_SECS}s | SL: {BOND_SL_PCT}%\n"
                f"Spike TP: {SPIKE_TP_PCT}%")
-        # Persist tuned params so restarts don't lose learned values
-        tuned = {
-            "BOND_ENTRY_MIN": BOND_ENTRY_MIN,
-            "BOND_ENTRY_MAX": BOND_ENTRY_MAX,
-            "BOND_SL_PCT":    BOND_SL_PCT,
-            "BOND_STALE_SECS":BOND_STALE_SECS,
-            "BOND_MAX_SECS":  BOND_MAX_SECS,
-            "SPIKE_TP_PCT":   SPIKE_TP_PCT,
-        }
-        redis_save("bot_tuned_params", tuned)
-        try:
-            with open(LEARN_FILE.replace(".json", "_tuned.json"), "w") as f:
-                json.dump(tuned, f, indent=2)
-        except Exception:
-            pass
         try:
             with open(LEARN_FILE.replace(".json", "_stats.json"), "w") as f:
                 json.dump(stats, f, indent=2)
@@ -851,89 +701,52 @@ def auto_tune(history):
             pass
     except Exception as e:
         log("warn", f"Auto-tune: {e}")
-    finally:
-        _tune_lock.release()
 
-# ── GMGN COIN DISCOVERY ──────────────────────────────────────────
-def get_gmgn_coins():
-    """
-    Pull candidate coins from all 4 GMGN feeds in one function.
-    Covers all Solana tokens (Raydium, Meteora, Orca, Jupiter, PumpFun)
-    — broader scope than the old PumpFun-only API.
-
-    Returns (active_coins, graduated_coins) where:
-      active_coins    — still on bonding curve or fresh listings
-      graduated_coins — complete=True or established tokens (for grad runner)
-    """
-    hdrs = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept":     "application/json",
-        "Referer":    "https://gmgn.ai/",
-        "Origin":     "https://gmgn.ai",
-    }
-    if GMGN_API_KEY:
-        hdrs["Authorization"] = f"Bearer {GMGN_API_KEY}"
-
-    seen  = {}   # mint → coin dict  (dedup across feeds)
-    feeds = [
-        (GMGN_COMPLETING_URL,  "completing", {"limit": 50}),
-        (GMGN_TRENDING_URL,    "trending",   {"limit": 50, "orderby": "volume", "direction": "desc"}),
-        (GMGN_HOT_SEARCH_URL,  "hot_search", {"limit": 30}),
-        (GMGN_NEW_PAIRS_URL,   "new_pairs",  {"limit": 30}),
+# ── PUMP.FUN COINS ───────────────────────────────────────────────
+def get_pumpfun_coins():
+    endpoints = [
+        "https://frontend-api-v3.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false",
+        "https://frontend-api-v3.pump.fun/coins/currently-live?offset=0&limit=50&includeNsfw=false&order=DESC",
+        "https://frontend-api-v2.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false",
     ]
-
-    for url, label, params in feeds:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
+        "Accept": "application/json",
+        "Referer": "https://pump.fun/",
+        "Origin": "https://pump.fun",
+    }
+    for url in endpoints:
         try:
-            r = _session.get(url, headers=hdrs, params=params, timeout=10)
-            if r.status_code != 200:
-                log("warn", f"GMGN {label}: {r.status_code}")
+            res = _session.get(url, headers=headers, timeout=10)
+            if res.status_code != 200:
                 continue
-            data  = r.json().get("data", {})
-            items = data.get("tokens") or data.get("rank") or data.get("pairs") or []
-            if isinstance(items, dict):
-                items = list(items.values())
-            for item in items:
-                mint = item.get("address") or item.get("mint", "")
-                if mint in seen:
-                    # Coin appeared in another feed — accumulate sources, raise hype score
-                    if label not in seen[mint]["_sources"]:
-                        seen[mint]["_sources"].append(label)
-                        seen[mint]["hype_score"] = len(seen[mint]["_sources"])
-                    continue
-                # Bond % — completing feed populates this; others default 0 (unknown/graduated)
-                bond_raw = float(
-                    item.get("bond_progress") or
-                    item.get("bondingCurveProgress") or
-                    item.get("king_of_hill_progress") or 0
-                )
-                # Timestamps — GMGN may be seconds or ms; normalise to ms
-                def _to_ms(v):
-                    v = int(v or 0)
-                    return v * 1000 if 0 < v < 10_000_000_000 else v
-                lt_ms = _to_ms(item.get("last_trade_unix_time") or item.get("last_trade_timestamp"))
-                ct_ms = _to_ms(item.get("created_timestamp") or item.get("open_timestamp"))
-
-                seen[mint] = {
-                    "mint":       mint,
-                    "symbol":     item.get("symbol", mint[:8]),
-                    "bond_pct":   round(bond_raw, 1),
-                    "twitter":    bool(item.get("twitter_username") or item.get("twitter")),
-                    "telegram":   bool(item.get("telegram")),
-                    "dev":        item.get("creator") or item.get("dev") or "",
-                    "replies":    int(item.get("reply_count") or 0),
-                    "created_at": ct_ms,
-                    "last_trade": lt_ms,
-                    "complete":    bool(item.get("complete") or bond_raw >= 100),
-                    "_sources":   [label],
-                    "hype_score": 1,
-                }
+            data  = res.json()
+            items = data if isinstance(data, list) else data.get("coins", [])
+            if not items:
+                continue
+            coins = []
+            for coin in items[:50]:
+                mint  = coin.get("mint", "")
+                vsol  = float(coin.get("virtual_sol_reserves", 0) or 0)
+                bond  = min((vsol / 85_000_000_000) * 100, 99.9) if vsol > 0 else 0
+                if mint and not coin.get("complete", False):
+                    coins.append({
+                        "mint":       mint,
+                        "symbol":     coin.get("symbol", mint[:8]),
+                        "bond_pct":   round(bond, 1),
+                        "twitter":    bool(coin.get("twitter")),
+                        "telegram":   bool(coin.get("telegram")),
+                        "dev":        coin.get("creator", ""),
+                        "replies":    int(coin.get("reply_count", 0) or 0),
+                        "created_at":   int(coin.get("created_timestamp", 0) or 0),
+                        "last_trade":   int(coin.get("last_trade_timestamp", 0) or 0),
+                        "complete":     False,
+                    })
+            log("info", f"pump.fun API: {len(coins)} live coins")
+            return coins
         except Exception as e:
-            log("warn", f"GMGN {label}: {e}")
-
-    active    = [c for c in seen.values() if not c["complete"]]
-    graduated = [c for c in seen.values() if c["complete"]]
-    log("info", f"GMGN: {len(active)} active + {len(graduated)} graduated across 4 feeds")
-    return active, graduated
+            log("warn", f"Endpoint failed: {e}")
+    return []
 
 def get_bonding_details(mint):
     try:
@@ -945,10 +758,7 @@ def get_bonding_details(mint):
         if res.status_code == 200:
             data  = res.json()
             vsol  = float(data.get("virtual_sol_reserves", 0) or 0)
-            vtok  = float(data.get("virtual_token_reserves", 0) or 0)
             bond  = min((vsol / 85_000_000_000) * 100, 99.9)
-            # price_sol: lamports/μtoken → SOL/token after adjusting decimals (÷1000)
-            price_sol = (vsol / vtok / 1000) if vtok > 0 else 0
             return {
                 "bond_pct":   round(bond, 1),
                 "complete":   data.get("complete", False),
@@ -956,7 +766,6 @@ def get_bonding_details(mint):
                 "twitter":    bool(data.get("twitter")),
                 "telegram":   bool(data.get("telegram")),
                 "created_at": int(data.get("created_timestamp", 0) or 0),
-                "price_sol":  price_sol,
             }
     except Exception:
         pass
@@ -970,106 +779,14 @@ def get_market_data(mint):
         if not pairs:
             return None
         pair = max(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
-        vol  = pair.get("volume", {})
-        pc   = pair.get("priceChange", {})
         return {
-            "price":        float(pair.get("priceUsd", 0) or 0),
-            "liq":          float(pair.get("liquidity", {}).get("usd", 0) or 0),
-            "change5m":     float(pc.get("m5", 0) or 0),
-            "change1h":     float(pc.get("h1",  0) or 0),
-            "change6h":     float(pc.get("h6",  0) or 0),
-            "vol_h1":       float(vol.get("h1",  0) or 0),
-            "vol_h6":       float(vol.get("h6",  0) or 0),
-            "vol_h24":      float(vol.get("h24", 0) or 0),
-            "age_h":        (time.time() - float(pair.get("pairCreatedAt", time.time() * 1000)) / 1000) / 3600,
-            "pair_address": pair.get("pairAddress", ""),
-            "symbol":       pair.get("baseToken", {}).get("symbol", ""),
+            "price":    float(pair.get("priceUsd", 0) or 0),
+            "liq":      float(pair.get("liquidity", {}).get("usd", 0) or 0),
+            "change1h": float(pair.get("priceChange", {}).get("h1", 0) or 0),
+            "age_h":    (time.time() - float(pair.get("pairCreatedAt", time.time() * 1000)) / 1000) / 3600,
         }
     except Exception:
         return None
-
-# ── SMC ANALYSIS (EMA / VWAP / FVG) ─────────────────────────────
-def _ema(prices, period):
-    if len(prices) < period:
-        return None
-    k   = 2 / (period + 1)
-    ema = sum(prices[:period]) / period
-    for p in prices[period:]:
-        ema = p * k + ema * (1 - k)
-    return ema
-
-def get_candles(pair_address, resolution="5", limit=60):
-    """Fetch up to `limit` OHLCV candles from DexScreener (5m default)."""
-    if not pair_address:
-        return []
-    try:
-        now  = int(time.time())
-        res  = _session.get(
-            f"https://api.dexscreener.com/latest/dex/candles/solana/{pair_address}",
-            params={"res": resolution, "from": now - limit * int(resolution) * 60, "to": now},
-            timeout=8
-        )
-        if res.status_code != 200:
-            return []
-        raw = res.json()
-        candles = raw.get("candles") or raw.get("data") or []
-        return [c for c in candles if c.get("close", 0) > 0]
-    except Exception:
-        return []
-
-def smc_score(candles, current_price):
-    """
-    Score 0-3 for graduated coin entry quality:
-      +1  price above EMA(21) on 5m chart — trend alignment
-      +1  price above session VWAP         — intraday bullish bias
-      +1  price pulling back into a bullish FVG — optimal entry zone
-    Returns (score: int, detail: str)
-    """
-    if len(candles) < 5:
-        return 0, "no_candles"
-
-    closes = [c["close"] for c in candles]
-    score  = 0
-    parts  = []
-
-    # ── EMA(21) ──────────────────────────────────────────────────
-    ema21 = _ema(closes, min(21, len(closes)))
-    if ema21:
-        if current_price > ema21:
-            score += 1
-            parts.append(f"EMA✓{ema21:.6f}")
-        else:
-            parts.append(f"EMA✗{ema21:.6f}")
-
-    # ── VWAP ─────────────────────────────────────────────────────
-    total_vol = sum(c.get("volume", 0) for c in candles)
-    if total_vol > 0:
-        vwap = sum(
-            (c.get("high", c["close"]) + c.get("low", c["close"]) + c["close"]) / 3
-            * c.get("volume", 0)
-            for c in candles
-        ) / total_vol
-        if current_price > vwap:
-            score += 1
-            parts.append(f"VWAP✓{vwap:.6f}")
-        else:
-            parts.append(f"VWAP✗{vwap:.6f}")
-
-    # ── Bullish FVG ───────────────────────────────────────────────
-    # Candle[i].high < candle[i+2].low = unfilled gap; price in gap = pullback entry
-    fvg_hit = False
-    for i in range(len(candles) - 2):
-        gap_bot = candles[i].get("high", 0)
-        gap_top = candles[i + 2].get("low", 0)
-        if gap_top > gap_bot > 0 and gap_bot <= current_price <= gap_top:
-            score   += 1
-            fvg_hit  = True
-            parts.append(f"FVG✓[{gap_bot:.6f}-{gap_top:.6f}]")
-            break
-    if not fvg_hit:
-        parts.append("FVG✗")
-
-    return score, " ".join(parts)
 
 def get_sol_price():
     try:
@@ -1118,9 +835,7 @@ def check_holder_concentration(mint) -> tuple:
         if r.status_code != 200:
             return True, ""
         data = r.json().get("data") or {}
-        holders = data.get("holders")
-        if holders is None:
-            holders = data if isinstance(data, list) else []
+        holders = data.get("holders") or data if isinstance(data, list) else []
         top10_pct = sum(float(h.get("amount_percentage") or h.get("percent") or 0) for h in holders[:10])
         if top10_pct > 60:
             return False, f"top10={top10_pct:.0f}%"
@@ -1153,30 +868,19 @@ def check_dev_history(dev_wallet) -> tuple:
         return True, ""
 
 def _refresh_gmgn_signals():
-    """Refresh smart-money / KOL / trending / hot-search signal mint sets every 5 min."""
-    global _gmgn_sm_signal_mints, _gmgn_surge_mints, _gmgn_kol_mints, _gmgn_sm_sell_mints
-    global _gmgn_trending_mints, _gmgn_hot_mints, _gmgn_completing_mints, _gmgn_new_pair_mints
-    global _gmgn_signal_time
+    """Refresh smart-money / KOL signal mint sets. Runs periodically in background."""
+    global _gmgn_sm_signal_mints, _gmgn_surge_mints, _gmgn_kol_mints, _gmgn_sm_sell_mints, _gmgn_signal_time
     try:
-        hdrs = {"Referer": "https://gmgn.ai/", "Origin": "https://gmgn.ai",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        hdrs = {"Referer":"https://gmgn.ai/","Origin":"https://gmgn.ai"}
         if GMGN_API_KEY:
             hdrs["Authorization"] = f"Bearer {GMGN_API_KEY}"
 
-        def _extract(data):
-            """Pull mint address from any GMGN response item shape."""
-            if not data:
-                return set()
-            return {
-                (i.get("address") or i.get("mint") or i.get("token_address") or "")
-                for i in data if (i.get("address") or i.get("mint") or i.get("token_address"))
-            }
-
         def _fetch_signal(stype):
             r = _session.get(GMGN_SIGNALS_URL, headers=hdrs,
-                             params={"signal_type": stype, "chain": "sol", "limit": 100}, timeout=8)
+                             params={"signal_type": stype, "chain":"sol","limit":100}, timeout=8)
             if r.status_code == 200:
-                return _extract(r.json().get("data") or [])
+                items = r.json().get("data") or []
+                return {i.get("address") or i.get("mint","") for i in items if i.get("address") or i.get("mint")}
             return set()
 
         sm  = _fetch_signal(12)   # smart money buy
@@ -1185,74 +889,26 @@ def _refresh_gmgn_signals():
         # KOL buys
         kol = set()
         if GMGN_API_KEY:
-            r2 = _session.get(GMGN_KOL_TRACK, headers=hdrs, params={"side": "buy", "limit": 50}, timeout=8)
+            r2 = _session.get(GMGN_KOL_TRACK, headers=hdrs,
+                              params={"side":"buy","limit":50}, timeout=8)
             if r2.status_code == 200:
-                kol = _extract(r2.json().get("data") or [])
+                kol = {i.get("token_address") or i.get("mint","") for i in (r2.json().get("data") or [])}
 
-        # Smart-money sells (exit/skip signal)
+        # smart-money sell exits (for sell signal)
         sm_sell = set()
-        r3 = _session.get(GMGN_SM_TRACK, headers=hdrs, params={"side": "sell", "limit": 50}, timeout=8)
+        r3 = _session.get(GMGN_SM_TRACK, headers={**hdrs},
+                          params={"side":"sell","limit":50}, timeout=8)
         if r3.status_code == 200:
-            sm_sell = _extract(r3.json().get("data") or [])
-
-        # Trending tokens (1h movers)
-        trending = set()
-        for period in ("1h", "4h"):
-            try:
-                rt = _session.get(GMGN_TRENDING_URL, headers=hdrs,
-                                  params={"orderby": "volume", "direction": "desc",
-                                          "period": period, "limit": 50}, timeout=8)
-                if rt.status_code == 200:
-                    items = rt.json().get("data") or rt.json().get("tokens") or []
-                    trending |= _extract(items)
-            except Exception:
-                pass
-
-        # Hot search
-        hot = set()
-        try:
-            rh = _session.get(GMGN_HOT_SEARCH_URL, headers=hdrs, params={"limit": 50}, timeout=8)
-            if rh.status_code == 200:
-                items = rh.json().get("data") or rh.json().get("tokens") or []
-                hot = _extract(items)
-        except Exception:
-            pass
-
-        # Completing bonding curve (near graduation)
-        completing = set()
-        try:
-            rc = _session.get(GMGN_COMPLETING_URL, headers=hdrs,
-                              params={"limit": 50}, timeout=8)
-            if rc.status_code == 200:
-                items = rc.json().get("data") or rc.json().get("tokens") or []
-                completing = _extract(items)
-        except Exception:
-            pass
-
-        # New pairs
-        new_pairs = set()
-        try:
-            rn = _session.get(GMGN_NEW_PAIRS_URL, headers=hdrs, params={"limit": 50}, timeout=8)
-            if rn.status_code == 200:
-                items = rn.json().get("data") or rn.json().get("tokens") or []
-                new_pairs = _extract(items)
-        except Exception:
-            pass
+            sm_sell = {i.get("token_address") or i.get("mint","") for i in (r3.json().get("data") or [])}
 
         with _signal_lock:
-            _gmgn_sm_signal_mints  = sm
-            _gmgn_surge_mints      = srg
-            _gmgn_kol_mints        = kol
-            _gmgn_sm_sell_mints    = sm_sell
-            _gmgn_trending_mints   = trending
-            _gmgn_hot_mints        = hot
-            _gmgn_completing_mints = completing
-            _gmgn_new_pair_mints   = new_pairs
-            _gmgn_signal_time      = time.time()
-        log("info",
-            f"GMGN signals: sm_buy={len(sm)} surge={len(srg)} kol={len(kol)} "
-            f"sm_sell={len(sm_sell)} trending={len(trending)} hot={len(hot)} "
-            f"completing={len(completing)} new_pairs={len(new_pairs)}", "GMGN")
+            _gmgn_sm_signal_mints = sm
+            _gmgn_surge_mints     = srg
+            _gmgn_kol_mints       = kol          # KOL buy mints — used for signal score
+            _gmgn_sm_sell_mints   = sm_sell      # SM sell mints — used for exit filter (separate)
+            _gmgn_signal_time     = time.time()
+            if sm or srg or kol:
+                log("info", f"GMGN signals: sm_buy={len(sm)} surge={len(srg)} kol={len(kol)} sm_sell={len(sm_sell)}", "GMGN")
     except Exception as e:
         log("warn", f"GMGN signal refresh error: {e}", "GMGN")
 
@@ -1264,170 +920,22 @@ def run_signal_refresh_loop():
 
 def gmgn_signal_score(mint) -> int:
     """
-    Returns 0-7 signal score for a mint:
-      +1 smart money buy  +1 price surge  +1 KOL buy
-      +1 trending (1h/4h) +1 hot search   +1 completing bonding curve  +1 new pair
+    Returns 0-3 signal score for a mint:
+      +1 if in smart money buy signal set
+      +1 if in price surge set
+      +1 if in KOL buy set
     """
     with _signal_lock:
         return (
-            (1 if mint in _gmgn_sm_signal_mints  else 0) +
-            (1 if mint in _gmgn_surge_mints       else 0) +
-            (1 if mint in _gmgn_kol_mints         else 0) +
-            (1 if mint in _gmgn_trending_mints    else 0) +
-            (1 if mint in _gmgn_hot_mints         else 0) +
-            (1 if mint in _gmgn_completing_mints  else 0) +
-            (1 if mint in _gmgn_new_pair_mints    else 0)
+            (1 if mint in _gmgn_sm_signal_mints else 0) +
+            (1 if mint in _gmgn_surge_mints else 0) +
+            (1 if mint in _gmgn_kol_mints else 0)
         )
 
 def gmgn_smart_money_selling(mint) -> bool:
     """Returns True if smart money is actively selling this mint."""
     with _signal_lock:
         return mint in _gmgn_sm_sell_mints
-
-def gmgn_trending_scan_loop():
-    """
-    Every GMGN_TREND_SCAN_INTERVAL seconds: take all mints from the trending,
-    hot-search, completing, and new-pair sets and evaluate them as entry candidates.
-    These may not appear in get_pumpfun_coins() at all, so this is an independent
-    discovery path.
-    """
-    global _trend_scanned
-    time.sleep(30)  # let signal refresh run first
-    while scan_active:
-        try:
-            now = time.time()
-
-            with _signal_lock:
-                pool = (
-                    _gmgn_trending_mints |
-                    _gmgn_hot_mints |
-                    _gmgn_completing_mints |
-                    _gmgn_new_pair_mints
-                ) - _trend_scanned
-
-            # Also exclude mints still in temp cooldown
-            candidates = {m for m in pool if _trend_cooldown.get(m, 0) < now}
-
-            with trades_lock:
-                num_open = len(open_trades)
-            if num_open >= MAX_OPEN or daily_limit_reached():
-                time.sleep(GMGN_TREND_SCAN_INTERVAL)
-                continue
-
-            if not candidates:
-                time.sleep(GMGN_TREND_SCAN_INTERVAL)
-                continue
-
-            log("info", f"GMGN spike scan: {len(candidates)} candidates ({len(pool)-len(candidates)} cooling)", "GMGN")
-            for mint in list(candidates):
-                if not scan_active or daily_limit_reached():
-                    break
-                with trades_lock:
-                    if len(open_trades) >= MAX_OPEN:
-                        break
-                    if mint in open_trades:
-                        _trend_scanned.add(mint)
-                        continue
-
-                # ── Permanent filters (blacklist / invalid) ────────────
-                if not mint or len(mint) < 30:
-                    _trend_scanned.add(mint)
-                    continue
-                if mint in blacklisted_mints:
-                    _trend_scanned.add(mint)
-                    continue
-
-                # ── Smart money selling = permanent skip ───────────────
-                if gmgn_smart_money_selling(mint):
-                    log("info", f"SPIKE SKIP: smart money selling", mint[:8])
-                    _trend_scanned.add(mint)
-                    continue
-
-                # ── Market data + SPIKE check ──────────────────────────
-                market = get_market_data(mint)
-                if not market or market["price"] <= 0:
-                    _trend_cooldown[mint] = now + 90   # retry in 90s
-                    continue
-                if market["liq"] < MIN_LIQ:
-                    _trend_cooldown[mint] = now + 90
-                    continue
-
-                spike_5m = market.get("change5m", 0)
-                spike_1h = market.get("change1h", 0)
-                if spike_5m < SPIKE_5M_MIN and spike_1h < SPIKE_1H_MIN:
-                    # Not spiking yet — check again next scan, not permanently skipped
-                    log("info",
-                        f"SPIKE WAIT: 5m={spike_5m:+.1f}% 1h={spike_1h:+.1f}% "
-                        f"(need {SPIKE_5M_MIN}% / {SPIKE_1H_MIN}%)", mint[:8])
-                    _trend_cooldown[mint] = now + 90
-                    continue
-                if spike_5m < 0 and spike_1h < 0:
-                    # Both timeframes falling — pass for now
-                    _trend_cooldown[mint] = now + 60
-                    continue
-
-                # ── Bond curve check ───────────────────────────────────
-                details = get_bonding_details(mint)
-                bond = details["bond_pct"] if details else 0
-                if details and details.get("complete"):
-                    pass  # graduated — no bond gate
-                elif bond > BOND_ENTRY_MAX:
-                    _trend_cooldown[mint] = now + 120
-                    continue
-
-                # ── Rug / safety check (permanent) ────────────────────
-                rug = run_rugcheck(mint)
-                if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
-                    blacklisted_mints.add(mint)
-                    _trend_scanned.add(mint)
-                    continue
-                if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
-                    _trend_scanned.add(mint)
-                    continue
-
-                holder_ok, holder_reason = check_holder_concentration(mint)
-                if not holder_ok:
-                    log("info", f"SPIKE SKIP: {holder_reason}", mint[:8])
-                    _trend_scanned.add(mint)
-                    continue
-
-                # ── ALL CLEAR — enter ──────────────────────────────────
-                sig_score = gmgn_signal_score(mint)
-                symbol    = market.get("symbol", mint[:8])
-                amt       = trade_size()
-
-                with _signal_lock:
-                    src = ("trend" if mint in _gmgn_trending_mints else
-                           "hot"   if mint in _gmgn_hot_mints else
-                           "comp"  if mint in _gmgn_completing_mints else "new")
-
-                log("ok",
-                    f"GMGN SPIKE {src.upper()} | 5m={spike_5m:+.1f}% 1h={spike_1h:+.1f}% "
-                    f"liq=${market['liq']:.0f} sig={sig_score}/7", symbol)
-                notify(f"⚡ SPIKE {src.upper()} — {symbol}",
-                       f"5m: {spike_5m:+.1f}% | 1h: {spike_1h:+.1f}%\n"
-                       f"Liq: ${market['liq']:.0f} | Signal: {sig_score}/7\n"
-                       f"Amount: ${amt:.2f}")
-                enter_trade(mint, symbol, market["price"], amt, f"gmgn_{src}", bond, 0)
-                _trend_scanned.add(mint)
-                time.sleep(1)
-
-            # Expire old cooldowns to free memory
-            expired = [m for m, exp in _trend_cooldown.items() if exp < now]
-            for m in expired:
-                _trend_cooldown.pop(m, None)
-
-            # Clear permanent scanned set for coins no longer in any live feed
-            with _signal_lock:
-                still_live = (
-                    _gmgn_trending_mints | _gmgn_hot_mints |
-                    _gmgn_completing_mints | _gmgn_new_pair_mints
-                )
-            _trend_scanned -= still_live
-
-        except Exception as e:
-            log("err", f"GMGN spike scan loop: {e}", "GMGN")
-        time.sleep(GMGN_TREND_SCAN_INTERVAL)
 
 # ── USDC PROFIT LOCK ─────────────────────────────────────────────
 def lock_profit_to_usdc(profit_usd):
@@ -1491,9 +999,9 @@ def lock_profit_to_usdc(profit_usd):
         log("warn", f"USDC lock error: {e}", "USDC")
 
 # ── TRADE EXECUTION ──────────────────────────────────────────────
-def execute_buy(mint, symbol, amount, pool="pump"):
+def execute_buy(mint, symbol, amount):
     if PAPER_MODE:
-        log("ok", f"[PAPER] Buy ${amount:.2f} -> {symbol} [{pool}]", symbol)
+        log("ok", f"[PAPER] Buy ${amount:.2f} -> {symbol}", symbol)
         return "PAPER_TX"
     try:
         sol_price = get_sol_price()
@@ -1507,7 +1015,7 @@ def execute_buy(mint, symbol, amount, pool="pump"):
             headers={"Content-Type": "application/json"},
             json={"publicKey": WALLET, "action": "buy", "mint": mint,
                   "denominatedInSol": "true", "amount": sol_amount,
-                  "slippage": 20, "priorityFee": 0.001, "pool": pool},
+                  "slippage": 20, "priorityFee": 0.001, "pool": "pump"},
             timeout=15
         )
         if res.status_code != 200:
@@ -1528,9 +1036,9 @@ def execute_buy(mint, symbol, amount, pool="pump"):
         log("err", f"Buy error: {e}", symbol)
         return None
 
-def execute_sell(tokens, mint, symbol, pool="pump"):
+def execute_sell(tokens, mint, symbol):
     if PAPER_MODE:
-        log("ok", f"[PAPER] Sell {symbol} [{pool}]", symbol)
+        log("ok", f"[PAPER] Sell {symbol}", symbol)
         return "PAPER_TX"
     try:
         res = _session.post(
@@ -1538,7 +1046,7 @@ def execute_sell(tokens, mint, symbol, pool="pump"):
             headers={"Content-Type": "application/json"},
             json={"publicKey": WALLET, "action": "sell", "mint": mint,
                   "denominatedInSol": "false", "amount": tokens,
-                  "slippage": 20, "priorityFee": 0.001, "pool": pool},
+                  "slippage": 20, "priorityFee": 0.001, "pool": "pump"},
             timeout=15
         )
         if res.status_code != 200:
@@ -1558,7 +1066,7 @@ def execute_sell(tokens, mint, symbol, pool="pump"):
         return None
 
 # ── ENTER / EXIT ─────────────────────────────────────────────────
-def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, replies=0, pool="pump"):
+def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, replies=0):
     global capital, _daily_trades
     if daily_limit_reached():
         return False
@@ -1573,16 +1081,16 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
     with capital_lock:
         if capital < amount:
             return False
-        capital -= amount  # reserve immediately so concurrent enters can't double-spend
 
-    tx = execute_buy(mint, symbol, amount, pool)
+    tx = execute_buy(mint, symbol, amount)
     if not tx:
-        with capital_lock:
-            capital += amount  # refund reservation on buy failure
         return False
 
     with _daily_lock:
         _daily_trades += 1
+
+    with capital_lock:
+        capital -= amount
 
     with trades_lock:
         open_trades[mint] = {
@@ -1600,10 +1108,9 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
             "bond_slip_start":   None,
             "price_high":        entry_price,   # trailing SL tracks peak price
             "replies":           replies,
-            "pool":              pool,
         }
 
-    log("ok", f"ENTER [{strategy.upper()}] ${amount:.2f} | bond={bond_entry:.1f}% | pool={pool}", symbol)
+    log("ok", f"ENTER [{strategy.upper()}] ${amount:.2f} | bond={bond_entry:.1f}%", symbol)
     notify(f"🟢 BUY {symbol}",
            f"Strategy: {strategy.upper()}\nAmount: ${amount:.2f}\nBond: {bond_entry:.1f}%\nReplies: {replies}")
     return True
@@ -1620,22 +1127,18 @@ def exit_trade(mint, price, reason, bond=0):
     pnl    = max(-amount, min(pnl, amount * 5))
     hold_m = (time.time() - trade["opened_at"]) / 60
 
-    sig = execute_sell(trade["tokens"], mint, trade["symbol"], trade.get("pool", "pump"))
     with capital_lock:
-        if sig:
-            capital += amount + pnl
-        else:
-            capital += amount  # sell failed — return stake only, no PnL credit
-            log("err", f"Sell tx failed — stake returned, PnL not credited. Check wallet.", trade["symbol"])
-        cap_after = capital  # snapshot under lock for use below
+        capital += amount + pnl
 
     sign = "+" if pnl >= 0 else ""
     log("ok" if pnl >= 0 else "err",
-        f"{'WIN' if pnl>=0 else 'LOSS'} {reason} | {sign}${pnl:.4f} | {hold_m:.1f}m | cap=${cap_after:.2f}",
+        f"{'WIN' if pnl>=0 else 'LOSS'} {reason} | {sign}${pnl:.4f} | {hold_m:.1f}m | cap=${capital:.2f}",
         trade["symbol"])
     emoji = "✅" if pnl >= 0 else "❌"
     notify(f"{emoji} {'WIN' if pnl>=0 else 'LOSS'} {trade['symbol']}",
-           f"Reason: {reason}\nPnL: {sign}${pnl:.4f}\nHeld: {hold_m:.1f} min\nCapital: ${cap_after:.2f}")
+           f"Reason: {reason}\nPnL: {sign}${pnl:.4f}\nHeld: {hold_m:.1f} min\nCapital: ${capital:.2f}")
+
+    execute_sell(trade["tokens"], mint, trade["symbol"])
     with _copy_lock:
         _sold_mints[mint] = time.time()  # 30 min cooldown before re-buying
     record_daily_trade(won=(pnl > 0))
@@ -1663,11 +1166,9 @@ def exit_trade(mint, price, reason, bond=0):
         "date":       time.strftime("%Y-%m-%d"),
         "time":       time.strftime("%H:%M:%S"),
     }
-    with log_lock:
-        completed_trades.append(rec)
+    completed_trades.append(rec)
     record_trade(rec)
     check_milestones()
-    check_live_readiness()
     _save_daily_state()
 
     # Lock profits into USDC once capital >= threshold
@@ -1677,7 +1178,7 @@ def exit_trade(mint, price, reason, bond=0):
         if cap_now >= USDC_LOCK_THRESHOLD:
             threading.Thread(target=lock_profit_to_usdc, args=(pnl,), daemon=True).start()
 
-    if cap_after < 2:
+    if capital < 2:
         global scan_active
         scan_active = False
         log("err", "Capital below $2 — scanner halted", "HALT")
@@ -1685,170 +1186,131 @@ def exit_trade(mint, price, reason, bond=0):
 # ── MONITOR LOOP ────────────────────────────────────────────────
 def monitor_loop():
     while True:
-        try:
-            time.sleep(3)
+        time.sleep(3)
+        with trades_lock:
+            mints = list(open_trades.keys())
+        for mint in mints:
             with trades_lock:
-                mints = list(open_trades.keys())
-            for mint in mints:
+                if mint not in open_trades:
+                    continue
+                trade = dict(open_trades[mint])
+            symbol   = trade["symbol"]
+            strategy = trade["strategy"]
+            elapsed  = time.time() - trade["opened_at"]
+
+            details = get_bonding_details(mint)
+            bond    = details["bond_pct"] if details else 0
+            market  = get_market_data(mint)
+            price   = market["price"] if market and market["price"] > 0 else trade["entry"]
+
+            # Paper mode: simulate price from bond % movement when DexScreener has no data
+            if PAPER_MODE and price == trade["entry"] and bond > 0 and trade.get("bond_entry", 0) > 0:
+                bond_move = bond - trade["bond_entry"]
+                price = trade["entry"] * (1 + bond_move / 100)
+
+            with trades_lock:
+                if mint not in open_trades:
+                    continue
+                if bond > open_trades[mint]["bond_high"]:
+                    open_trades[mint]["bond_high"]      = bond
+                    open_trades[mint]["bond_last_moved"] = time.time()
+                if price > open_trades[mint]["price_high"]:
+                    open_trades[mint]["price_high"] = price
+                bond_high       = open_trades[mint]["bond_high"]
+                bond_prev       = open_trades[mint]["bond_prev"]
+                bond_last_moved = open_trades[mint].get("bond_last_moved", time.time())
+                slip_start      = open_trades[mint]["bond_slip_start"]
+                price_high      = open_trades[mint]["price_high"]
+                open_trades[mint]["bond_prev"] = bond
+
+            bond_drop = bond - bond_prev
+
+            # Instant exit: sharp bond drop of 4%+ while near graduation
+            if bond_high >= SLIP_TRIGGER and bond_drop <= -SHARP_DROP_PCT:
+                log("warn", f"SHARP DROP bond={bond:.1f}% drop={bond_drop:.1f}%", symbol)
+                exit_trade(mint, price, "SHARP_DROP", bond)
+                continue
+
+            # Gradual slip: bond was >=90% and fell to <=85%, wait 6s for retrace
+            if bond_high >= SLIP_TRIGGER and bond <= SLIP_DROP_TO:
                 with trades_lock:
                     if mint not in open_trades:
                         continue
-                    trade = dict(open_trades[mint])
-                symbol   = trade["symbol"]
-                strategy = trade["strategy"]
-                elapsed  = time.time() - trade["opened_at"]
-
-                details = get_bonding_details(mint)
-                market  = get_market_data(mint)
-                price   = market["price"] if market and market["price"] > 0 else trade["entry"]
-                bond    = trade.get("bond_prev", 0)  # initial value; overwritten under lock below
-
-                # Paper mode: simulate price from bond % movement when DexScreener has no data
-                if PAPER_MODE and price == trade["entry"] and bond > 0 and trade.get("bond_entry", 0) > 0:
-                    bond_move = bond - trade["bond_entry"]
-                    price = trade["entry"] * (1 + bond_move / 100)
-                # Paper mode fallback: if no price after 60s, use tiny random walk so exits still fire
-                elif PAPER_MODE and price == trade["entry"] and elapsed > 60:
-                    price = trade["entry"] * (1 + random.uniform(-0.03, 0.05))
-
+                    if open_trades[mint]["bond_slip_start"] is None:
+                        open_trades[mint]["bond_slip_start"] = time.time()
+                        log("warn", f"Bond slip {bond:.1f}% — watching {SLIP_WAIT_SECS}s", symbol)
+                    elif time.time() - open_trades[mint]["bond_slip_start"] >= SLIP_WAIT_SECS:
+                        exit_trade(mint, price, "BOND_SLIP", bond)
+                        continue
+            else:
                 with trades_lock:
-                    if mint not in open_trades:
-                        continue
-                    bond_prev_raw = open_trades[mint]["bond_prev"]
-                    bond = details["bond_pct"] if details else bond_prev_raw  # keep last known on fetch failure
-                    if bond > open_trades[mint]["bond_high"]:
-                        open_trades[mint]["bond_high"]      = bond
-                        open_trades[mint]["bond_last_moved"] = time.time()
-                    if price > open_trades[mint]["price_high"]:
-                        open_trades[mint]["price_high"] = price
-                    bond_high       = open_trades[mint]["bond_high"]
-                    bond_prev       = open_trades[mint]["bond_prev"]
-                    bond_last_moved = open_trades[mint].get("bond_last_moved", time.time())
-                    slip_start      = open_trades[mint]["bond_slip_start"]
-                    price_high      = open_trades[mint]["price_high"]
-                    open_trades[mint]["bond_prev"] = bond
+                    if mint in open_trades:
+                        open_trades[mint]["bond_slip_start"] = None
 
-                bond_drop = bond - bond_prev
+            # Bundle ride exit
+            if strategy == "bundle" and bond >= BUNDLE_RIDE_TP:
+                exit_trade(mint, price, "BUNDLE_TP", bond)
+                continue
 
-                # Instant exit: sharp bond drop of 4%+ while near graduation
-                if bond_high >= SLIP_TRIGGER and bond_drop <= -SHARP_DROP_PCT:
-                    log("warn", f"SHARP DROP bond={bond:.1f}% drop={bond_drop:.1f}%", symbol)
-                    exit_trade(mint, price, "SHARP_DROP", bond)
+            # Stale exit: bond hasn't moved in BOND_STALE_SECS — momentum dead
+            stale_secs = time.time() - bond_last_moved
+            if strategy in ("bond", "bundle") and elapsed > 30 and stale_secs >= BOND_STALE_SECS:
+                log("warn", f"Bond stale {stale_secs:.0f}s — exiting", symbol)
+                exit_trade(mint, price, "STALE", bond)
+                continue
+
+            # Compute trailing SL level for all strategies
+            # Once trade is up TSL_ACTIVATE_PCT, stop trails below price_high
+            entry_gain_pct = ((price_high - trade["entry"]) / trade["entry"]) * 100
+            if entry_gain_pct >= TSL_ACTIVATE_PCT:
+                tsl_price = price_high * (1 - BOND_SL_PCT / 100)
+            else:
+                tsl_price = trade["entry"] * (1 - BOND_SL_PCT / 100)
+
+            # Bond Runner exits
+            if strategy == "bond":
+                if bond >= BOND_TP:
+                    exit_trade(mint, price, "BOND_TP", bond)
+                    continue
+                if price <= tsl_price:
+                    reason = "BOND_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "BOND_SL"
+                    exit_trade(mint, price, reason, bond)
+                    continue
+                if elapsed >= BOND_MAX_SECS:
+                    exit_trade(mint, price, "BOND_TIME", bond)
                     continue
 
-                # Gradual slip: bond was >=90% and fell to <=85%, wait 6s for retrace
-                if bond_high >= SLIP_TRIGGER and bond <= SLIP_DROP_TO:
-                    with trades_lock:
-                        if mint not in open_trades:
-                            continue
-                        if open_trades[mint]["bond_slip_start"] is None:
-                            open_trades[mint]["bond_slip_start"] = time.time()
-                            log("warn", f"Bond slip {bond:.1f}% — watching {SLIP_WAIT_SECS}s", symbol)
-                        elif time.time() - open_trades[mint]["bond_slip_start"] >= SLIP_WAIT_SECS:
-                            exit_trade(mint, price, "BOND_SLIP", bond)
-                            continue
-                else:
-                    with trades_lock:
-                        if mint in open_trades:
-                            open_trades[mint]["bond_slip_start"] = None
-
-                # Bundle ride exit
-                if strategy == "bundle" and bond >= BUNDLE_RIDE_TP:
-                    exit_trade(mint, price, "BUNDLE_TP", bond)
+            # Spike exits
+            if strategy == "spike":
+                move = ((price - trade["entry"]) / trade["entry"]) * 100
+                if move >= SPIKE_TP_PCT:
+                    exit_trade(mint, price, "SPIKE_TP", bond)
+                    continue
+                if price <= tsl_price:
+                    reason = "SPIKE_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "SPIKE_SL"
+                    exit_trade(mint, price, reason, bond)
+                    continue
+                if elapsed >= SPIKE_MAX_SECS:
+                    exit_trade(mint, price, "SPIKE_TIME", bond)
                     continue
 
-                # Stale exit: bond hasn't moved in BOND_STALE_SECS — momentum dead
-                stale_secs = time.time() - bond_last_moved
-                if strategy in ("bond", "bundle") and elapsed > 30 and stale_secs >= BOND_STALE_SECS:
-                    log("warn", f"Bond stale {stale_secs:.0f}s — exiting", symbol)
-                    exit_trade(mint, price, "STALE", bond)
+            # Copy trade exits
+            if strategy == "copy":
+                move = ((price - trade["entry"]) / trade["entry"]) * 100
+                if move >= COPY_TP_PCT:
+                    exit_trade(mint, price, "COPY_TP", bond)
+                    continue
+                if price <= tsl_price:
+                    reason = "COPY_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "COPY_SL"
+                    exit_trade(mint, price, reason, bond)
+                    continue
+                if elapsed >= COPY_MAX_SECS:
+                    exit_trade(mint, price, "COPY_TIME", bond)
                     continue
 
-                # Compute trailing SL level for all strategies
-                # Once trade is up TSL_ACTIVATE_PCT, stop trails below price_high
-                entry_gain_pct = ((price_high - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
-                if entry_gain_pct >= TSL_ACTIVATE_PCT:
-                    tsl_price = price_high * (1 - BOND_SL_PCT / 100)
-                else:
-                    tsl_price = trade["entry"] * (1 - BOND_SL_PCT / 100)
-
-                # Bond Runner exits
-                if strategy == "bond":
-                    if bond >= BOND_TP:
-                        exit_trade(mint, price, "BOND_TP", bond)
-                        continue
-                    if price <= tsl_price:
-                        reason = "BOND_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "BOND_SL"
-                        exit_trade(mint, price, reason, bond)
-                        continue
-                    if elapsed >= BOND_MAX_SECS:
-                        exit_trade(mint, price, "BOND_TIME", bond)
-                        continue
-
-                # Spike exits
-                if strategy == "spike":
-                    move = ((price - trade["entry"]) / trade["entry"]) * 100
-                    if move >= SPIKE_TP_PCT:
-                        exit_trade(mint, price, "SPIKE_TP", bond)
-                        continue
-                    if price <= tsl_price:
-                        reason = "SPIKE_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "SPIKE_SL"
-                        exit_trade(mint, price, reason, bond)
-                        continue
-                    if elapsed >= SPIKE_MAX_SECS:
-                        exit_trade(mint, price, "SPIKE_TIME", bond)
-                        continue
-
-                # Copy trade exits
-                if strategy == "copy":
-                    move = ((price - trade["entry"]) / trade["entry"]) * 100
-                    if move >= COPY_TP_PCT:
-                        exit_trade(mint, price, "COPY_TP", bond)
-                        continue
-                    if price <= tsl_price:
-                        reason = "COPY_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "COPY_SL"
-                        exit_trade(mint, price, reason, bond)
-                        continue
-                    if elapsed >= COPY_MAX_SECS:
-                        exit_trade(mint, price, "COPY_TIME", bond)
-                        continue
-
-                # Hype scalp exits — fast TP/SL, 2min max hold
-                if strategy == "hype":
-                    move = ((price - trade["entry"]) / trade["entry"]) * 100
-                    hype_sl = trade["entry"] * (1 - HYPE_SL_PCT / 100)
-                    hype_tsl = price_high * (1 - HYPE_SL_PCT / 100) if entry_gain_pct >= TSL_ACTIVATE_PCT else hype_sl
-                    if move >= HYPE_TP_PCT:
-                        exit_trade(mint, price, "HYPE_TP", bond)
-                        continue
-                    if price <= hype_tsl:
-                        reason = "HYPE_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "HYPE_SL"
-                        exit_trade(mint, price, reason, bond)
-                        continue
-                    if elapsed >= HYPE_MAX_SECS:
-                        exit_trade(mint, price, "HYPE_TIME", bond)
-                        continue
-
-                # Raydium Runner exits (graduated tokens)
-                if strategy == "grad":
-                    grad_tsl = price_high * (1 - GRAD_SL_PCT / 100) if entry_gain_pct >= TSL_ACTIVATE_PCT else trade["entry"] * (1 - GRAD_SL_PCT / 100)
-                    move = ((price - trade["entry"]) / trade["entry"]) * 100
-                    if move >= GRAD_TP_PCT:
-                        exit_trade(mint, price, "GRAD_TP", bond)
-                        continue
-                    if price <= grad_tsl:
-                        reason = "GRAD_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "GRAD_SL"
-                        exit_trade(mint, price, reason, bond)
-                        continue
-                    if elapsed >= GRAD_MAX_SECS:
-                        exit_trade(mint, price, "GRAD_TIME", bond)
-                        continue
-
-                pct = ((price - trade["entry"]) / trade["entry"]) * 100
-                tsl_info = f" TSL@{tsl_price:.6f}" if entry_gain_pct >= TSL_ACTIVATE_PCT else ""
-                log("info", f"[{strategy}] bond={bond:.1f}% price={pct:+.1f}% peak={entry_gain_pct:+.1f}%{tsl_info} {elapsed/60:.1f}m", symbol)
-        except Exception as e:
-            log("err", f"monitor_loop error: {e}")
+            pct = ((price - trade["entry"]) / trade["entry"]) * 100
+            tsl_info = f" TSL@{tsl_price:.6f}" if entry_gain_pct >= TSL_ACTIVATE_PCT else ""
+            log("info", f"[{strategy}] bond={bond:.1f}% price={pct:+.1f}% peak={entry_gain_pct:+.1f}%{tsl_info} {elapsed/60:.1f}m", symbol)
 
 # ── COPY TRADING ─────────────────────────────────────────────────
 def fetch_smart_wallets():
@@ -1872,8 +1334,8 @@ def fetch_smart_wallets():
             timeout=12
         )
         if res.status_code == 403:
-            _gmgn_backoff = time.time() + 3600  # back off 1 hour on 403
-            log("warn", "GMGN rank blocked (403) — copy trading paused 1h", "COPY")
+            _gmgn_backoff = time.time() + 600   # back off 10 min on 403 (Railway IPs rotate)
+            log("warn", "GMGN rank blocked (403) — will retry in 10min", "COPY")
             return
         if res.status_code != 200:
             log("warn", f"GMGN rank {res.status_code}", "COPY")
@@ -1884,108 +1346,17 @@ def fetch_smart_wallets():
             wr_raw = float(w.get("winrate", 0) or 0)
             wr     = wr_raw * 100 if wr_raw <= 1 else wr_raw  # handle 0-1 or 0-100 format
             addr   = w.get("address", "")
-            if not addr or not (COPY_WINRATE_MIN <= wr < COPY_WINRATE_MAX):
-                continue
-            # Require minimum trade history — single-hit flukes not useful
-            total_trades = int(w.get("txs_count", 0) or w.get("buy_count", 0) or 0)
-            if total_trades < 15:  # also rejects 0 — no verifiable history
-                continue
-            # Prefer realized profit over paper gains (research finding)
-            realized   = float(w.get("realized_profit", 0) or 0)
-            unrealized = float(w.get("unrealized_profit", 0) or 0)
-            total_pnl  = realized + unrealized
-            if total_pnl > 0 and realized / total_pnl < 0.5:
-                continue  # less than 50% of gains are closed — could be bagholding
-            qualified.append({"address": addr, "winrate": round(wr, 1), "realized": round(realized, 2)})
-        # Sort by realized profit (not just winrate) — consistent closers beat lucky holders
-        qualified = sorted(qualified, key=lambda x: x.get("realized", 0), reverse=True)[:COPY_MAX_WALLETS]
-        # Always include pinned wallets (user-specified) — never filtered by GMGN ranking
-        pinned_addrs = {w["address"] for w in qualified}
-        pinned_extra = [{"address": a, "winrate": "pinned"}
-                        for a in COPY_PINNED_WALLETS if a not in pinned_addrs]
-        combined = pinned_extra + qualified
+            if addr and COPY_WINRATE_MIN <= wr < COPY_WINRATE_MAX:
+                qualified.append({"address": addr, "winrate": round(wr, 1)})
+        qualified = sorted(qualified, key=lambda x: x["winrate"], reverse=True)[:COPY_MAX_WALLETS]
         with _copy_lock:
-            _copy_wallets     = combined
+            _copy_wallets     = qualified
             _copy_wallet_time = time.time()
-        log("ok", f"Tracking {len(combined)} wallets ({len(pinned_extra)} pinned + {len(qualified)} GMGN) | WR {COPY_WINRATE_MIN}-{COPY_WINRATE_MAX}%", "COPY")
-        for w in combined:
+        log("ok", f"Tracking {len(qualified)} wallets | WR {COPY_WINRATE_MIN}-{COPY_WINRATE_MAX}%", "COPY")
+        for w in qualified:
             log("info", f"  {w['address'][:8]}... WR:{w['winrate']}%", "COPY")
     except Exception as e:
         log("warn", f"fetch_smart_wallets: {e}", "COPY")
-
-_GMGN_WALLET_STATS = "https://gmgn.ai/defi/quotation/v1/smartmoney/sol/walletNew"
-
-def fetch_pinned_wallet_stats():
-    """
-    Fetch 7-day performance stats for every pinned wallet from GMGN.
-    Returns list of dicts with address, winrate, realized_profit, trades, last_active.
-    """
-    if not COPY_PINNED_WALLETS:
-        return []
-    hdrs = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept":     "application/json",
-        "Referer":    "https://gmgn.ai/",
-        "Origin":     "https://gmgn.ai",
-    }
-    if GMGN_API_KEY:
-        hdrs["Authorization"] = f"Bearer {GMGN_API_KEY}"
-    results = []
-    for addr in COPY_PINNED_WALLETS:
-        try:
-            r = _session.get(
-                f"{_GMGN_WALLET_STATS}/{addr}",
-                params={"period": "7d"},
-                headers=hdrs,
-                timeout=10
-            )
-            if r.status_code != 200:
-                results.append({"address": addr, "error": r.status_code})
-                continue
-            d = r.json().get("data", {})
-            wr_raw = float(d.get("winrate", 0) or 0)
-            wr     = wr_raw * 100 if wr_raw <= 1 else wr_raw
-            realized   = float(d.get("realized_profit",   0) or 0)
-            unrealized = float(d.get("unrealized_profit", 0) or 0)
-            trades     = int(d.get("buy_30d", 0) or d.get("txs_count", 0) or 0)
-            last_ts    = int(d.get("last_active_timestamp", 0) or 0)
-            last_active = time.strftime("%m/%d %H:%M", time.localtime(last_ts)) if last_ts else "unknown"
-            results.append({
-                "address":    addr,
-                "winrate":    round(wr, 1),
-                "realized":   round(realized, 2),
-                "unrealized": round(unrealized, 2),
-                "trades":     trades,
-                "last_active": last_active,
-            })
-            time.sleep(0.5)  # avoid hammering GMGN
-        except Exception as e:
-            results.append({"address": addr, "error": str(e)})
-    return results
-
-def _send_wallet_report():
-    """Send daily Telegram report ranking the pinned wallets by 7d realized profit."""
-    stats = fetch_pinned_wallet_stats()
-    if not stats:
-        return
-    # Sort by realized profit descending; errors go to bottom
-    stats.sort(key=lambda x: x.get("realized", -999999), reverse=True)
-    lines = ["📊 *Wallet Watch — 7d Report*\n"]
-    for i, w in enumerate(stats, 1):
-        addr  = w["address"]
-        short = f"`{addr[:6]}...{addr[-4:]}`"
-        if "error" in w:
-            lines.append(f"{i}. {short}\n   ⚠️ No data ({w['error']})")
-        else:
-            pnl_sign = "+" if w["realized"] >= 0 else ""
-            lines.append(
-                f"{i}. {short}\n"
-                f"   WR: {w['winrate']}% | PnL: {pnl_sign}${w['realized']:,.0f} | Trades: {w['trades']}\n"
-                f"   Last active: {w['last_active']}"
-            )
-    notify("📊 Wallet Rankings", "\n".join(lines))
-    log("ok", f"Sent daily wallet report for {len(stats)} pinned wallets", "COPY")
-
 
 def copy_trade_loop():
     time.sleep(15)
@@ -2006,12 +1377,18 @@ def copy_trade_loop():
                 for m in expired:
                     _copied_mints.pop(m, None)
 
+            # Always include manually tracked wallets (from TRACKED_WALLETS env var)
+            tracked_addrs = {w["address"] for w in wallets}
+            for addr in TRACKED_WALLETS:
+                if addr not in tracked_addrs:
+                    wallets.append({"address": addr, "winrate": 100.0})
+
             if not wallets:
                 time.sleep(60)
                 continue
 
             for w in wallets:
-                if not scan_active or daily_limit_reached():
+                if daily_limit_reached():
                     break
                 addr = w["address"]
                 try:
@@ -2082,11 +1459,12 @@ def copy_trade_loop():
 # ── SCANNER LOOP ─────────────────────────────────────────────────
 def scanner_loop():
     log("ok", "=" * 55)
-    log("ok", "GMGN Sniper — Bond Runner + Dormant Spike + Raydium Runner")
+    log("ok", "PumpFun Sniper — Bond Runner + Dormant Spike")
     log("ok", f"Bond entry: {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% | TP: {BOND_TP}%")
     log("ok", f"Spike: {SPIKE_MIN_AGE_H}h+ dormant, {SPIKE_MIN_1H}%+ 1h move")
-    log("ok", f"Raydium Runner: {'ON' if GRAD_MODE else 'OFF'} | liq>${GRAD_MIN_LIQ/1000:.0f}k | 1h>{GRAD_MIN_1H_PCT:.0f}%")
-    log("ok", f"Trade size: min ${MIN_TRADE} max ${MAX_TRADE}")
+    with capital_lock:
+        _sp, _ = _cap_tier(capital)
+    log("ok", f"Trade size: ~{_sp*100:.0f}% of capital (min ${MIN_TRADE} max ${MAX_TRADE})")
     log("ok", f"Mode: {'PAPER' if PAPER_MODE else 'LIVE'}")
     log("ok", "=" * 55)
 
@@ -2099,12 +1477,11 @@ def scanner_loop():
                 continue
 
             log("info", f"--- Scan | Open:{num_open}/{MAX_OPEN} | Size:${trade_size():.2f} ---")
-            coins, grad_coins = get_gmgn_coins()
-            if not coins and not grad_coins:
-                log("warn", "No coins fetched from GMGN")
+            coins = get_pumpfun_coins()
+            if not coins:
+                log("warn", "No coins fetched")
                 time.sleep(30)
                 continue
-            _scan_sol_price = get_sol_price() or 0
 
             # Scan summary counters for diagnostics
             n_social = n_replies = n_bond_range = n_spike_range = 0
@@ -2122,19 +1499,17 @@ def scanner_loop():
                     if mint in open_trades:
                         continue
 
-                # Social is a bonus signal, not a hard gate
-                if coin.get("twitter") or coin.get("telegram"):
-                    n_social += 1
-
-                # Active trading: skip if last trade timestamp known and stale
-                # If timestamp is 0/unknown (established tokens from trending feed), skip this
-                # check and rely on DexScreener change5m filter further down instead.
-                last_trade = coin.get("last_trade", 0)
-                secs_since = (time.time() - last_trade / 1000) if last_trade > 0 else 0
-                if last_trade > 0 and secs_since > 600:
-                    log("info", f"SKIP stale: last trade {secs_since:.0f}s ago bond={coin.get('bond_pct',0):.0f}%", symbol)
+                # Require Twitter OR Telegram (at least one)
+                if not coin.get("twitter") and not coin.get("telegram"):
                     continue
-                n_replies += 1  # recently active or timestamp unknown
+                n_social += 1
+
+                # Active trading: last trade within 5 minutes
+                last_trade = coin.get("last_trade", 0)
+                secs_since = (time.time() - last_trade / 1000) if last_trade > 0 else 9999
+                if secs_since > 300:
+                    continue
+                n_replies += 1  # reuse counter — now means "recently active"
 
                 bond = coin.get("bond_pct", 0)
                 if BOND_ENTRY_MIN <= bond <= BOND_ENTRY_MAX:
@@ -2144,28 +1519,6 @@ def scanner_loop():
                 age_h = (time.time() - created_at / 1000) / 3600 if created_at > 0 else 0
                 if age_h >= SPIKE_MIN_AGE_H:
                     n_spike_range += 1
-
-                # ── Hype Scalp — multi-feed GMGN presence + social + momentum ──
-                hype = coin.get("hype_score", 1)
-                has_social = bool(coin.get("twitter") or coin.get("telegram"))
-                if hype >= HYPE_MIN_FEEDS and has_social:
-                    market = get_market_data(mint)
-                    if (market and market["price"] > 0
-                            and market["liq"] >= HYPE_MIN_LIQ
-                            and market["change5m"] > 0):   # still climbing right now
-                        sig_score = gmgn_signal_score(mint)
-                        if not gmgn_smart_money_selling(mint):
-                            amt    = trade_size()
-                            feeds  = "+".join(coin["_sources"])
-                            log("ok",
-                                f"HYPE SCALP | feeds={hype}({feeds}) social=✓ "
-                                f"5m={market['change5m']:+.1f}% liq=${market['liq']:.0f} sig={sig_score}", symbol)
-                            notify(f"🔥 HYPE {symbol}",
-                                   f"Feeds: {feeds}\n5m: {market['change5m']:+.1f}%\n"
-                                   f"Liq: ${market['liq']:.0f}\nSig: {sig_score}")
-                            enter_trade(mint, symbol, market["price"], amt, "hype", bond, 0, "pumpswap")
-                            time.sleep(0.5)
-                            continue
 
                 # ── Bundle ride ────────────────────────────────────────
                 if BUNDLE_MODE == "ride" and 0 < bond < 75:
@@ -2227,15 +1580,11 @@ def scanner_loop():
                     sig_score = gmgn_signal_score(mint)
 
                     market = get_market_data(mint)
-                    if not market or market["price"] <= 0:
-                        # DexScreener hasn't indexed yet — derive price from pump.fun reserves
-                        if details and details.get("price_sol", 0) > 0 and _scan_sol_price > 0:
-                            fallback_usd = details["price_sol"] * _scan_sol_price
-                            if fallback_usd > 0:
-                                log("info", f"DexScreener cold — pump.fun price ${fallback_usd:.8f}", symbol)
-                                market = {"price": fallback_usd, "liq": 0, "change1h": 0, "age_h": 0}
-                    if not market or market["price"] <= 0:
-                        log("info", f"BOND SKIP: no price data", symbol)
+                    if not market:
+                        log("info", f"BOND SKIP: no market data (DexScreener not indexed yet)", symbol)
+                        continue
+                    if market["price"] <= 0:
+                        log("info", f"BOND SKIP: price=0", symbol)
                         continue
                     # Skip liquidity check for bond runner — bonding curve IS the liquidity
 
@@ -2279,107 +1628,57 @@ def scanner_loop():
                         log("ok", f"DORMANT SPIKE | age={age_h:.1f}h 1h={market['change1h']:+.0f}% | sig={sig_score}", symbol)
                         enter_trade(mint, symbol, market["price"], amt, "spike", bond, 0)
                         time.sleep(0.5)
-                    else:
-                        log("info", f"NO STRATEGY: bond={bond:.0f}% age={age_h:.1f}h active={secs_since:.0f}s", symbol)
 
                 time.sleep(0.2)
 
             log("info",
                 f"Filter summary: {len(coins)} coins | "
-                f"{n_social} have-social | {n_replies} active<30m | "
+                f"{n_social} have-social | {n_replies} active<5m | "
                 f"{n_bond_range} in bond range | {n_spike_range} dormant")
             if n_social == 0:
                 log("warn", "0 coins have Twitter or Telegram — market may be slow")
             elif n_replies == 0:
-                log("warn", f"{n_social} coins have socials but none traded in last 30 min")
+                log("warn", f"{n_social} coins have socials but none traded in last 5 min")
 
-            # ── Raydium Runner — graduated tokens ──────────────────
-            if GRAD_MODE:
+            # ── GMGN Signal Scan ─────────────────────────────────────
+            # Enter coins that GMGN flags as hot even if they aren't in pump.fun's top-50
+            with _signal_lock:
+                signal_mints = list((_gmgn_sm_signal_mints | _gmgn_surge_mints | _gmgn_kol_mints) - blacklisted_mints)
+            n_signal_entered = 0
+            for sig_mint in signal_mints:
                 with trades_lock:
-                    num_open = len(open_trades)
-                if num_open < MAX_OPEN:
-                    n_grad = 0
-                    for coin in grad_coins:
-                        with trades_lock:
-                            if len(open_trades) >= MAX_OPEN:
-                                break
-                        mint   = coin["mint"]
-                        symbol = coin["symbol"]
-
-                        if mint in blacklisted_mints:
-                            continue
-                        with trades_lock:
-                            if mint in open_trades:
-                                continue
-                        with _copy_lock:
-                            if _sold_mints.get(mint, 0) and time.time() - _sold_mints[mint] < 1800:
-                                continue
-
-                        # Age filter: only tokens graduated in last GRAD_MAX_AGE_H hours
-                        created_at = coin.get("created_at", 0)
-                        age_h = (time.time() - created_at / 1000) / 3600 if created_at > 0 else 9999
-                        if age_h > GRAD_MAX_AGE_H:
-                            continue
-
-                        # DexScreener for Raydium pair data (price, liq, volume)
-                        market = get_market_data(mint)
-                        if not market or market["price"] <= 0:
-                            continue
-                        if market["liq"] < GRAD_MIN_LIQ:
-                            continue
-                        if market["change1h"] < GRAD_MIN_1H_PCT:
-                            continue
-                        # 5-minute momentum: reject if actively dumping right now
-                        if market["change5m"] < GRAD_MIN_5M_PCT:
-                            log("info", f"SKIP stale: 5m={market['change5m']:+.1f}% (dumping)", symbol)
-                            continue
-                        # 24h volume: reject coins with near-zero real trading activity
-                        if market["vol_h24"] < GRAD_MIN_VOL_24H:
-                            log("info", f"SKIP stale: vol24h=${market['vol_h24']:.0f} < ${GRAD_MIN_VOL_24H:.0f}", symbol)
-                            continue
-                        # Volume/liquidity ratio (avoids thin illiquid pairs)
-                        if market["liq"] > 0 and (market["vol_h24"] / market["liq"]) < GRAD_MIN_VOL_LIQ:
-                            log("info", f"SKIP thin: vol/liq={market['vol_h24']/market['liq']:.2f}", symbol)
-                            continue
-
-                        if gmgn_smart_money_selling(mint):
-                            log("warn", "SKIP: smart money selling", symbol)
-                            continue
-
-                        rug = run_rugcheck(mint)
-                        if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
-                            log("warn", "Mint/freeze auth — skip", symbol)
-                            blacklisted_mints.add(mint)
-                            continue
-
-                        holder_ok, holder_reason = check_holder_concentration(mint)
-                        if not holder_ok:
-                            log("warn", f"SKIP: {holder_reason}", symbol)
-                            continue
-
-                        sig_score = gmgn_signal_score(mint)
-
-                        # SMC alignment: EMA(21), VWAP, bullish FVG
-                        if GRAD_SMC_MIN > 0:
-                            candles  = get_candles(market.get("pair_address", ""))
-                            sc, sc_detail = smc_score(candles, market["price"])
-                            if sc < GRAD_SMC_MIN:
-                                log("info",
-                                    f"GRAD SMC SKIP {sc}/{GRAD_SMC_MIN} | {sc_detail}", symbol)
-                                continue
-                        else:
-                            sc, sc_detail = 0, "smc_off"
-
-                        amt = trade_size()
-                        log("ok",
-                            f"GRAD RUNNER | age={age_h:.1f}h liq=${market['liq']/1000:.0f}k "
-                            f"1h={market['change1h']:+.0f}% | smc={sc}/3 {sc_detail} "
-                            f"| pool={GRAD_POOL} | sig={sig_score}", symbol)
-                        enter_trade(mint, symbol, market["price"], amt, "grad", 100, 0, pool=GRAD_POOL)
-                        n_grad += 1
-                        time.sleep(0.5)
-                    if n_grad:
-                        log("info", f"Raydium Runner: {n_grad} entries this scan")
+                    if len(open_trades) >= MAX_OPEN:
+                        break
+                    if sig_mint in open_trades:
+                        continue
+                with _copy_lock:
+                    if sig_mint in _copied_mints:
+                        continue
+                if daily_limit_reached():
+                    break
+                market = get_market_data(sig_mint)
+                if not market or market["price"] <= 0 or market["liq"] < MIN_LIQ:
+                    continue
+                rug = run_rugcheck(sig_mint)
+                if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
+                    blacklisted_mints.add(sig_mint)
+                    continue
+                if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
+                    continue
+                if gmgn_smart_money_selling(sig_mint):
+                    continue
+                with _copy_lock:
+                    _copied_mints[sig_mint] = time.time()
+                sig_score = gmgn_signal_score(sig_mint)
+                sig_sym   = sig_mint[:8]
+                amt       = trade_size()
+                log("ok", f"GMGN SIGNAL | liq=${market['liq']:.0f} | sig={sig_score}", sig_sym)
+                notify(f"📡 SIGNAL {sig_sym}", f"GMGN signal entry\nLiq: ${market['liq']:.0f}\nSig score: {sig_score}\nAmount: ${amt:.2f}")
+                enter_trade(sig_mint, sig_sym, market["price"], amt, "copy", 0, 0)
+                n_signal_entered += 1
+                time.sleep(0.5)
+            if n_signal_entered:
+                log("info", f"GMGN signal scan: entered {n_signal_entered} | pool={len(signal_mints)}")
 
         except Exception as e:
             log("err", f"Scanner: {e}")
@@ -2430,32 +1729,10 @@ def _inject_cursor(resp):
             resp.set_data(html.replace('</body>', _CURSOR + '</body>', 1))
     return resp
 
-_DRIFT_PORT = int(os.environ.get("DRIFT_PORT", "5001"))
-
-@app.route("/drift", defaults={"path": ""}, methods=["GET","POST","PUT","DELETE","PATCH"])
-@app.route("/drift/<path:path>",             methods=["GET","POST","PUT","DELETE","PATCH"])
-def drift_proxy(path):
-    import requests as _preq
-    try:
-        url = f"http://localhost:{_DRIFT_PORT}/{path}"
-        resp = _preq.request(
-            method=flask_request.method,
-            url=url,
-            headers={k: v for k, v in flask_request.headers if k.lower() != "host"},
-            data=flask_request.get_data(),
-            params=flask_request.args,
-            allow_redirects=False,
-            timeout=10,
-        )
-        skip = {"content-encoding", "content-length", "transfer-encoding", "connection"}
-        headers = [(k, v) for k, v in resp.headers.items() if k.lower() not in skip]
-        return Response(resp.content, resp.status_code, headers)
-    except Exception as e:
-        return f"<h2>Drift bot starting up…</h2><p>{e}</p><p><a href='/drift'>Retry</a></p>", 503
-
 @app.route("/", methods=["GET"])
 def home():
-    theme = flask_request.args.get("theme", "classic")
+    from flask import request as _req
+    theme = _req.args.get("theme", "classic")
     with capital_lock:
         cap = capital
     with trades_lock:
@@ -2529,7 +1806,7 @@ def home():
                radial-gradient(ellipse at 80% 20%,#0a1a3a22 0%,transparent 60%);
     pointer-events:none;z-index:0}}
 
-  .wrap{{max-width:1200px;margin:0 auto;padding:20px 16px;position:relative}}
+  .wrap{{max-width:900px;margin:0 auto;padding:20px 16px;position:relative}}
 
   /* HEADER */
   header{{text-align:center;padding:16px 0 24px;position:relative}}
@@ -2642,12 +1919,6 @@ def home():
   .pulse-text{{animation:pulse 2s infinite}}
   .empty{{text-align:center;padding:28px;color:var(--muted);font-size:.82rem}}
   .bg-art{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}}
-  @media(min-width:768px){{
-    .cards{{grid-template-columns:repeat(3,1fr)}}
-    .section{{padding:20px 24px}}
-    nav{{gap:12px}}
-    nav a{{padding:8px 18px}}
-  }}
 </style>
 </head>
 <body>
@@ -2717,9 +1988,9 @@ def home():
   <div class="section">
     <div class="section-hdr">
       <h2>🏆 Milestone Progress</h2>
-      <span style="font-size:.72rem;color:var(--muted)">${cap:.2f} → {'$'+f'{next_m:,}' if next_m else 'GOAL HIT'}</span>
+      <span style="font-size:.72rem;color:var(--muted)">${cap:.2f} → ${next_m:,}</span>
     </div>
-    <div class="prog-labels"><span>${cap:.2f}</span><span>{'$'+f'{next_m:,}' if next_m else 'GOAL HIT'}</span></div>
+    <div class="prog-labels"><span>${cap:.2f}</span><span>${next_m:,}</span></div>
     <div class="prog-track"><div class="prog-fill"></div></div>
     <div class="milestones">
       {''.join(f'<span class="ms{" hit" if cap >= m else ""}">${m:,}</span>' for m in MILESTONES)}
@@ -2815,7 +2086,7 @@ def _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
   :root{{--pink:#ff006e;--cyan:#00f5ff;--yellow:#ffee00;--green:#39ff14;
     --bg:#0a0008;--card:#110010;--border:#ffffff15}}
   body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;
-    min-height:100vh;overflow-x:hidden}}
+    max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
   .vid-wrap{{width:100%;line-height:0;position:relative}}
   .vid-wrap video{{width:100%;display:block;mix-blend-mode:screen}}
   .vid-wrap a{{display:block;cursor:pointer}}
@@ -2886,12 +2157,6 @@ def _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
   footer{{padding:14px 16px;text-align:center;font-size:.6rem;color:#444;border-top:1px solid var(--border)}}
   footer a{{color:var(--cyan);text-decoration:none}}
   .bg-art{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}}
-  @media(min-width:768px){{
-    .wrap{{padding:20px 32px}}
-    .cards{{grid-template-columns:repeat(3,1fr)}}
-    .section{{padding:20px 24px}}
-    nav{{flex-wrap:nowrap;justify-content:center;gap:10px}}
-  }}
 </style>
 </head>
 <body>
@@ -2949,7 +2214,7 @@ def _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
     </div>
     <div class="stat">
       <div class="lbl">Next Target</div>
-      <div class="val pink">{'$'+f'{next_m:,}' if next_m else 'GOAL HIT'}</div>
+      <div class="val pink">${next_m:,}</div>
       <div class="sub">{progress_pct}% there</div>
     </div>
   </div>
@@ -3016,15 +2281,11 @@ new Chart(document.getElementById('capChart'),{{
 
 @app.route("/status/api", methods=["GET"])
 def status_api():
-    with log_lock:
-        ct_snap = list(completed_trades)
+    wins  = [t for t in completed_trades if t["pnl"] > 0]
+    total = len(completed_trades)
+    pnl   = sum(t["pnl"] for t in completed_trades)
     with capital_lock:
         cap = capital
-    with _daily_lock:
-        d_trades = _daily_trades; d_wins = _daily_wins; d_losses = _daily_losses
-    wins  = [t for t in ct_snap if t["pnl"] > 0]
-    total = len(ct_snap)
-    pnl   = sum(t["pnl"] for t in ct_snap)
     sol_price = get_sol_price()
     next_tune_in = ANALYZE_EVERY - (total % ANALYZE_EVERY) if total > 0 else ANALYZE_EVERY
     return jsonify({
@@ -3035,18 +2296,16 @@ def status_api():
         "total_pnl": round(pnl, 4),
         "sol_price": round(sol_price, 2) if sol_price else None,
         "next_tune_in": next_tune_in,
-        "today": {"trades": d_trades, "wins": d_wins, "losses": d_losses,
+        "today": {"trades": _daily_trades, "wins": _daily_wins, "losses": _daily_losses,
                   "paused_until": time.strftime("%H:%M", time.localtime(_pause_until)) if _pause_until > time.time() else None},
     })
 
 @app.route("/status", methods=["GET"])
 def status():
-    with log_lock:
-        ct_snap = list(completed_trades)
-    wins   = [t for t in ct_snap if t["pnl"] > 0]
-    losses = [t for t in ct_snap if t["pnl"] <= 0]
-    total  = len(ct_snap)
-    pnl    = sum(t["pnl"] for t in ct_snap)
+    wins   = [t for t in completed_trades if t["pnl"] > 0]
+    losses = [t for t in completed_trades if t["pnl"] <= 0]
+    total  = len(completed_trades)
+    pnl    = sum(t["pnl"] for t in completed_trades)
     with capital_lock:
         cap = capital
     wr = round(len(wins) / max(total, 1) * 100, 1)
@@ -3101,9 +2360,9 @@ def status():
   @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
   *{{box-sizing:border-box;margin:0;padding:0}}
   :root{{--acc:#ffee00;--bg:#0a0008;--card:#110010;--border:#ffffff15}}
-  body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;min-height:100vh;overflow-x:hidden}}
+  body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
   .bg-art{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}}
-  .wrap{{position:relative;max-width:1200px;margin:0 auto}}
+  .wrap{{position:relative}}
   nav{{display:flex;gap:0;border-bottom:2px solid var(--acc);overflow-x:auto;scrollbar-width:none}}
   nav::-webkit-scrollbar{{display:none}}
   nav a{{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;border-right:1px solid var(--border);transition:all .15s}}
@@ -3139,12 +2398,6 @@ def status():
   .mono{{font-family:'JetBrains Mono',monospace;font-size:.68rem}}
   .green{{color:#39ff14}} .red{{color:#ff006e}}
   footer{{padding:14px 16px;text-align:center;font-size:.6rem;color:#444;border-top:1px solid var(--border)}}
-  @media(min-width:768px){{
-    .grid{{grid-template-columns:repeat(4,1fr)}}
-    .section{{padding:18px 24px;margin:0 0 12px}}
-    .page-title{{padding:18px 32px 8px}}
-    .health-banner{{margin:0 0 12px}}
-  }}
 </style>
 </head>
 <body>
@@ -3204,7 +2457,7 @@ def status():
   </div>
 
   <div class="section">
-    <div class="section-hdr">MILESTONE PROGRESS — next {'$'+f'{next_m:,}' if next_m else 'GOAL HIT'} ({progress_pct}%)</div>
+    <div class="section-hdr">MILESTONE PROGRESS — next ${next_m:,} ({progress_pct}%)</div>
     <div class="prog-track"><div class="prog-fill"></div></div>
     <div class="milestones">
       {''.join(f'<span class="ms{" hit" if cap >= m else ""}">${m:,}</span>' for m in MILESTONES)}
@@ -3266,9 +2519,7 @@ def trades_api():
         open_list = [{k: v for k, v in t.items()
                       if k not in ("opened_at", "bond_slip_start")}
                      for t in open_trades.values()]
-    with log_lock:
-        ct_snap = list(completed_trades[-50:])
-    return jsonify({"open": open_list, "completed": ct_snap})
+    return jsonify({"open": open_list, "completed": completed_trades[-50:]})
 
 @app.route("/trades", methods=["GET"])
 def trades():
@@ -3276,14 +2527,12 @@ def trades():
         open_list = list(open_trades.values())
     with capital_lock:
         cap = capital
-    with log_lock:
-        ct_snap = list(completed_trades)
 
-    wins   = [t for t in ct_snap if t["pnl"] > 0]
-    losses = [t for t in ct_snap if t["pnl"] <= 0]
-    total  = len(ct_snap)
+    wins   = [t for t in completed_trades if t["pnl"] > 0]
+    losses = [t for t in completed_trades if t["pnl"] <= 0]
+    total  = len(completed_trades)
     wr     = round(len(wins) / max(total, 1) * 100, 1)
-    total_pnl = round(sum(t["pnl"] for t in ct_snap), 4)
+    total_pnl = round(sum(t["pnl"] for t in completed_trades), 4)
     avg_win   = round(sum(t["pnl"] for t in wins)   / max(len(wins),   1), 4)
     avg_loss  = round(sum(t["pnl"] for t in losses) / max(len(losses), 1), 4)
     best      = max(completed_trades, key=lambda t: t["pnl"], default=None)
@@ -3338,9 +2587,9 @@ def trades():
   @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
   *{{box-sizing:border-box;margin:0;padding:0}}
   :root{{--acc:#39ff14;--bg:#0a0008;--card:#110010;--border:#ffffff15}}
-  body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;min-height:100vh;overflow-x:hidden}}
+  body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
   .bg-art{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}}
-  .wrap{{position:relative;max-width:1200px;margin:0 auto}}
+  .wrap{{position:relative}}
   nav{{display:flex;gap:0;border-bottom:2px solid var(--acc);overflow-x:auto;scrollbar-width:none}}
   nav::-webkit-scrollbar{{display:none}}
   nav a{{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;border-right:1px solid var(--border);transition:all .15s}}
@@ -3392,11 +2641,6 @@ def trades():
   .solscan-btn{{display:block;text-align:center;margin-top:14px;padding:10px;background:#39ff1415;border:1px solid #39ff1430;color:var(--acc);text-decoration:none;font-size:.78rem;font-weight:700;letter-spacing:.06em;transition:all .2s}}
   .solscan-btn:hover{{background:#39ff1425}}
   footer{{padding:14px 16px;text-align:center;font-size:.6rem;color:#444;border-top:1px solid var(--border)}}
-  @media(min-width:768px){{
-    .stat-strip{{grid-template-columns:repeat(3,1fr)}}
-    .section{{padding:18px 24px;margin:0 0 12px}}
-    .page-title{{padding:18px 32px 8px}}
-  }}
 </style>
 </head>
 <body>
@@ -3568,74 +2812,6 @@ document.addEventListener('keydown', e => {{ if(e.key==='Escape') closeModal(); 
 def get_log():
     return jsonify({"logs": trade_log[-100:]})
 
-@app.route("/scan-debug", methods=["GET"])
-def scan_debug():
-    coins, _ = get_gmgn_coins()
-    if not coins:
-        return jsonify({"error": "GMGN returned no coins", "fetched": 0})
-    results = []
-    counters = {"stale": 0, "no_strategy": 0, "rug": 0, "holders": 0, "dev": 0, "sm_sell": 0, "no_price": 0, "ready": 0}
-    for coin in coins[:30]:
-        mint       = coin["mint"]
-        symbol     = coin["symbol"]
-        bond       = coin.get("bond_pct", 0)
-        has_social = bool(coin.get("twitter") or coin.get("telegram"))
-        last_trade = coin.get("last_trade", 0)
-        secs_since = round((time.time() - last_trade / 1000)) if last_trade > 0 else 9999
-        created_at = coin.get("created_at", 0)
-        age_h      = round((time.time() - created_at / 1000) / 3600, 1) if created_at > 0 else 0
-        in_bond    = BOND_ENTRY_MIN <= bond <= BOND_ENTRY_MAX
-        is_spike   = age_h >= SPIKE_MIN_AGE_H
-
-        entry = {"symbol": symbol, "bond": bond, "age_h": age_h,
-                 "social": has_social, "secs_since": secs_since,
-                 "in_bond_range": in_bond, "kill": None}
-
-        if secs_since > 1800:
-            entry["kill"] = f"stale ({secs_since//60}m ago)"
-            counters["stale"] += 1
-        elif not in_bond and not is_spike:
-            entry["kill"] = f"no strategy: bond={bond:.0f}% age={age_h:.1f}h"
-            counters["no_strategy"] += 1
-        else:
-            rug = run_rugcheck(mint)
-            if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
-                entry["kill"] = "rug: mint/freeze auth"
-                counters["rug"] += 1
-            elif rug and rug.get("is_bundled"):
-                entry["kill"] = "rug: bundled"
-                counters["rug"] += 1
-            else:
-                ok, reason = check_holder_concentration(mint)
-                if not ok:
-                    entry["kill"] = f"holders: {reason}"
-                    counters["holders"] += 1
-                elif gmgn_smart_money_selling(mint):
-                    entry["kill"] = "sm_sell"
-                    counters["sm_sell"] += 1
-                else:
-                    market = get_market_data(mint)
-                    if not market or market["price"] <= 0:
-                        entry["kill"] = "no price data"
-                        counters["no_price"] += 1
-                    else:
-                        entry["kill"] = None
-                        entry["price"] = market["price"]
-                        entry["liq"]   = market["liq"]
-                        entry["1h_pct"]= market["change1h"]
-                        counters["ready"] += 1
-
-        results.append(entry)
-
-    return jsonify({
-        "fetched":     len(coins),
-        "bond_range":  f"{BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%",
-        "spike_min_1h": SPIKE_MIN_1H,
-        "counters":    counters,
-        "coins":       results,
-    })
-
-
 @app.route("/live/api", methods=["GET"])
 def live_api():
     """Polled every 3s by the live page — returns open trades + recent events."""
@@ -3643,6 +2819,8 @@ def live_api():
         open_now = []
         for t in open_trades.values():
             elapsed = round(time.time() - t["opened_at"], 1)
+            cur_bond = 0
+            pct = 0
             open_now.append({
                 "symbol":     t["symbol"],
                 "mint":       t["mint"],
@@ -3657,10 +2835,7 @@ def live_api():
             })
     with capital_lock:
         cap = capital
-    with log_lock:
-        recent_closed = list(reversed(completed_trades[-30:]))
-    with _daily_lock:
-        d_trades = _daily_trades; d_wins = _daily_wins; d_losses = _daily_losses
+    recent_closed = list(reversed(completed_trades[-30:]))
     return jsonify({
         "ts":       round(time.time()),
         "capital":  round(cap, 2),
@@ -3668,7 +2843,7 @@ def live_api():
         "closed":   recent_closed,
         "scanning": scan_active,
         "paused":   _pause_until > time.time(),
-        "today":    {"trades": d_trades, "wins": d_wins, "losses": d_losses},
+        "today":    {"trades": _daily_trades, "wins": _daily_wins, "losses": _daily_losses},
     })
 
 @app.route("/live", methods=["GET"])
@@ -3683,9 +2858,9 @@ def live():
   @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
   *{box-sizing:border-box;margin:0;padding:0}
   :root{--acc:#00f5ff;--bg:#0a0008;--card:#110010;--border:#ffffff15}
-  body{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;min-height:100vh;overflow-x:hidden}
+  body{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}
   .bg-art{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}
-  .wrap{position:relative;max-width:1200px;margin:0 auto}
+  .wrap{position:relative}
   nav{display:flex;gap:0;border-bottom:2px solid var(--acc);overflow-x:auto;scrollbar-width:none}
   nav::-webkit-scrollbar{display:none}
   nav a{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;border-right:1px solid var(--border);transition:all .15s}
@@ -3740,12 +2915,6 @@ def live():
   .empty{text-align:center;padding:28px;color:#888;font-size:.78rem}
   #last-update{font-size:.62rem;color:#888}
   footer{padding:14px 16px;text-align:center;font-size:.6rem;color:#444;border-top:1px solid var(--border)}
-  @media(min-width:768px){
-    .section{padding:18px 24px;margin:0 0 12px}
-    .page-title{padding:18px 32px 8px}
-    .status-bar{padding:0 32px 12px}
-    .cap-display{margin-bottom:12px}
-  }
 </style>
 </head>
 <body>
@@ -3989,9 +3158,9 @@ def learn():
   @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
   *{box-sizing:border-box;margin:0;padding:0}
   :root{--acc:#b44fff;--bg:#080010;--card:#0e0018;--border:#ffffff15}
-  body{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;min-height:100vh;overflow-x:hidden}
+  body{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}
   .bg-art{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}
-  .wrap{position:relative;max-width:1200px;margin:0 auto}
+  .wrap{position:relative}
   nav{display:flex;gap:0;border-bottom:2px solid var(--acc);overflow-x:auto;scrollbar-width:none}
   nav::-webkit-scrollbar{display:none}
   nav a{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;border-right:1px solid var(--border);transition:all .15s}
@@ -4053,12 +3222,6 @@ def learn():
   .purple{color:var(--acc)}
   footer{padding:14px 16px;text-align:center;font-size:.6rem;color:#444;border-top:1px solid var(--border)}
   #last-update{font-size:.62rem;color:#888}
-  @media(min-width:768px){
-    .section{padding:18px 24px;margin:0 0 12px}
-    .page-title{padding:18px 32px 8px}
-    .status-bar{padding:0 32px 12px}
-    .param-grid{grid-template-columns:repeat(3,1fr)}
-  }
 </style>
 </head>
 <body>
@@ -4357,9 +3520,9 @@ def setup():
   @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
   *{{box-sizing:border-box;margin:0;padding:0}}
   :root{{--acc:#ff6b00;--bg:#0a0500;--card:#120900;--border:#ffffff15}}
-  body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;min-height:100vh;overflow-x:hidden}}
+  body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
   .bg-art{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}}
-  .wrap{{position:relative;max-width:1200px;margin:0 auto}}
+  .wrap{{position:relative}}
   nav{{display:flex;gap:0;border-bottom:2px solid var(--acc);overflow-x:auto;scrollbar-width:none}}
   nav::-webkit-scrollbar{{display:none}}
   nav a{{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;border-right:1px solid var(--border);transition:all .15s}}
@@ -4406,11 +3569,6 @@ def setup():
   .result-msg.ok{{background:#39ff1415;border:1px solid #39ff1440;color:#39ff14}}
   .result-msg.err{{background:#ff006e15;border:1px solid #ff006e40;color:#ff006e}}
   footer{{padding:14px 16px;text-align:center;font-size:.6rem;color:#444;border-top:1px solid var(--border)}}
-  @media(min-width:768px){{
-    .section{{padding:18px 24px;margin:0 0 12px}}
-    .page-title{{padding:18px 32px 8px}}
-    .risk-grid{{grid-template-columns:repeat(3,1fr);gap:10px}}
-  }}
 </style>
 </head>
 <body>
@@ -4705,10 +3863,10 @@ def export_all():
 if __name__ == "__main__":
     if not PAPER_MODE:
         if not WALLET or not WALLET_PRIVATE_KEY:
-            log("err", "LIVE mode requires WALLET and WALLET_PRIVATE_KEY env vars.")
+            print("[FATAL] LIVE mode requires WALLET and WALLET_PRIVATE_KEY env vars. Exiting.")
             raise SystemExit(1)
         if not _SOLANA_AVAILABLE:
-            log("err", "LIVE mode requires solders and solana packages — pip install solders solana.")
+            print("[FATAL] LIVE mode requires solders and solana packages.")
             raise SystemExit(1)
     elif _PAPER_ENV != "true" and (not WALLET or not WALLET_PRIVATE_KEY):
         log("warn", "WALLET/WALLET_PRIVATE_KEY not set — PAPER mode")
@@ -4723,7 +3881,6 @@ if __name__ == "__main__":
         threading.Thread(target=copy_trade_loop, daemon=True).start()
     t_signals = threading.Thread(target=run_signal_refresh_loop, daemon=True)
     t_signals.start()
-    threading.Thread(target=gmgn_trending_scan_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
     log("ok", "=" * 55)
     log("ok", f"Mode      : {'PAPER' if PAPER_MODE else 'LIVE'}")
@@ -4738,10 +3895,4 @@ if __name__ == "__main__":
     log("ok", f"Copy trade: {'ON' if COPY_TRADE else 'OFF'} | WR {COPY_WINRATE_MIN}-{COPY_WINRATE_MAX}% | top {COPY_MAX_WALLETS} wallets")
     log("ok", f"USDC lock : activates at ${USDC_LOCK_THRESHOLD:.0f} capital")
     log("ok", "=" * 55)
-    notify(
-        f"🚀 {BOT_NAME} started",
-        f"Mode: {'PAPER' if PAPER_MODE else 'LIVE'}\n"
-        f"Capital: ${_cap:.2f} | Trade size: ${trade_size():.2f}\n"
-        f"Daily cap: {_limit} trades | Copy trade: {'ON' if COPY_TRADE else 'OFF'}"
-    )
     app.run(host="0.0.0.0", port=port, use_reloader=False)
