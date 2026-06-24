@@ -1820,7 +1820,7 @@ nav{{position:sticky;top:0;z-index:100;background:rgba(5,10,20,.92);backdrop-fil
 .pos-card{{border-radius:12px;padding:12px;display:flex;align-items:center;gap:10px;opacity:0;cursor:pointer;touch-action:pan-y;will-change:transform;position:relative;z-index:1}}
 .pos-card.profit{{background:linear-gradient(110deg,var(--bg3) 0%,rgba(0,255,136,.04) 50%,var(--bg3) 100%);background-size:200% 100%;border:1px solid rgba(0,255,136,.35);animation:fadeInCard .45s ease forwards .4s,cardShimmer 3s linear infinite 2s}}
 .pos-card.loss{{background:var(--bg3);border:1px solid rgba(255,51,85,.35);animation:fadeInCard .45s ease forwards .55s}}
-@keyframes fadeInCard{{from{{opacity:0;transform:translateY(8px)}}to{{opacity:1;transform:translateY(0)}}}}
+@keyframes fadeInCard{{from{{opacity:0}}to{{opacity:1}}}}
 @keyframes cardShimmer{{0%{{background-position:200% 0}}100%{{background-position:-200% 0}}}}
 /* SWIPE WRAP — holds card + hidden close button */
 .swipe-wrap{{position:relative;border-radius:12px;margin-bottom:10px;overflow:hidden;-webkit-mask-image:-webkit-radial-gradient(white,black);touch-action:pan-y}}
@@ -2173,11 +2173,17 @@ function initSwipe(card,market) {{
   let x0=0,y0=0,dx=0,axis=null;
   const MAX=76, SNAP=40;
   card.addEventListener('touchstart',e=>{{
+    // Kill CSS animation fill so it can't override our JS-driven transform.
+    card.style.opacity='1';
+    card.style.animation='none';
     x0=e.touches[0].clientX; y0=e.touches[0].clientY; dx=0; axis=null;
   }},{{passive:true}});
   card.addEventListener('touchmove',e=>{{
     const cx=e.touches[0].clientX, cy=e.touches[0].clientY;
-    if(!axis) axis=Math.abs(cx-x0)>Math.abs(cy-y0)?'h':'v';
+    const adx=Math.abs(cx-x0), ady=Math.abs(cy-y0);
+    // Wait for 5px before committing axis so an ambiguous first event doesn't lock to 'v'
+    if(!axis && adx<5 && ady<5) return;
+    if(!axis) axis=adx>ady?'h':'v';
     if(axis!=='h') return;
     e.preventDefault();
     dx=Math.max(-MAX,Math.min(0,cx-x0));
