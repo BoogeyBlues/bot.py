@@ -1757,7 +1757,8 @@ def home():
 *{{margin:0;padding:0;box-sizing:border-box}}
 :root{{--bg:#050a14;--bg2:#080f1e;--bg3:#0d1628;--cyan:#00e5ff;--green:#00ff88;--red:#ff3355;--yellow:#ffee00;--text:#c8d8f0;--muted:#4a6080}}
 
-body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-height:100vh;overflow-x:hidden}}
+html,body{{overflow-x:hidden;max-width:100%}}
+body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-height:100vh}}
 
 /* ORBS */
 .orb{{position:fixed;border-radius:50%;pointer-events:none;z-index:0;filter:blur(80px);opacity:.18}}
@@ -1766,7 +1767,7 @@ body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-
 @keyframes orbCyan{{0%{{transform:translate(0,0)}}25%{{transform:translate(40px,30px)}}50%{{transform:translate(20px,60px)}}75%{{transform:translate(-20px,30px)}}100%{{transform:translate(0,0)}}}}
 @keyframes orbRed{{0%{{transform:translate(0,0)}}25%{{transform:translate(-30px,-40px)}}50%{{transform:translate(-60px,-20px)}}75%{{transform:translate(-20px,20px)}}100%{{transform:translate(0,0)}}}}
 #particles{{position:fixed;inset:0;z-index:0;pointer-events:none}}
-.wrapper{{max-width:430px;margin:0 auto;position:relative;z-index:1;min-height:100vh}}
+.wrapper{{max-width:430px;margin:0 auto;position:relative;z-index:1;min-height:100vh;overflow-x:hidden}}
 .main-grid{{display:block}}
 
 /* NAV */
@@ -1803,7 +1804,7 @@ nav{{position:sticky;top:0;z-index:100;background:rgba(5,10,20,.92);backdrop-fil
 @keyframes fadeIn{{to{{opacity:1}}}}
 
 /* WAVE */
-.wave-wrap{{height:20px;overflow:hidden;margin:4px -16px;position:relative}}
+.wave-wrap{{height:20px;overflow:hidden;margin:4px 0;position:relative}}
 .wave-svg{{width:200%;height:100%;animation:waveScroll 4s linear infinite}}
 @keyframes waveScroll{{from{{transform:translateX(0)}}to{{transform:translateX(-50%)}}}}
 
@@ -1824,14 +1825,13 @@ nav{{position:sticky;top:0;z-index:100;background:rgba(5,10,20,.92);backdrop-fil
 @keyframes scanBar{{0%{{left:-40%}}100%{{left:140%}}}}
 
 /* POSITION CARDS */
-.pos-card{{border-radius:12px;padding:12px;display:flex;align-items:center;gap:10px;opacity:0;transform:translateX(60px);cursor:pointer;touch-action:pan-y;will-change:transform;position:relative;z-index:1}}
-.pos-card.profit{{background:linear-gradient(110deg,var(--bg3) 0%,rgba(0,255,136,.04) 50%,var(--bg3) 100%);background-size:200% 100%;border:1px solid rgba(0,255,136,.35);animation:slideFromRight .55s ease forwards .7s,cardShimmer 3s linear infinite 2s}}
-.pos-card.loss{{background:var(--bg3);border:1px solid rgba(255,51,85,.35);animation:slideFromRight .55s ease forwards .85s}}
-.pos-card.snap{{transition:transform .25s cubic-bezier(.25,.1,.25,1)}}
-@keyframes slideFromRight{{to{{opacity:1;transform:translateX(0)}}}}
+.pos-card{{border-radius:12px;padding:12px;display:flex;align-items:center;gap:10px;opacity:0;cursor:pointer;touch-action:pan-y;will-change:transform;position:relative;z-index:1}}
+.pos-card.profit{{background:linear-gradient(110deg,var(--bg3) 0%,rgba(0,255,136,.04) 50%,var(--bg3) 100%);background-size:200% 100%;border:1px solid rgba(0,255,136,.35);animation:fadeInCard .45s ease forwards .4s,cardShimmer 3s linear infinite 2s}}
+.pos-card.loss{{background:var(--bg3);border:1px solid rgba(255,51,85,.35);animation:fadeInCard .45s ease forwards .55s}}
+@keyframes fadeInCard{{from{{opacity:0;transform:translateY(8px)}}to{{opacity:1;transform:translateY(0)}}}}
 @keyframes cardShimmer{{0%{{background-position:200% 0}}100%{{background-position:-200% 0}}}}
 /* SWIPE WRAP — holds card + hidden close button */
-.swipe-wrap{{position:relative;border-radius:12px;margin-bottom:10px;overflow:hidden;}}
+.swipe-wrap{{position:relative;border-radius:12px;margin-bottom:10px;overflow:hidden;-webkit-mask-image:-webkit-radial-gradient(white,black)}}
 .swipe-close{{position:absolute;right:0;top:0;bottom:0;width:76px;background:var(--red);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent}}
 .swipe-close svg{{width:20px;height:20px;stroke:#fff;stroke-width:2.5;fill:none}}
 .swipe-close span{{font-family:'Bebas Neue',sans-serif;font-size:12px;letter-spacing:2px;color:#fff}}
@@ -1898,19 +1898,19 @@ footer{{text-align:center;padding:20px 16px 40px;font-family:'JetBrains Mono',mo
 footer a{{color:var(--cyan);text-decoration:none}}
 ::-webkit-scrollbar{{width:4px}}
 ::-webkit-scrollbar-thumb{{background:var(--muted);border-radius:4px}}
-@media(min-width:768px){{
-  .wrapper{{max-width:1440px;padding:0 48px}}
+@media(min-width:1024px){{
+  .wrapper{{max-width:1440px;padding:0 48px;overflow-x:visible}}
   nav{{padding:0 48px;max-width:100%}}
   .scroll-area{{padding:0 0 80px;display:grid;grid-template-columns:1fr 1fr;gap:0 56px;align-items:start}}
   .hero{{grid-column:1/-1;padding:40px 0 20px}}
-  .wave-wrap{{grid-column:1/-1}}
+  .wave-wrap{{grid-column:1/-1;margin:4px -48px}}
   .stats-grid{{grid-column:1/-1;grid-template-columns:repeat(6,1fr)}}
+  .main-grid{{grid-column:1/-1;display:grid;grid-template-columns:1fr 1fr;gap:48px;align-items:start}}
   .hero-title{{font-size:72px;width:auto!important;animation:none;border-right:none;display:block}}
   .hero-balance{{font-size:56px}}
   .hero-sub{{font-size:13px;gap:32px}}
   .stat-val{{font-size:28px}}
   .section-header{{font-size:18px;letter-spacing:4px}}
-  .main-grid{{display:grid;grid-template-columns:1fr 1fr;gap:48px;align-items:start}}
   .feed-entry{{font-size:11px}}
   .trade-btn{{font-size:17px;padding:11px 0}}
 }}
