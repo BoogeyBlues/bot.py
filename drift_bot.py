@@ -7,9 +7,9 @@ app = Flask(__name__)
 # ── CONFIG ────────────────────────────────────────────────────────
 DRIFT_PAPER_MODE   = os.environ.get("DRIFT_PAPER_MODE", "true").lower() != "false"
 DRIFT_EXCHANGE     = os.environ.get("DRIFT_EXCHANGE", "bybit")
-DRIFT_LEVERAGE     = float(os.environ.get("DRIFT_LEVERAGE", "65"))     # midpoint; used as fallback
-DRIFT_LEV_MIN      = float(os.environ.get("DRIFT_LEV_MIN",  "50"))     # minimum leverage
-DRIFT_LEV_MAX      = float(os.environ.get("DRIFT_LEV_MAX",  "80"))     # maximum leverage
+DRIFT_LEVERAGE     = float(os.environ.get("DRIFT_LEVERAGE", "8"))      # midpoint; used as fallback
+DRIFT_LEV_MIN      = float(os.environ.get("DRIFT_LEV_MIN",  "3"))      # minimum leverage
+DRIFT_LEV_MAX      = float(os.environ.get("DRIFT_LEV_MAX",  "15"))     # maximum leverage
 DRIFT_MAX_OPEN     = int(os.environ.get("DRIFT_MAX_OPEN", "7"))
 DRIFT_TP_PCT       = float(os.environ.get("DRIFT_TP_PCT", "0.20"))
 DRIFT_SL_PCT       = float(os.environ.get("DRIFT_SL_PCT", "0.05"))
@@ -622,7 +622,7 @@ def get_signal(market):
       +1 if RSI is neutral (35-65) — momentum has room to run
       +1 if Supertrend just FLIPPED this bar (fresh signal, highest quality)
       +1 if GMGN smart money actively confirms direction
-      → min to enter: confidence >= 1 (max 4)
+      → min to enter: confidence >= 2 (max 4)
 
     Scalping config: EMA-20, Supertrend(7,3), RSI-7, min 25 prices.
 
@@ -1661,6 +1661,9 @@ def run_trading_loop():
                     signal, confidence, sig_atr = get_signal(market)
                     if not signal:
                         continue
+                    if confidence < 2:
+                        log("info", f"{market} conf={confidence}/4 — need ≥2 to enter", market)
+                        continue
 
                     # Respect learned long/short bias
                     bias = mparams.get("bias")
@@ -1672,24 +1675,13 @@ def run_trading_loop():
                     if not price:
                         continue
 
-                    # ── Fixed scalping SL/TP for 50x-80x leverage ────────
-                    # At 50x leverage, liquidation = 2% move against us.
-                    # SL must be inside 1.7% (85% of liq distance) to be safe.
-                    # Use fixed params: SL=1.0%, TP=2.0%, Trail=0.5%.
-                    # This bypasses ATR-derived SL which caused zero trades.
+                    # ── Fixed scalping SL/TP for 3x-15x leverage ─────────
+                    # At 15x leverage, liquidation = ~6.7% move (0.85/15).
+                    # Fixed SL=1.5%, TP=3.0% gives 2:1 R:R with plenty of liq buffer.
                     atr_pct   = sig_atr / price if price > 0 else 0.002
-                    sl_pct    = 0.010   # fixed 1.0% SL — well inside 1.7% liq buffer at 50x
-                    tp_pct    = 0.020   # fixed 2.0% TP — 2:1 R:R
-                    trail_pct = 0.005   # fixed 0.5% trailing stop
-
-                    # Safety: if ATR is so extreme that even fixed 1.0% SL is past liq,
-                    # which means atr > liq buffer (>1.7%), skip the trade.
-                    max_sl_for_min_lev = 0.85 / DRIFT_LEV_MIN  # 1.7% at 50x
-                    if sl_pct >= max_sl_for_min_lev:
-                        log("info",
-                            f"Fixed SL {sl_pct*100:.1f}% >= liq buffer "
-                            f"{max_sl_for_min_lev*100:.1f}% at {int(DRIFT_LEV_MIN)}x — skip", market)
-                        continue
+                    sl_pct    = 0.015   # fixed 1.5% SL
+                    tp_pct    = 0.030   # fixed 3.0% TP — 2:1 R:R
+                    trail_pct = 0.008   # fixed 0.8% trailing stop
 
                     # ── Leverage: use tuned per-market value, clamp to range ──
                     tuned_lev  = mparams.get("leverage", DRIFT_LEVERAGE)
@@ -2178,7 +2170,7 @@ function updatePositions(positions) {{
 
 function initSwipe(card,market) {{
   let x0=0,y0=0,dx=0,axis=null;
-  const MAX=76, SNAP=50;
+  const MAX=76, SNAP=40;
   card.addEventListener('touchstart',e=>{{
     x0=e.touches[0].clientX; y0=e.touches[0].clientY; dx=0; axis=null;
   }},{{passive:true}});
@@ -2186,10 +2178,11 @@ function initSwipe(card,market) {{
     const cx=e.touches[0].clientX, cy=e.touches[0].clientY;
     if(!axis) axis=Math.abs(cx-x0)>Math.abs(cy-y0)?'h':'v';
     if(axis!=='h') return;
+    e.preventDefault();
     dx=Math.max(-MAX,Math.min(0,cx-x0));
     card.style.transition='none';
     card.style.transform='translateX('+dx+'px)';
-  }},{{passive:true}});
+  }},{{passive:false}});
   card.addEventListener('touchend',()=>{{
     card.style.transition='transform .25s cubic-bezier(.25,.1,.25,1)';
     if(dx<=-SNAP) {{
