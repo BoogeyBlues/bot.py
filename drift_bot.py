@@ -1817,14 +1817,14 @@ nav{{position:sticky;top:0;z-index:100;background:rgba(5,10,20,.92);backdrop-fil
 @keyframes scanBar{{0%{{left:-40%}}100%{{left:140%}}}}
 
 /* POSITION CARDS */
-.pos-card{{border-radius:12px;padding:12px;display:flex;align-items:center;gap:10px;opacity:0;cursor:pointer;touch-action:pan-y;will-change:transform;position:relative;z-index:1}}
+.pos-card{{border-radius:12px;padding:12px;background:var(--bg3);display:flex;align-items:center;gap:10px;opacity:0;cursor:pointer;touch-action:pan-y;position:relative;z-index:1}}
 .pos-card.profit{{background:linear-gradient(110deg,var(--bg3) 0%,rgba(0,255,136,.04) 50%,var(--bg3) 100%);background-size:200% 100%;border:1px solid rgba(0,255,136,.35);animation:fadeInCard .45s ease forwards .4s,cardShimmer 3s linear infinite 2s}}
 .pos-card.loss{{background:var(--bg3);border:1px solid rgba(255,51,85,.35);animation:fadeInCard .45s ease forwards .55s}}
 @keyframes fadeInCard{{from{{opacity:0}}to{{opacity:1}}}}
 @keyframes cardShimmer{{0%{{background-position:200% 0}}100%{{background-position:-200% 0}}}}
-/* SWIPE WRAP — holds card + hidden close button */
-.swipe-wrap{{position:relative;border-radius:12px;margin-bottom:10px;overflow:hidden;-webkit-mask-image:-webkit-radial-gradient(white,black);touch-action:pan-y}}
-.swipe-close{{position:absolute;right:0;top:0;bottom:0;width:76px;background:var(--red);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent}}
+/* SWIPE WRAP — holds card + hidden close button side-by-side */
+.swipe-wrap{{position:relative;border-radius:12px;margin-bottom:10px;overflow:hidden;touch-action:pan-y}}
+.swipe-close{{position:absolute;right:0;top:0;bottom:0;width:76px;background:var(--red);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent;transform:translateX(76px)}}
 .swipe-close svg{{width:20px;height:20px;stroke:#fff;stroke-width:2.5;fill:none}}
 .swipe-close span{{font-family:'Bebas Neue',sans-serif;font-size:12px;letter-spacing:2px;color:#fff}}
 .pos-info{{flex:1}}
@@ -2170,46 +2170,57 @@ function updatePositions(positions) {{
 }}
 
 function initSwipe(card,market) {{
+  const wrap=card.closest('.swipe-wrap');
+  const btn=wrap.querySelector('.swipe-close');
   let x0=0,y0=0,dx=0,axis=null;
   const MAX=76, SNAP=40;
+  const EASE='transform .25s cubic-bezier(.25,.1,.25,1)';
+
+  function snapOpen() {{
+    card.style.transition=EASE; btn.style.transition=EASE;
+    card.style.transform='translateX(-'+MAX+'px)';
+    btn.style.transform='translateX(0)';
+  }}
+  function snapClosed() {{
+    card.style.transition=EASE; btn.style.transition=EASE;
+    card.style.transform='translateX(0)';
+    btn.style.transform='translateX('+MAX+'px)';
+    dx=0; axis=null;
+  }}
+
   card.addEventListener('touchstart',e=>{{
-    // Kill CSS animation fill so it can't override our JS-driven transform.
+    // Lock in opacity and kill animation fill so it can't block our transforms.
+    // Explicitly set background so the card stays opaque after animation is cleared.
     card.style.opacity='1';
+    card.style.background=card.classList.contains('profit')
+      ?'linear-gradient(110deg,var(--bg3) 0%,rgba(0,255,136,.04) 50%,var(--bg3) 100%)'
+      :'var(--bg3)';
     card.style.animation='none';
     x0=e.touches[0].clientX; y0=e.touches[0].clientY; dx=0; axis=null;
   }},{{passive:true}});
+
   card.addEventListener('touchmove',e=>{{
     const cx=e.touches[0].clientX, cy=e.touches[0].clientY;
     const adx=Math.abs(cx-x0), ady=Math.abs(cy-y0);
-    // Wait for 5px before committing axis so an ambiguous first event doesn't lock to 'v'
     if(!axis && adx<5 && ady<5) return;
     if(!axis) axis=adx>ady?'h':'v';
     if(axis!=='h') return;
     e.preventDefault();
     dx=Math.max(-MAX,Math.min(0,cx-x0));
-    card.style.transition='none';
+    card.style.transition='none'; btn.style.transition='none';
+    // Card slides left; button rides along at card's right edge
     card.style.transform='translateX('+dx+'px)';
+    btn.style.transform='translateX('+(MAX+dx)+'px)';
   }},{{passive:false}});
+
   card.addEventListener('touchend',()=>{{
-    card.style.transition='transform .25s cubic-bezier(.25,.1,.25,1)';
-    if(dx<=-SNAP) {{
-      card.style.transform='translateX(-'+MAX+'px)';
-    }} else {{
-      card.style.transform='translateX(0)';
-    }}
-    dx=0; axis=null;
+    dx<=-SNAP?snapOpen():snapClosed();
   }},{{passive:true}});
-  card.addEventListener('touchcancel',()=>{{
-    card.style.transition='transform .25s cubic-bezier(.25,.1,.25,1)';
-    card.style.transform='translateX(0)';
-    dx=0; axis=null;
-  }},{{passive:true}});
-  // Tapping elsewhere snaps card back
+
+  card.addEventListener('touchcancel',()=>{{ snapClosed(); }},{{passive:true}});
+
   document.addEventListener('touchstart',e=>{{
-    if(!card.closest('.swipe-wrap').contains(e.target)&&card.style.transform&&card.style.transform!=='translateX(0)') {{
-      card.style.transition='transform .25s cubic-bezier(.25,.1,.25,1)';
-      card.style.transform='translateX(0)';
-    }}
+    if(!wrap.contains(e.target)&&card.style.transform&&card.style.transform!=='translateX(0)') snapClosed();
   }},{{passive:true}});
 }}
 
