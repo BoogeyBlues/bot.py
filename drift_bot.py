@@ -10,7 +10,7 @@ DRIFT_EXCHANGE     = os.environ.get("DRIFT_EXCHANGE", "bybit")
 DRIFT_LEVERAGE     = float(os.environ.get("DRIFT_LEVERAGE", "65"))     # midpoint; used as fallback
 DRIFT_LEV_MIN      = float(os.environ.get("DRIFT_LEV_MIN",  "50"))     # minimum leverage
 DRIFT_LEV_MAX      = float(os.environ.get("DRIFT_LEV_MAX",  "80"))     # maximum leverage
-DRIFT_MAX_OPEN     = int(os.environ.get("DRIFT_MAX_OPEN", "5"))
+DRIFT_MAX_OPEN     = int(os.environ.get("DRIFT_MAX_OPEN", "7"))
 DRIFT_TP_PCT       = float(os.environ.get("DRIFT_TP_PCT", "0.20"))
 DRIFT_SL_PCT       = float(os.environ.get("DRIFT_SL_PCT", "0.05"))
 DRIFT_TRAIL_PCT    = float(os.environ.get("DRIFT_TRAIL_PCT", "0.05"))
@@ -649,7 +649,7 @@ def get_signal(market):
     atr_pct = atr / cur
 
     # ── Market regime: must have enough volatility to be worth trading ──
-    if atr_pct < 0.001:
+    if atr_pct < 0.0003:   # 0.03% — very tight, only block truly dead markets
         log("info", f"{market} no signal: frozen atr_pct={atr_pct:.4f}", market)
         _st_prev[market] = st_bull
         return None, 0, None
@@ -1495,11 +1495,11 @@ def drift_auto_tune():
         else:
             bias = None
 
-        # Pause market for 4h if win rate is very poor after 5+ trades
+        # Pause market briefly if win rate is extremely poor after 10+ trades
         paused_until = cur.get("paused_until", 0)
-        if wr < 0.20 and n >= 5 and paused_until < time.time():
-            paused_until = time.time() + 4 * 3600
-            log("warn", f"Pausing {market} (WR={wr*100:.0f}% / {n} trades) for 4h", "TUNE")
+        if wr < 0.10 and n >= 10 and paused_until < time.time():
+            paused_until = time.time() + 1800  # 30 min, not 4h
+            log("warn", f"Pausing {market} (WR={wr*100:.0f}% / {n} trades) for 30min", "TUNE")
 
         new = {"leverage": new_lev, "bias": bias,
                "paused_until": paused_until, "last_result": cur.get("last_result", "")}
