@@ -1823,7 +1823,7 @@ nav{{position:sticky;top:0;z-index:100;background:rgba(5,10,20,.92);backdrop-fil
 @keyframes fadeInCard{{from{{opacity:0;transform:translateY(8px)}}to{{opacity:1;transform:translateY(0)}}}}
 @keyframes cardShimmer{{0%{{background-position:200% 0}}100%{{background-position:-200% 0}}}}
 /* SWIPE WRAP — holds card + hidden close button */
-.swipe-wrap{{position:relative;border-radius:12px;margin-bottom:10px;overflow:hidden;-webkit-mask-image:-webkit-radial-gradient(white,black)}}
+.swipe-wrap{{position:relative;border-radius:12px;margin-bottom:10px;overflow:hidden;-webkit-mask-image:-webkit-radial-gradient(white,black);touch-action:pan-y}}
 .swipe-close{{position:absolute;right:0;top:0;bottom:0;width:76px;background:var(--red);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent}}
 .swipe-close svg{{width:20px;height:20px;stroke:#fff;stroke-width:2.5;fill:none}}
 .swipe-close span{{font-family:'Bebas Neue',sans-serif;font-size:12px;letter-spacing:2px;color:#fff}}
@@ -2155,7 +2155,8 @@ function updatePositions(positions) {{
       const pnlEl=document.getElementById('pp-'+market);
       if(pnlEl){{pnlEl.textContent=(pnl>=0?'+':'')+' $'+Math.abs(pnl).toFixed(2);pnlEl.className='pos-pnl '+(pnl>=0?'up':'dn');}}
       updateChart(market,pnl);
-      card.className='pos-card '+(pnl>=0?'profit':'loss');
+      const nc='pos-card '+(pnl>=0?'profit':'loss');
+      if(card.className!==nc) card.className=nc;
     }}
   }});
   document.querySelectorAll('.swipe-wrap').forEach(el=>{{
@@ -2190,6 +2191,11 @@ function initSwipe(card,market) {{
     }} else {{
       card.style.transform='translateX(0)';
     }}
+    dx=0; axis=null;
+  }},{{passive:true}});
+  card.addEventListener('touchcancel',()=>{{
+    card.style.transition='transform .25s cubic-bezier(.25,.1,.25,1)';
+    card.style.transform='translateX(0)';
     dx=0; axis=null;
   }},{{passive:true}});
   // Tapping elsewhere snaps card back
