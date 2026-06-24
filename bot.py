@@ -89,6 +89,19 @@ SPIKE_TP_PCT    = float(os.environ.get("SPIKE_TP_PCT",    "40"))
 SPIKE_SL_PCT    = float(os.environ.get("SPIKE_SL_PCT",    "15"))
 SPIKE_MAX_SECS  = int(os.environ.get("SPIKE_MAX_SECS",    "180"))   # 3 min hard cap
 
+# Trench strategy — coins 85-97% bonded, about to graduate (fast pump at migration)
+TRENCH_ENTRY_MIN = float(os.environ.get("TRENCH_ENTRY_MIN", "85"))
+TRENCH_ENTRY_MAX = float(os.environ.get("TRENCH_ENTRY_MAX", "97"))
+TRENCH_TP_PCT    = float(os.environ.get("TRENCH_TP_PCT",    "25"))
+TRENCH_SL_PCT    = float(os.environ.get("TRENCH_SL_PCT",    "12"))
+TRENCH_MAX_SECS  = int(os.environ.get("TRENCH_MAX_SECS",    "90"))  # 90s — very fast
+
+# Migration bounce — coins that just graduated to Raydium (first 2 min momentum)
+MIGRATE_MAX_AGE  = int(os.environ.get("MIGRATE_MAX_AGE",    "120")) # enter within 2 min of graduation
+MIGRATE_TP_PCT   = float(os.environ.get("MIGRATE_TP_PCT",   "30"))
+MIGRATE_SL_PCT   = float(os.environ.get("MIGRATE_SL_PCT",   "12"))
+MIGRATE_MAX_SECS = int(os.environ.get("MIGRATE_MAX_SECS",   "120"))
+
 # Exit protection
 SLIP_TRIGGER   = float(os.environ.get("SLIP_TRIGGER",  "90"))
 SLIP_DROP_TO   = float(os.environ.get("SLIP_DROP_TO",  "85"))
@@ -128,6 +141,8 @@ GMGN_CREATED_TOKENS= "https://gmgn.ai/defi/quotation/v1/portfolio/sol"
 GMGN_SIGNALS_URL   = "https://gmgn.ai/defi/quotation/v1/signals/sol"
 GMGN_KOL_TRACK     = "https://gmgn.ai/defi/quotation/v1/tracks/kol/sol"
 GMGN_SM_TRACK      = "https://gmgn.ai/defi/quotation/v1/tracks/smartmoney/sol"
+GMGN_TRENDING_URL  = "https://gmgn.ai/defi/quotation/v1/tokens/trending/sol"
+GMGN_HOT_SEARCH    = "https://gmgn.ai/defi/quotation/v1/tokens/hot_search/sol"
 
 # Notifications
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
@@ -191,7 +206,9 @@ _sold_mints       = {}   # mint -> timestamp, cooldown after selling to prevent 
 _gmgn_sm_signal_mints  = set()   # smart money buy signal mints (type 12)
 _gmgn_surge_mints      = set()   # price surge signal mints (type 6)
 _gmgn_kol_mints        = set()   # KOL buy mints
-_gmgn_sm_sell_mints    = set()   # smart money sell mints (used for exit filter)
+_gmgn_sm_sell_mints    = set()   # smart money sell mints (exit/skip filter)
+_gmgn_trending_mints   = set()   # trending tokens (1h price movers on GMGN)
+_gmgn_hot_mints        = set()   # hot search tokens (what people are searching on GMGN)
 _gmgn_signal_time      = 0.0     # last signal refresh time
 _signal_lock           = threading.Lock()
 
@@ -748,6 +765,45 @@ def get_pumpfun_coins():
             log("warn", f"Endpoint failed: {e}")
     return []
 
+def get_recently_graduated():
+    """Pump.fun coins that just graduated to Raydium within MIGRATE_MAX_AGE seconds."""
+    hdrs = {"User-Agent": "Mozilla/5.0", "Referer": "https://pump.fun/", "Accept": "application/json"}
+    endpoints = [
+        "https://frontend-api-v3.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false&complete=true",
+        "https://frontend-api-v2.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false&complete=true",
+    ]
+    now = time.time()
+    for url in endpoints:
+        try:
+            res = _session.get(url, headers=hdrs, timeout=10)
+            if res.status_code != 200:
+                continue
+            data  = res.json()
+            items = data if isinstance(data, list) else data.get("coins", [])
+            recent = []
+            for coin in items:
+                mint = coin.get("mint", "")
+                if not mint:
+                    continue
+                # king_of_the_hill_timestamp is set when the coin graduates
+                koth = int(coin.get("king_of_the_hill_timestamp", 0) or 0)
+                last = int(coin.get("last_trade_timestamp", 0) or 0)
+                grad_ts = koth if koth > 0 else last
+                age_secs = (now - grad_ts / 1000) if grad_ts > 0 else 9999
+                if 0 < age_secs <= MIGRATE_MAX_AGE:
+                    recent.append({
+                        "mint":     mint,
+                        "symbol":   coin.get("symbol", mint[:8]),
+                        "dev":      coin.get("creator", ""),
+                        "grad_age": int(age_secs),
+                    })
+            if recent:
+                log("info", f"Migration scan: {len(recent)} recently graduated", "GRAD")
+            return recent
+        except Exception as e:
+            log("warn", f"get_recently_graduated: {e}", "GRAD")
+    return []
+
 def get_bonding_details(mint):
     try:
         res = _session.get(
@@ -868,20 +924,27 @@ def check_dev_history(dev_wallet) -> tuple:
         return True, ""
 
 def _refresh_gmgn_signals():
-    """Refresh smart-money / KOL signal mint sets. Runs periodically in background."""
-    global _gmgn_sm_signal_mints, _gmgn_surge_mints, _gmgn_kol_mints, _gmgn_sm_sell_mints, _gmgn_signal_time
+    """Refresh all GMGN signal mint sets: smart-money, KOL, trending, hot search."""
+    global _gmgn_sm_signal_mints, _gmgn_surge_mints, _gmgn_kol_mints
+    global _gmgn_sm_sell_mints, _gmgn_trending_mints, _gmgn_hot_mints, _gmgn_signal_time
     try:
-        hdrs = {"Referer":"https://gmgn.ai/","Origin":"https://gmgn.ai"}
+        hdrs = {
+            "Referer":    "https://gmgn.ai/",
+            "Origin":     "https://gmgn.ai",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        }
         if GMGN_API_KEY:
             hdrs["Authorization"] = f"Bearer {GMGN_API_KEY}"
+
+        def _addrs(items):
+            return {i.get("address") or i.get("mint") or i.get("token_address","")
+                    for i in (items or [])
+                    if i.get("address") or i.get("mint") or i.get("token_address")}
 
         def _fetch_signal(stype):
             r = _session.get(GMGN_SIGNALS_URL, headers=hdrs,
                              params={"signal_type": stype, "chain":"sol","limit":100}, timeout=8)
-            if r.status_code == 200:
-                items = r.json().get("data") or []
-                return {i.get("address") or i.get("mint","") for i in items if i.get("address") or i.get("mint")}
-            return set()
+            return _addrs(r.json().get("data") or []) if r.status_code == 200 else set()
 
         sm  = _fetch_signal(12)   # smart money buy
         srg = _fetch_signal(6)    # price surge
@@ -892,23 +955,40 @@ def _refresh_gmgn_signals():
             r2 = _session.get(GMGN_KOL_TRACK, headers=hdrs,
                               params={"side":"buy","limit":50}, timeout=8)
             if r2.status_code == 200:
-                kol = {i.get("token_address") or i.get("mint","") for i in (r2.json().get("data") or [])}
+                kol = _addrs(r2.json().get("data") or [])
 
-        # smart-money sell exits (for sell signal)
+        # Smart-money sells — separate set, used only for exit filter
         sm_sell = set()
-        r3 = _session.get(GMGN_SM_TRACK, headers={**hdrs},
+        r3 = _session.get(GMGN_SM_TRACK, headers=hdrs,
                           params={"side":"sell","limit":50}, timeout=8)
         if r3.status_code == 200:
-            sm_sell = {i.get("token_address") or i.get("mint","") for i in (r3.json().get("data") or [])}
+            sm_sell = _addrs(r3.json().get("data") or [])
+
+        # Trending tokens — 1h price movers
+        trending = set()
+        r4 = _session.get(GMGN_TRENDING_URL, headers=hdrs,
+                          params={"period":"1h","limit":50}, timeout=8)
+        if r4.status_code == 200:
+            trending = _addrs(r4.json().get("data") or [])
+
+        # Hot search — what traders are actively searching right now
+        hot = set()
+        r5 = _session.get(GMGN_HOT_SEARCH, headers=hdrs,
+                          params={"limit":30}, timeout=8)
+        if r5.status_code == 200:
+            hot = _addrs(r5.json().get("data") or [])
 
         with _signal_lock:
             _gmgn_sm_signal_mints = sm
             _gmgn_surge_mints     = srg
-            _gmgn_kol_mints       = kol          # KOL buy mints — used for signal score
-            _gmgn_sm_sell_mints   = sm_sell      # SM sell mints — used for exit filter (separate)
+            _gmgn_kol_mints       = kol
+            _gmgn_sm_sell_mints   = sm_sell
+            _gmgn_trending_mints  = trending
+            _gmgn_hot_mints       = hot
             _gmgn_signal_time     = time.time()
-            if sm or srg or kol:
-                log("info", f"GMGN signals: sm_buy={len(sm)} surge={len(srg)} kol={len(kol)} sm_sell={len(sm_sell)}", "GMGN")
+        log("info",
+            f"GMGN signals: sm_buy={len(sm)} surge={len(srg)} kol={len(kol)} "
+            f"sm_sell={len(sm_sell)} trending={len(trending)} hot={len(hot)}", "GMGN")
     except Exception as e:
         log("warn", f"GMGN signal refresh error: {e}", "GMGN")
 
@@ -920,16 +1000,17 @@ def run_signal_refresh_loop():
 
 def gmgn_signal_score(mint) -> int:
     """
-    Returns 0-3 signal score for a mint:
-      +1 if in smart money buy signal set
-      +1 if in price surge set
-      +1 if in KOL buy set
+    Returns 0-5 signal score for a mint:
+      +1 smart money buy  +1 price surge  +1 KOL buy
+      +1 trending (1h)    +1 hot search
     """
     with _signal_lock:
         return (
             (1 if mint in _gmgn_sm_signal_mints else 0) +
-            (1 if mint in _gmgn_surge_mints else 0) +
-            (1 if mint in _gmgn_kol_mints else 0)
+            (1 if mint in _gmgn_surge_mints      else 0) +
+            (1 if mint in _gmgn_kol_mints         else 0) +
+            (1 if mint in _gmgn_trending_mints    else 0) +
+            (1 if mint in _gmgn_hot_mints         else 0)
         )
 
 def gmgn_smart_money_selling(mint) -> bool:
@@ -1308,6 +1389,38 @@ def monitor_loop():
                     exit_trade(mint, price, "COPY_TIME", bond)
                     continue
 
+            # Trench exits — near-graduation play, very fast window
+            if strategy == "trench":
+                move = ((price - trade["entry"]) / trade["entry"]) * 100
+                if bond >= 99:
+                    # Coin graduated while we held — exit before Raydium migration confusion
+                    exit_trade(mint, price, "TRENCH_GRAD", bond)
+                    continue
+                if move >= TRENCH_TP_PCT:
+                    exit_trade(mint, price, "TRENCH_TP", bond)
+                    continue
+                if price <= tsl_price:
+                    reason = "TRENCH_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "TRENCH_SL"
+                    exit_trade(mint, price, reason, bond)
+                    continue
+                if elapsed >= TRENCH_MAX_SECS:
+                    exit_trade(mint, price, "TRENCH_TIME", bond)
+                    continue
+
+            # Migration bounce exits — Raydium momentum after graduation
+            if strategy == "migrate":
+                move = ((price - trade["entry"]) / trade["entry"]) * 100
+                if move >= MIGRATE_TP_PCT:
+                    exit_trade(mint, price, "MIGRATE_TP", bond)
+                    continue
+                if price <= tsl_price:
+                    reason = "MIGRATE_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "MIGRATE_SL"
+                    exit_trade(mint, price, reason, bond)
+                    continue
+                if elapsed >= MIGRATE_MAX_SECS:
+                    exit_trade(mint, price, "MIGRATE_TIME", bond)
+                    continue
+
             pct = ((price - trade["entry"]) / trade["entry"]) * 100
             tsl_info = f" TSL@{tsl_price:.6f}" if entry_gain_pct >= TSL_ACTIVATE_PCT else ""
             log("info", f"[{strategy}] bond={bond:.1f}% price={pct:+.1f}% peak={entry_gain_pct:+.1f}%{tsl_info} {elapsed/60:.1f}m", symbol)
@@ -1594,6 +1707,27 @@ def scanner_loop():
                     time.sleep(0.5)
                     continue
 
+                # ── Trench (near-graduation) ────────────────────────────
+                # Coins 85-97% bonded are about to migrate — pre-graduation pump
+                if TRENCH_ENTRY_MIN <= bond <= TRENCH_ENTRY_MAX:
+                    rug = run_rugcheck(mint)
+                    if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
+                        blacklisted_mints.add(mint)
+                        continue
+                    if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
+                        continue
+                    if gmgn_smart_money_selling(mint):
+                        continue
+                    sig_score = gmgn_signal_score(mint)
+                    market = get_market_data(mint)
+                    if not market or market["price"] <= 0:
+                        continue
+                    amt = trade_size()
+                    log("ok", f"TRENCH | bond={bond:.1f}% | sig={sig_score}", symbol)
+                    enter_trade(mint, symbol, market["price"], amt, "trench", bond, 0)
+                    time.sleep(0.5)
+                    continue
+
                 # ── Dormant Spike ──────────────────────────────────────
                 created_at = coin.get("created_at", 0)
                 age_h      = (time.time() - created_at / 1000) / 3600 if created_at > 0 else 0
@@ -1640,10 +1774,52 @@ def scanner_loop():
             elif n_replies == 0:
                 log("warn", f"{n_social} coins have socials but none traded in last 5 min")
 
+            # ── Migration Bounce Scan ────────────────────────────────
+            # Coins that just graduated to Raydium — enter in the first 2 min window
+            grad_coins = get_recently_graduated()
+            for gc in grad_coins:
+                gmint = gc["mint"]
+                with trades_lock:
+                    if len(open_trades) >= MAX_OPEN:
+                        break
+                    if gmint in open_trades:
+                        continue
+                with _copy_lock:
+                    if gmint in _copied_mints:
+                        continue
+                if gmint in blacklisted_mints or daily_limit_reached():
+                    continue
+                market = get_market_data(gmint)
+                if not market or market["price"] <= 0 or market["liq"] < MIN_LIQ:
+                    continue
+                rug = run_rugcheck(gmint)
+                if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
+                    blacklisted_mints.add(gmint)
+                    continue
+                if gmgn_smart_money_selling(gmint):
+                    continue
+                dev_ok, dev_reason = check_dev_history(gc.get("dev", ""))
+                if not dev_ok:
+                    log("warn", f"SKIP: {dev_reason}", gc["symbol"])
+                    continue
+                with _copy_lock:
+                    _copied_mints[gmint] = time.time()
+                sig_score = gmgn_signal_score(gmint)
+                amt = trade_size()
+                log("ok", f"MIGRATION | {gc['grad_age']}s ago | liq=${market['liq']:.0f} | sig={sig_score}", gc["symbol"])
+                notify(f"🚀 MIGRATION {gc['symbol']}",
+                       f"Just graduated to Raydium!\nAge: {gc['grad_age']}s\nLiq: ${market['liq']:.0f}\nAmount: ${amt:.2f}")
+                enter_trade(gmint, gc["symbol"], market["price"], amt, "migrate", 0, 0)
+                time.sleep(0.5)
+
             # ── GMGN Signal Scan ─────────────────────────────────────
-            # Enter coins that GMGN flags as hot even if they aren't in pump.fun's top-50
+            # Enter coins GMGN flags as hot (trending, hot search, SM buy, KOL)
+            # even if they aren't in pump.fun's live top-50
             with _signal_lock:
-                signal_mints = list((_gmgn_sm_signal_mints | _gmgn_surge_mints | _gmgn_kol_mints) - blacklisted_mints)
+                signal_mints = list(
+                    (_gmgn_sm_signal_mints | _gmgn_surge_mints | _gmgn_kol_mints
+                     | _gmgn_trending_mints | _gmgn_hot_mints) - blacklisted_mints
+                )
             n_signal_entered = 0
             for sig_mint in signal_mints:
                 with trades_lock:
