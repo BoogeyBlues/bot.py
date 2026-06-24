@@ -1893,13 +1893,20 @@ footer a{{color:var(--cyan);text-decoration:none}}
 ::-webkit-scrollbar{{width:4px}}
 ::-webkit-scrollbar-thumb{{background:var(--muted);border-radius:4px}}
 @media(min-width:768px){{
-  .wrapper{{max-width:1100px}}
-  nav{{max-width:1100px;padding:0 32px}}
-  .scroll-area{{padding:0 40px 80px}}
-  .stats-grid{{grid-template-columns:repeat(6,1fr)}}
-  .hero-title{{font-size:60px;width:auto!important;animation:none;border-right:none}}
-  .hero-balance{{font-size:52px}}
-  .main-grid{{display:grid;grid-template-columns:1fr 1fr;gap:40px;align-items:start}}
+  .wrapper{{max-width:1440px;padding:0 48px}}
+  nav{{padding:0 48px;max-width:100%}}
+  .scroll-area{{padding:0 0 80px;display:grid;grid-template-columns:1fr 1fr;gap:0 56px;align-items:start}}
+  .hero{{grid-column:1/-1;padding:40px 0 20px}}
+  .wave-wrap{{grid-column:1/-1}}
+  .stats-grid{{grid-column:1/-1;grid-template-columns:repeat(6,1fr)}}
+  .hero-title{{font-size:72px;width:auto!important;animation:none;border-right:none;display:block}}
+  .hero-balance{{font-size:56px}}
+  .hero-sub{{font-size:13px;gap:32px}}
+  .stat-val{{font-size:28px}}
+  .section-header{{font-size:18px;letter-spacing:4px}}
+  .main-grid{{display:grid;grid-template-columns:1fr 1fr;gap:48px;align-items:start}}
+  .feed-entry{{font-size:11px}}
+  .trade-btn{{font-size:17px;padding:11px 0}}
 }}
 </style>
 </head>
@@ -2424,11 +2431,13 @@ tr:hover td{{background:rgba(0,229,255,.04)!important}}
 footer{{padding:18px 16px;text-align:center;font-size:9px;color:var(--muted);border-top:1px solid rgba(255,255,255,.04)}}
 footer a{{color:var(--cyan);text-decoration:none}}
 @media(min-width:768px){{
-  .wrapper{{max-width:1100px}}
-  nav{{max-width:1100px;padding:0 32px}}
-  .scroll-area{{padding-top:50px;padding-bottom:60px}}
-  .stats-row{{grid-template-columns:repeat(4,1fr)}}
-  .sheet-section{{padding:0 24px 24px}}
+  .wrapper{{max-width:1440px;padding:0 48px}}
+  nav{{max-width:100%;padding:0 48px}}
+  .scroll-area{{padding-top:68px;padding-bottom:60px}}
+  .stats-row{{grid-template-columns:repeat(6,1fr)}}
+  .sheet-section{{padding:0 0 32px}}
+  .tbl-row{{font-size:12px}}
+  .sheet-header{{font-size:22px}}
 }}
 </style>
 </head>
@@ -2867,9 +2876,16 @@ canvas{{width:100%!important;display:block;margin-bottom:10px}}
 .badge.win{{color:var(--green);border-color:var(--green)}}.badge.loss{{color:var(--red);border-color:var(--red)}}
 @keyframes fadeUp{{from{{opacity:0;transform:translateY(18px)}}to{{opacity:1;transform:translateY(0)}}}}
 @media(min-width:768px){{
-  nav{{max-width:1100px}}
-  .page{{max-width:1100px;padding-top:72px;padding-left:40px;padding-right:40px}}
+  nav{{max-width:100%;padding:0 48px}}
+  .page{{max-width:1440px;padding:72px 48px 80px}}
   .mini-stats{{grid-template-columns:repeat(6,1fr)}}
+  .scene-pnl{{font-size:64px}}
+  #stickScene{{height:320px}}
+  .card{{padding:20px}}
+  .sec-hdr{{font-size:20px}}
+  .pos-sym{{font-size:28px}}
+  .pos-pnl{{font-size:24px}}
+  .pos-meta{{grid-template-columns:1fr 1fr 1fr 1fr}}
 }}
 </style>
 </head>
