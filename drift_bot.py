@@ -1757,7 +1757,7 @@ def home():
 *{{margin:0;padding:0;box-sizing:border-box}}
 :root{{--bg:#050a14;--bg2:#080f1e;--bg3:#0d1628;--cyan:#00e5ff;--green:#00ff88;--red:#ff3355;--yellow:#ffee00;--text:#c8d8f0;--muted:#4a6080}}
 
-body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
+body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-height:100vh;overflow-x:hidden}}
 
 /* ORBS */
 .orb{{position:fixed;border-radius:50%;pointer-events:none;z-index:0;filter:blur(80px);opacity:.18}}
@@ -1767,6 +1767,7 @@ body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;max-
 @keyframes orbRed{{0%{{transform:translate(0,0)}}25%{{transform:translate(-30px,-40px)}}50%{{transform:translate(-60px,-20px)}}75%{{transform:translate(-20px,20px)}}100%{{transform:translate(0,0)}}}}
 #particles{{position:fixed;inset:0;z-index:0;pointer-events:none}}
 .wrapper{{max-width:430px;margin:0 auto;position:relative;z-index:1;min-height:100vh}}
+.main-grid{{display:block}}
 
 /* NAV */
 nav{{position:sticky;top:0;z-index:100;background:rgba(5,10,20,.92);backdrop-filter:blur(12px);border-bottom:1px solid rgba(0,229,255,.12);display:flex;align-items:center;padding:0 12px;height:48px;overflow:hidden}}
@@ -1891,6 +1892,15 @@ footer{{text-align:center;padding:20px 16px 40px;font-family:'JetBrains Mono',mo
 footer a{{color:var(--cyan);text-decoration:none}}
 ::-webkit-scrollbar{{width:4px}}
 ::-webkit-scrollbar-thumb{{background:var(--muted);border-radius:4px}}
+@media(min-width:768px){{
+  .wrapper{{max-width:1100px}}
+  nav{{max-width:1100px;padding:0 32px}}
+  .scroll-area{{padding:0 40px 80px}}
+  .stats-grid{{grid-template-columns:repeat(6,1fr)}}
+  .hero-title{{font-size:60px;width:auto!important;animation:none;border-right:none}}
+  .hero-balance{{font-size:52px}}
+  .main-grid{{display:grid;grid-template-columns:1fr 1fr;gap:40px;align-items:start}}
+}}
 </style>
 </head>
 <body>
@@ -1905,7 +1915,7 @@ footer a{{color:var(--cyan);text-decoration:none}}
     <a class="nav-link active" href="/">HOME</a>
     <a class="nav-link" href="/trades">TRADES</a>
     <a class="nav-link" href="/monitor">MONITOR</a>
-    <a class="nav-link" href="https://jup.ag/perps" target="_blank">PERPS ↗</a>
+    <a class="nav-link" href="https://bybit.com" target="_blank">PERPS ↗</a>
   </nav>
 
   <div class="mode-strip">
@@ -1949,14 +1959,11 @@ footer a{{color:var(--cyan);text-decoration:none}}
       </div>
     </div>
 
+    <div class="main-grid">
+      <div class="main-col">
     <!-- OPEN POSITIONS -->
     <div class="section-header">OPEN POSITIONS<div class="scan-bar"></div></div>
     <div id="pos-wrap"><div class="no-pos" id="no-pos">📡 Scanning for signals...</div></div>
-
-    <!-- RECENT TRADES DECK -->
-    <div class="section-header">RECENT TRADES<div class="scan-bar"></div></div>
-    <div class="deck-wrap" id="deck" onclick="cycleDeck()"></div>
-    <div class="deck-hint" id="deckHint"></div>
 
     <!-- GOAL PROGRESS -->
     <div class="section-header">GOAL PROGRESS<div class="scan-bar"></div></div>
@@ -1970,6 +1977,12 @@ footer a{{color:var(--cyan);text-decoration:none}}
       </div>
     </div>
     <div class="milestones">{milestone_html}</div>
+      </div>
+      <div class="main-col">
+    <!-- RECENT TRADES DECK -->
+    <div class="section-header">RECENT TRADES<div class="scan-bar"></div></div>
+    <div class="deck-wrap" id="deck" onclick="cycleDeck()"></div>
+    <div class="deck-hint" id="deckHint"></div>
 
     <!-- MANUAL TRADING -->
     <div class="section-header" style="margin-top:20px">MANUAL TRADE<div class="scan-bar"></div></div>
@@ -1979,6 +1992,8 @@ footer a{{color:var(--cyan);text-decoration:none}}
     <!-- LIVE FEED -->
     <div class="section-header">LIVE FEED<div class="scan-bar"></div></div>
     <div id="feed-wrap"></div>
+      </div>
+    </div>
 
   </div>
 
@@ -2345,7 +2360,7 @@ def trades_page():
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
 :root{{--bg:#050a14;--bg2:#080f1e;--bg3:#0d1628;--cyan:#00e5ff;--green:#00ff88;--red:#ff3355;--yellow:#ffee00;--text:#c8d8f0;--muted:#4a6080}}
-body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
+body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-height:100vh;overflow-x:hidden}}
 .orb{{position:fixed;border-radius:50%;pointer-events:none;z-index:0;filter:blur(80px);opacity:.15}}
 .orb-cyan{{width:320px;height:320px;top:-60px;left:calc(50% - 160px);background:radial-gradient(circle,var(--cyan),transparent 70%);animation:orbF 9s ease-in-out infinite}}
 .orb-green{{width:260px;height:260px;bottom:-40px;right:calc(50% - 220px);background:radial-gradient(circle,var(--green),transparent 70%);animation:orbF 9s ease-in-out infinite reverse}}
@@ -2408,6 +2423,13 @@ tr:hover td{{background:rgba(0,229,255,.04)!important}}
 .rbadge-sl{{color:var(--red);border-color:var(--red);background:rgba(255,51,85,.08)}}
 footer{{padding:18px 16px;text-align:center;font-size:9px;color:var(--muted);border-top:1px solid rgba(255,255,255,.04)}}
 footer a{{color:var(--cyan);text-decoration:none}}
+@media(min-width:768px){{
+  .wrapper{{max-width:1100px}}
+  nav{{max-width:1100px;padding:0 32px}}
+  .scroll-area{{padding-top:50px;padding-bottom:60px}}
+  .stats-row{{grid-template-columns:repeat(4,1fr)}}
+  .sheet-section{{padding:0 24px 24px}}
+}}
 </style>
 </head>
 <body>
@@ -2421,7 +2443,7 @@ footer a{{color:var(--cyan);text-decoration:none}}
     <a href="/" class="nav-link">HOME</a>
     <a href="/trades" class="nav-link active">TRADES</a>
     <a href="/monitor" class="nav-link">MONITOR</a>
-    <a href="https://jup.ag/perps" class="nav-link" target="_blank">PERPS ↗</a>
+    <a href="https://bybit.com" class="nav-link" target="_blank">PERPS ↗</a>
   </div>
 </nav>
 <div class="scroll-area">
@@ -2511,7 +2533,7 @@ footer a{{color:var(--cyan);text-decoration:none}}
   </div>
 </div>
 </div>
-<footer>{DRIFT_BOT_NAME} &nbsp;&#x00B7;&nbsp; <a href="https://jup.ag/perps" target="_blank">PERPS ↗</a> &nbsp;&#x00B7;&nbsp; {'PAPER' if DRIFT_PAPER_MODE else 'LIVE'}</footer>
+<footer>{DRIFT_BOT_NAME} &nbsp;&#x00B7;&nbsp; <a href="https://bybit.com" target="_blank">PERPS ↗</a> &nbsp;&#x00B7;&nbsp; {'PAPER' if DRIFT_PAPER_MODE else 'LIVE'}</footer>
 </div>
 <script>
 const canvas=document.getElementById('particles');
@@ -2780,7 +2802,7 @@ def monitor():
 <style>
 :root{{--cyan:#00e5ff;--green:#00ff88;--red:#ff3355;--yellow:#ffee00;--bg:#050a14;--bg2:#080f1e;--bg3:#0d1628;--text:#c8d8f0;--muted:#4a6080}}
 *{{margin:0;padding:0;box-sizing:border-box}}
-body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
+body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-height:100vh;overflow-x:hidden}}
 nav{{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(5,10,20,.92);backdrop-filter:blur(12px);border-bottom:1px solid rgba(0,229,255,.12);display:flex;align-items:center;justify-content:space-between;padding:0 20px;height:52px;max-width:430px;margin:0 auto}}
 .nav-logo{{font-family:'Bebas Neue',sans-serif;font-size:22px;color:var(--cyan);letter-spacing:2px;text-shadow:0 0 14px rgba(0,229,255,.6)}}
 .nav-links{{display:flex;gap:16px}}
@@ -2844,6 +2866,11 @@ canvas{{width:100%!important;display:block;margin-bottom:10px}}
 .badge{{display:inline-block;padding:1px 7px;font-size:10px;font-weight:700;border-radius:3px;border:1px solid}}
 .badge.win{{color:var(--green);border-color:var(--green)}}.badge.loss{{color:var(--red);border-color:var(--red)}}
 @keyframes fadeUp{{from{{opacity:0;transform:translateY(18px)}}to{{opacity:1;transform:translateY(0)}}}}
+@media(min-width:768px){{
+  nav{{max-width:1100px}}
+  .page{{max-width:1100px;padding-top:72px;padding-left:40px;padding-right:40px}}
+  .mini-stats{{grid-template-columns:repeat(6,1fr)}}
+}}
 </style>
 </head>
 <body>
