@@ -1453,7 +1453,7 @@ def home():
 *{{margin:0;padding:0;box-sizing:border-box}}
 :root{{--bg:#050a14;--bg2:#080f1e;--bg3:#0d1628;--cyan:#00e5ff;--green:#00ff88;--red:#ff3355;--yellow:#ffee00;--text:#c8d8f0;--muted:#4a6080}}
 
-body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
+body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-height:100vh;overflow-x:hidden}}
 
 /* ORBS */
 .orb{{position:fixed;border-radius:50%;pointer-events:none;z-index:0;filter:blur(80px);opacity:.18}}
@@ -1587,6 +1587,27 @@ footer{{text-align:center;padding:20px 16px 40px;font-family:'JetBrains Mono',mo
 footer a{{color:var(--cyan);text-decoration:none}}
 ::-webkit-scrollbar{{width:4px}}
 ::-webkit-scrollbar-thumb{{background:var(--muted);border-radius:4px}}
+@media(min-width:768px){{
+  .wrapper{{max-width:1200px}}
+  nav{{padding:0 32px;gap:8px}}
+  .nav-link{{font-size:15px;padding:0 16px}}
+  .scroll-area{{padding:0 48px 80px;display:grid;grid-template-columns:1fr 1fr;gap:0 56px;align-items:start}}
+  .hero{{grid-column:1/-1;padding:40px 0 20px}}
+  .hero-title{{font-size:64px;width:auto!important;animation:none;border-right:none;display:block}}
+  .hero-balance{{font-size:52px}}
+  .hero-sub{{font-size:13px;gap:32px}}
+  .wave-wrap{{grid-column:1/-1}}
+  .stats-grid{{grid-column:1/-1;grid-template-columns:repeat(6,1fr)}}
+  .stat-val{{font-size:28px}}
+  .section-header{{font-size:18px;letter-spacing:4px}}
+  .pos-pnl{{font-size:16px}}
+  .feed-entry{{font-size:11px;padding:9px 14px}}
+  .market-row:nth-child(5){{animation:slideLeft .5s ease forwards .8s}}
+  .market-row:nth-child(6){{animation:slideLeft .5s ease forwards .95s}}
+  .market-row:nth-child(7){{animation:slideLeft .5s ease forwards 1.1s}}
+  .trade-btn{{font-size:17px;padding:11px 0}}
+  footer{{font-size:11px}}
+}}
 </style>
 </head>
 <body>
@@ -2041,14 +2062,14 @@ def trades_page():
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
 :root{{--bg:#050a14;--bg2:#080f1e;--bg3:#0d1628;--cyan:#00e5ff;--green:#00ff88;--red:#ff3355;--yellow:#ffee00;--text:#c8d8f0;--muted:#4a6080}}
-body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
+body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-height:100vh;overflow-x:hidden}}
 .orb{{position:fixed;border-radius:50%;pointer-events:none;z-index:0;filter:blur(80px);opacity:.15}}
 .orb-cyan{{width:320px;height:320px;top:-60px;left:calc(50% - 160px);background:radial-gradient(circle,var(--cyan),transparent 70%);animation:orbF 9s ease-in-out infinite}}
 .orb-green{{width:260px;height:260px;bottom:-40px;right:calc(50% - 220px);background:radial-gradient(circle,var(--green),transparent 70%);animation:orbF 9s ease-in-out infinite reverse}}
 @keyframes orbF{{0%,100%{{transform:translate(0,0)}}50%{{transform:translate(20px,30px)}}}}
 #particles{{position:fixed;inset:0;z-index:0;pointer-events:none}}
 .wrapper{{max-width:430px;margin:0 auto;position:relative;z-index:1;min-height:100vh}}
-nav{{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(5,10,20,.92);backdrop-filter:blur(12px);border-bottom:1px solid rgba(0,229,255,.12);display:flex;align-items:center;justify-content:space-between;padding:0 18px;height:50px;max-width:430px;margin:0 auto}}
+nav{{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(5,10,20,.92);backdrop-filter:blur(12px);border-bottom:1px solid rgba(0,229,255,.12);display:flex;align-items:center;justify-content:space-between;padding:0 18px;height:50px;max-width:430px;margin:0 auto;left:50%;transform:translateX(-50%);width:100%}}
 .nav-logo{{font-family:'Bebas Neue',sans-serif;font-size:19px;color:var(--cyan);letter-spacing:2px;text-shadow:0 0 12px rgba(0,229,255,.5)}}
 .nav-links{{display:flex;gap:14px}}
 .nav-link{{font-size:10px;font-weight:600;letter-spacing:1.5px;color:var(--muted);text-decoration:none;text-transform:uppercase;transition:color .2s}}
@@ -2104,6 +2125,15 @@ tr:hover td{{background:rgba(0,229,255,.04)!important}}
 .rbadge-sl{{color:var(--red);border-color:var(--red);background:rgba(255,51,85,.08)}}
 footer{{padding:18px 16px;text-align:center;font-size:9px;color:var(--muted);border-top:1px solid rgba(255,255,255,.04)}}
 footer a{{color:var(--cyan);text-decoration:none}}
+@media(min-width:768px){{
+  .wrapper{{max-width:1200px}}
+  nav{{max-width:1200px;padding:0 40px}}
+  .page-inner{{padding:72px 48px 80px}}
+  .tbl-wrap table th,
+  .tbl-wrap table td{{padding:10px 16px;font-size:12px}}
+  .stats-row{{grid-template-columns:repeat(6,1fr)}}
+  .hero-label{{font-size:20px}}
+}}
 </style>
 </head>
 <body>
@@ -2472,8 +2502,8 @@ def monitor():
 <style>
 :root{{--cyan:#00e5ff;--green:#00ff88;--red:#ff3355;--yellow:#ffee00;--bg:#050a14;--bg2:#080f1e;--bg3:#0d1628;--text:#c8d8f0;--muted:#4a6080}}
 *{{margin:0;padding:0;box-sizing:border-box}}
-body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
-nav{{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(5,10,20,.92);backdrop-filter:blur(12px);border-bottom:1px solid rgba(0,229,255,.12);display:flex;align-items:center;justify-content:space-between;padding:0 20px;height:52px;max-width:430px;margin:0 auto}}
+body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-height:100vh;overflow-x:hidden}}
+nav{{position:fixed;top:0;left:50%;transform:translateX(-50%);width:100%;z-index:100;background:rgba(5,10,20,.92);backdrop-filter:blur(12px);border-bottom:1px solid rgba(0,229,255,.12);display:flex;align-items:center;justify-content:space-between;padding:0 20px;height:52px;max-width:430px;margin:0 auto}}
 .nav-logo{{font-family:'Bebas Neue',sans-serif;font-size:22px;color:var(--cyan);letter-spacing:2px;text-shadow:0 0 14px rgba(0,229,255,.6)}}
 .nav-links{{display:flex;gap:16px}}
 .nav-link{{font-size:11px;font-weight:600;letter-spacing:1.5px;color:var(--muted);text-decoration:none;text-transform:uppercase;transition:color .2s;animation:slideInLeft .4s both}}
@@ -2482,7 +2512,7 @@ nav{{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(5,10,20,.92
 .nav-link:nth-child(3){{animation-delay:.25s}}
 .nav-link:hover{{color:var(--cyan)}}
 @keyframes slideInLeft{{from{{opacity:0;transform:translateX(-20px)}}to{{opacity:1;transform:translateX(0)}}}}
-.page{{max-width:430px;margin:0 auto;padding:68px 16px 40px}}
+.page{{max-width:430px;margin:0 auto;padding:68px 16px 40px;position:relative;z-index:1}}
 .mode-toggle-bar{{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;animation:fadeUp .5s .1s both}}
 .mode-pill{{display:inline-flex;align-items:center;gap:6px;background:rgba(0,229,255,.08);border:1px solid rgba(0,229,255,.25);border-radius:20px;padding:5px 14px;font-size:11px;font-weight:700;letter-spacing:1.5px;color:var(--cyan);text-transform:uppercase;animation:breatheGlow 2.5s ease-in-out infinite}}
 .mode-pill::before{{content:'';width:7px;height:7px;border-radius:50%;background:{mode_color};box-shadow:0 0 8px {mode_color};animation:dotPulse 2.5s ease-in-out infinite}}
@@ -2536,6 +2566,20 @@ canvas{{width:100%!important;display:block;margin-bottom:10px}}
 .badge{{display:inline-block;padding:1px 7px;font-size:10px;font-weight:700;border-radius:3px;border:1px solid}}
 .badge.win{{color:var(--green);border-color:var(--green)}}.badge.loss{{color:var(--red);border-color:var(--red)}}
 @keyframes fadeUp{{from{{opacity:0;transform:translateY(18px)}}to{{opacity:1;transform:translateY(0)}}}}
+@media(min-width:768px){{
+  nav{{max-width:1200px;padding:0 40px}}
+  .page{{max-width:1200px;padding:72px 48px 80px}}
+  .mini-stats{{grid-template-columns:repeat(6,1fr)}}
+  .scene-pnl{{font-size:64px}}
+  .scene-label{{font-size:14px}}
+  #stickScene{{height:320px}}
+  .card{{padding:20px}}
+  .sec-hdr{{font-size:20px}}
+  .pos-sym{{font-size:28px}}
+  .pos-pnl{{font-size:24px}}
+  .pos-meta{{font-size:12px;grid-template-columns:1fr 1fr 1fr 1fr}}
+  .log-line{{font-size:11px;padding:6px 14px}}
+}}
 </style>
 </head>
 <body>
