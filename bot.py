@@ -70,13 +70,13 @@ _CAP_TIERS = _RISK_TIERS.get(RISK_LEVEL, _RISK_TIERS["standard"])
 MAX_DAILY_LOSS_PCT = float(os.environ.get("MAX_DAILY_LOSS_PCT", "20"))  # stop day if down >20% of start capital
 
 # Risk limits
-DAILY_LOSS_MAX    = int(os.environ.get("DAILY_LOSS_MAX",  "3"))   # retune after N consecutive losses
-LOSS_COOLDOWN_HRS = float(os.environ.get("LOSS_COOLDOWN_HRS", "0.5")) # 30-min pause then resume
+DAILY_LOSS_MAX    = int(os.environ.get("DAILY_LOSS_MAX",  "6"))   # retune after N consecutive losses
+LOSS_COOLDOWN_HRS = float(os.environ.get("LOSS_COOLDOWN_HRS", "0.083")) # 5-min pause then resume
 ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # retune every 5 trades for faster learning
 
 # Bond Runner strategy
-BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "58"))
-BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "63"))
+BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "45"))
+BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "72"))
 BOND_TP         = float(os.environ.get("BOND_TP",        "67"))
 BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "10"))
 BOND_MAX_SECS   = int(os.environ.get("BOND_MAX_SECS",    "240"))   # 4 min hard cap
@@ -151,11 +151,11 @@ NTFY_TOPIC       = os.environ.get("NTFY_TOPIC", "")
 
 # Social / quality gates
 MIN_REPLIES  = int(os.environ.get("MIN_REPLIES",  "10"))
-MIN_LIQ      = float(os.environ.get("MIN_LIQ",    "500"))
+MIN_LIQ      = float(os.environ.get("MIN_LIQ",    "75"))
 
 # General
-MAX_OPEN      = int(os.environ.get("MAX_OPEN",      "4"))
-SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "10"))
+MAX_OPEN      = int(os.environ.get("MAX_OPEN",      "6"))
+SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "5"))
 
 SOL_RPC     = "https://api.mainnet-beta.solana.com"
 PUMPPORTAL  = "https://pumpportal.fun/api/trade-local"
@@ -742,15 +742,18 @@ def get_pumpfun_coins():
             if not items:
                 continue
             coins = []
-            for coin in items[:50]:
+            for coin in items[:100]:
                 mint  = coin.get("mint", "")
                 vsol  = float(coin.get("virtual_sol_reserves", 0) or 0)
+                vtok  = float(coin.get("virtual_token_reserves", 0) or 0)
                 bond  = min((vsol / 85_000_000_000) * 100, 99.9) if vsol > 0 else 0
                 if mint and not coin.get("complete", False):
                     coins.append({
                         "mint":       mint,
                         "symbol":     coin.get("symbol", mint[:8]),
                         "bond_pct":   round(bond, 1),
+                        "vsol":       vsol / 1e9,  # SOL units (for price calc)
+                        "vtok":       vtok,
                         "twitter":    bool(coin.get("twitter")),
                         "telegram":   bool(coin.get("telegram")),
                         "dev":        coin.get("creator", ""),
@@ -1693,12 +1696,17 @@ def scanner_loop():
                     sig_score = gmgn_signal_score(mint)
 
                     market = get_market_data(mint)
-                    if not market:
-                        log("info", f"BOND SKIP: no market data (DexScreener not indexed yet)", symbol)
-                        continue
-                    if market["price"] <= 0:
-                        log("info", f"BOND SKIP: price=0", symbol)
-                        continue
+                    # Fallback: price from bonding curve when DexScreener hasn't indexed yet
+                    if not market or market["price"] <= 0:
+                        _vsol = coin.get("vsol", 0)
+                        _vtok = coin.get("vtok", 0)
+                        _sp   = get_sol_price()
+                        if _vsol > 0 and _vtok > 0 and _sp:
+                            bc_price = (_vsol / _vtok) * _sp
+                            market = {"price": bc_price, "liq": 0, "change1h": 0, "age_h": 0}
+                            log("info", f"BOND: using bonding curve price ${bc_price:.8f}", symbol)
+                        else:
+                            continue
                     # Skip liquidity check for bond runner — bonding curve IS the liquidity
 
                     amt = trade_size()
@@ -1721,7 +1729,14 @@ def scanner_loop():
                     sig_score = gmgn_signal_score(mint)
                     market = get_market_data(mint)
                     if not market or market["price"] <= 0:
-                        continue
+                        _vsol = coin.get("vsol", 0)
+                        _vtok = coin.get("vtok", 0)
+                        _sp   = get_sol_price()
+                        if _vsol > 0 and _vtok > 0 and _sp:
+                            bc_price = (_vsol / _vtok) * _sp
+                            market = {"price": bc_price, "liq": 0, "change1h": 0, "age_h": 0}
+                        else:
+                            continue
                     amt = trade_size()
                     log("ok", f"TRENCH | bond={bond:.1f}% | sig={sig_score}", symbol)
                     enter_trade(mint, symbol, market["price"], amt, "trench", bond, 0)
