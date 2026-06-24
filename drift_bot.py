@@ -1519,11 +1519,17 @@ nav{{position:sticky;top:0;z-index:100;background:rgba(5,10,20,.92);backdrop-fil
 @keyframes scanBar{{0%{{left:-40%}}100%{{left:140%}}}}
 
 /* POSITION CARDS */
-.pos-card{{border-radius:12px;padding:12px;margin-bottom:10px;display:flex;align-items:center;gap:10px;opacity:0;transform:translateX(60px);cursor:pointer}}
+.pos-card{{border-radius:12px;padding:12px;display:flex;align-items:center;gap:10px;opacity:0;transform:translateX(60px);cursor:pointer;touch-action:pan-y;will-change:transform;position:relative;z-index:1}}
 .pos-card.profit{{background:linear-gradient(110deg,var(--bg3) 0%,rgba(0,255,136,.04) 50%,var(--bg3) 100%);background-size:200% 100%;border:1px solid rgba(0,255,136,.35);animation:slideFromRight .55s ease forwards .7s,cardShimmer 3s linear infinite 2s}}
 .pos-card.loss{{background:var(--bg3);border:1px solid rgba(255,51,85,.35);animation:slideFromRight .55s ease forwards .85s}}
+.pos-card.snap{{transition:transform .25s cubic-bezier(.25,.1,.25,1)}}
 @keyframes slideFromRight{{to{{opacity:1;transform:translateX(0)}}}}
 @keyframes cardShimmer{{0%{{background-position:200% 0}}100%{{background-position:-200% 0}}}}
+/* SWIPE WRAP — holds card + hidden close button */
+.swipe-wrap{{position:relative;border-radius:12px;margin-bottom:10px;overflow:hidden;}}
+.swipe-close{{position:absolute;right:0;top:0;bottom:0;width:76px;background:var(--red);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent}}
+.swipe-close svg{{width:20px;height:20px;stroke:#fff;stroke-width:2.5;fill:none}}
+.swipe-close span{{font-family:'Bebas Neue',sans-serif;font-size:12px;letter-spacing:2px;color:#fff}}
 .pos-info{{flex:1}}
 .pos-pair{{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;color:var(--text)}}
 .pos-dir{{font-size:10px;font-family:'JetBrains Mono',monospace;letter-spacing:1px;margin-top:2px}}
@@ -1837,10 +1843,17 @@ function updatePositions(positions) {{
     pnlH[market].push(pnl); if(pnlH[market].length>80) pnlH[market].shift();
     let card=document.getElementById('pc-'+market);
     if(!card) {{
+      // Build swipe wrapper + card + hidden close button
+      const sw=document.createElement('div'); sw.className='swipe-wrap'; sw.id='sw-'+market;
       card=document.createElement('div'); card.id='pc-'+market;
       card.className='pos-card '+(pnl>=0?'profit':'loss');
-      card.innerHTML=buildCard(market,pos); wrap.appendChild(card);
-      setTimeout(()=>initChart(market),80);
+      card.innerHTML=buildCard(market,pos);
+      const closeBtn=document.createElement('div'); closeBtn.className='swipe-close';
+      closeBtn.innerHTML=`<svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg><span>CLOSE</span>`;
+      closeBtn.addEventListener('click',()=>closePosDirect(market));
+      sw.appendChild(card); sw.appendChild(closeBtn);
+      wrap.appendChild(sw);
+      setTimeout(()=>{{initChart(market);initSwipe(card,market);}},80);
     }} else {{
       const pnlEl=document.getElementById('pp-'+market);
       if(pnlEl){{pnlEl.textContent=(pnl>=0?'+':'')+' $'+Math.abs(pnl).toFixed(2);pnlEl.className='pos-pnl '+(pnl>=0?'up':'dn');}}
@@ -1848,10 +1861,56 @@ function updatePositions(positions) {{
       card.className='pos-card '+(pnl>=0?'profit':'loss');
     }}
   }});
-  document.querySelectorAll('.pos-card').forEach(el=>{{
-    const m=el.id.replace('pc-','');
-    if(!positions[m]){{if(charts[m]){{charts[m].destroy();delete charts[m];}}delete pnlH[m];el.remove();}}
+  document.querySelectorAll('.swipe-wrap').forEach(el=>{{
+    const m=el.id.replace('sw-','');
+    if(!positions[m]){{
+      const card=document.getElementById('pc-'+m);
+      if(charts[m]){{charts[m].destroy();delete charts[m];}}
+      delete pnlH[m]; el.remove();
+    }}
   }});
+}}
+
+function initSwipe(card,market) {{
+  let x0=0,y0=0,dx=0,axis=null;
+  const MAX=76, SNAP=50;
+  card.addEventListener('touchstart',e=>{{
+    x0=e.touches[0].clientX; y0=e.touches[0].clientY; dx=0; axis=null;
+  }},{{passive:true}});
+  card.addEventListener('touchmove',e=>{{
+    const cx=e.touches[0].clientX, cy=e.touches[0].clientY;
+    if(!axis) axis=Math.abs(cx-x0)>Math.abs(cy-y0)?'h':'v';
+    if(axis!=='h') return;
+    dx=Math.max(-MAX,Math.min(0,cx-x0));
+    card.style.transition='none';
+    card.style.transform='translateX('+dx+'px)';
+  }},{{passive:true}});
+  card.addEventListener('touchend',()=>{{
+    card.style.transition='transform .25s cubic-bezier(.25,.1,.25,1)';
+    if(dx<=-SNAP) {{
+      card.style.transform='translateX(-'+MAX+'px)';
+    }} else {{
+      card.style.transform='translateX(0)';
+    }}
+    dx=0; axis=null;
+  }},{{passive:true}});
+  // Tapping elsewhere snaps card back
+  document.addEventListener('touchstart',e=>{{
+    if(!card.closest('.swipe-wrap').contains(e.target)&&card.style.transform&&card.style.transform!=='translateX(0)') {{
+      card.style.transition='transform .25s cubic-bezier(.25,.1,.25,1)';
+      card.style.transform='translateX(0)';
+    }}
+  }},{{passive:true}});
+}}
+
+function closePosDirect(market) {{
+  fetch('/api/close/'+market,{{method:'POST'}})
+    .then(r=>r.json())
+    .then(d=>{{
+      const sw=document.getElementById('sw-'+market);
+      if(sw){{ sw.style.transition='opacity .3s,transform .3s'; sw.style.opacity='0'; sw.style.transform='translateX(-100%)'; setTimeout(()=>sw.remove(),350); }}
+    }})
+    .catch(e=>console.error(e));
 }}
 
 function buildCard(market,pos) {{
