@@ -3928,6 +3928,26 @@ async function testTelegram() {{
 </body></html>"""
     return html
 
+@app.route("/wallets", methods=["GET"])
+def wallets_status():
+    """Shows which wallets are being tracked — use this to confirm TRACKED_WALLETS is set correctly."""
+    with _copy_lock:
+        discovered = list(_copy_wallets)
+    return jsonify({
+        "tracked_wallets": {
+            "count":     len(TRACKED_WALLETS),
+            "addresses": TRACKED_WALLETS,
+            "hint":      "Set TRACKED_WALLETS=addr1,addr2,addr3 in Railway env vars for THIS service (sniper bot)",
+        },
+        "gmgn_discovered": {
+            "count":     len(discovered),
+            "wallets":   [{"address": w["address"], "winrate": w["winrate"]} for w in discovered],
+            "status":    "OK" if discovered else "No wallets fetched yet — GMGN rank may be rate-limited",
+        },
+        "total_watching": len(TRACKED_WALLETS) + len(discovered),
+        "copy_trade_on":  COPY_TRADE,
+    })
+
 @app.route("/blacklist/<mint>", methods=["GET"])
 def blacklist_route(mint):
     blacklisted_mints.add(mint)
@@ -4069,6 +4089,10 @@ if __name__ == "__main__":
     _pct, _limit = _cap_tier(_cap)
     log("ok", f"Capital: ${_cap:.2f} | Trade size: {_pct*100:.0f}% (${trade_size():.2f}) | Daily cap: {_limit} trades | Max daily loss: {MAX_DAILY_LOSS_PCT:.0f}%")
     log("ok", f"Copy trade: {'ON' if COPY_TRADE else 'OFF'} | WR {COPY_WINRATE_MIN}-{COPY_WINRATE_MAX}% | top {COPY_MAX_WALLETS} wallets")
+    if TRACKED_WALLETS:
+        log("ok", f"Tracked wallets ({len(TRACKED_WALLETS)}): {', '.join(w[:8]+'...' for w in TRACKED_WALLETS)}")
+    else:
+        log("warn", "TRACKED_WALLETS not set — add wallet addresses in Railway env vars")
     log("ok", f"USDC lock : activates at ${USDC_LOCK_THRESHOLD:.0f} capital")
     log("ok", "=" * 55)
     app.run(host="0.0.0.0", port=port, use_reloader=False)
