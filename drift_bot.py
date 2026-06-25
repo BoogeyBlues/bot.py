@@ -1736,6 +1736,10 @@ def home():
         f'</div>'
         for mk in markets_list
     )
+    market_row_css = "".join(
+        f".market-row:nth-child({i+1}){{animation:slideLeft .5s ease forwards {0.2 + i*0.12:.2f}s}}"
+        for i in range(len(markets_list))
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1862,10 +1866,7 @@ nav{{position:sticky;top:0;z-index:100;background:rgba(5,10,20,.92);backdrop-fil
 
 /* MANUAL TRADING */
 .market-row{{display:flex;align-items:center;gap:8px;margin-bottom:8px;opacity:0;transform:translateX(-30px)}}
-.market-row:nth-child(1){{animation:slideLeft .5s ease forwards .2s}}
-.market-row:nth-child(2){{animation:slideLeft .5s ease forwards .35s}}
-.market-row:nth-child(3){{animation:slideLeft .5s ease forwards .5s}}
-.market-row:nth-child(4){{animation:slideLeft .5s ease forwards .65s}}
+{market_row_css}
 @keyframes slideLeft{{to{{opacity:1;transform:translateX(0)}}}}
 .market-label{{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;color:var(--text);width:36px;flex-shrink:0}}
 .trade-btn{{flex:1;padding:9px 0;border:none;border-radius:8px;font-family:'Bebas Neue',sans-serif;font-size:15px;letter-spacing:2px;cursor:pointer;position:relative;overflow:hidden;transition:transform .15s}}
