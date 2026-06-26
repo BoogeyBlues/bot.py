@@ -75,8 +75,8 @@ LOSS_COOLDOWN_HRS = float(os.environ.get("LOSS_COOLDOWN_HRS", "0.083")) # 5-min 
 ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # retune every 5 trades for faster learning
 
 # Bond Runner strategy
-BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "45"))
-BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "72"))
+BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "25"))
+BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "80"))
 BOND_TP         = float(os.environ.get("BOND_TP",        "67"))
 BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "10"))
 BOND_MAX_SECS   = int(os.environ.get("BOND_MAX_SECS",    "240"))   # 4 min hard cap
@@ -84,7 +84,7 @@ BOND_STALE_SECS = int(os.environ.get("BOND_STALE_SECS",  "120"))   # exit if bon
 
 # Dormant Spike strategy
 SPIKE_MIN_AGE_H = float(os.environ.get("SPIKE_MIN_AGE_H", "12"))
-SPIKE_MIN_1H    = float(os.environ.get("SPIKE_MIN_1H",    "100"))
+SPIKE_MIN_1H    = float(os.environ.get("SPIKE_MIN_1H",    "30"))
 SPIKE_TP_PCT    = float(os.environ.get("SPIKE_TP_PCT",    "40"))
 SPIKE_SL_PCT    = float(os.environ.get("SPIKE_SL_PCT",    "15"))
 SPIKE_MAX_SECS  = int(os.environ.get("SPIKE_MAX_SECS",    "180"))   # 3 min hard cap
@@ -725,20 +725,27 @@ def get_pumpfun_coins():
         "https://frontend-api-v3.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false",
         "https://frontend-api-v3.pump.fun/coins/currently-live?offset=0&limit=50&includeNsfw=false&order=DESC",
         "https://frontend-api-v2.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false",
+        "https://client-api-2.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false",
     ]
     headers = {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
-        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
         "Referer": "https://pump.fun/",
         "Origin": "https://pump.fun",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
     }
     for url in endpoints:
         try:
             res = _session.get(url, headers=headers, timeout=10)
             if res.status_code != 200:
+                log("warn", f"pump.fun {res.status_code}: {url[-50:]}")
                 continue
             data  = res.json()
-            items = data if isinstance(data, list) else data.get("coins", [])
+            items = data if isinstance(data, list) else data.get("coins", data.get("data", []))
             if not items:
                 continue
             coins = []
@@ -747,25 +754,47 @@ def get_pumpfun_coins():
                 vsol  = float(coin.get("virtual_sol_reserves", 0) or 0)
                 vtok  = float(coin.get("virtual_token_reserves", 0) or 0)
                 bond  = min((vsol / 85_000_000_000) * 100, 99.9) if vsol > 0 else 0
-                if mint and not coin.get("complete", False):
-                    coins.append({
-                        "mint":       mint,
-                        "symbol":     coin.get("symbol", mint[:8]),
-                        "bond_pct":   round(bond, 1),
-                        "vsol":       vsol / 1e9,  # SOL units (for price calc)
-                        "vtok":       vtok,
-                        "twitter":    bool(coin.get("twitter")),
-                        "telegram":   bool(coin.get("telegram")),
-                        "dev":        coin.get("creator", ""),
-                        "replies":    int(coin.get("reply_count", 0) or 0),
-                        "created_at":   int(coin.get("created_timestamp", 0) or 0),
-                        "last_trade":   int(coin.get("last_trade_timestamp", 0) or 0),
-                        "complete":     False,
-                    })
+                if not mint or coin.get("complete", False):
+                    continue
+                # Resilient social field lookups — API field names vary by version
+                socials  = coin.get("socials") or {}
+                has_tw   = bool(coin.get("twitter") or coin.get("twitter_url") or socials.get("twitter"))
+                has_tg   = bool(coin.get("telegram") or coin.get("telegram_url") or socials.get("telegram"))
+                has_web  = bool(coin.get("website") or coin.get("website_url") or socials.get("website"))
+                # Resilient timestamp field lookups
+                last_ts  = int(
+                    coin.get("last_trade_timestamp") or
+                    coin.get("last_trade_time") or
+                    coin.get("last_trade") or
+                    coin.get("updated_timestamp") or
+                    0
+                )
+                created_ts = int(
+                    coin.get("created_timestamp") or
+                    coin.get("created_at") or
+                    coin.get("creation_time") or
+                    0
+                )
+                coins.append({
+                    "mint":       mint,
+                    "symbol":     coin.get("symbol", mint[:8]),
+                    "bond_pct":   round(bond, 1),
+                    "vsol":       vsol / 1e9,
+                    "vtok":       vtok,
+                    "twitter":    has_tw,
+                    "telegram":   has_tg,
+                    "website":    has_web,
+                    "dev":        coin.get("creator", "") or coin.get("dev", ""),
+                    "replies":    int(coin.get("reply_count", 0) or 0),
+                    "created_at": created_ts,
+                    "last_trade": last_ts,
+                    "complete":   False,
+                })
             log("info", f"pump.fun API: {len(coins)} live coins")
-            return coins
+            if coins:
+                return coins
         except Exception as e:
-            log("warn", f"Endpoint failed: {e}")
+            log("warn", f"pump.fun endpoint failed: {e}")
     return []
 
 def get_recently_graduated():
@@ -1615,16 +1644,18 @@ def scanner_loop():
                     if mint in open_trades:
                         continue
 
-                # Require Twitter OR Telegram (at least one)
-                if not coin.get("twitter") and not coin.get("telegram"):
+                # Require Twitter, Telegram, or Website (at least one social signal)
+                if not coin.get("twitter") and not coin.get("telegram") and not coin.get("website"):
                     continue
                 n_social += 1
 
-                # Active trading: last trade within 5 minutes
+                # Active trading: last trade within 15 minutes
+                # If last_trade==0 (field missing/changed), don't gate — coins already sorted by recency
                 last_trade = coin.get("last_trade", 0)
-                secs_since = (time.time() - last_trade / 1000) if last_trade > 0 else 9999
-                if secs_since > 300:
-                    continue
+                if last_trade > 0:
+                    secs_since = time.time() - last_trade / 1000
+                    if secs_since > 900:
+                        continue
                 n_replies += 1  # reuse counter — now means "recently active"
 
                 bond = coin.get("bond_pct", 0)
