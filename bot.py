@@ -211,6 +211,8 @@ _gmgn_trending_mints   = set()   # trending tokens (1h price movers on GMGN)
 _gmgn_hot_mints        = set()   # hot search tokens (what people are searching on GMGN)
 _gmgn_signal_time      = 0.0     # last signal refresh time
 _signal_lock           = threading.Lock()
+scan_log               = []
+_scan_log_lock         = threading.Lock()
 
 # ── LOGGING ─────────────────────────────────────────────────────
 def log(tag, msg, symbol=""):
@@ -221,6 +223,22 @@ def log(tag, msg, symbol=""):
         trade_log.append({"time": time.strftime('%H:%M:%S'), "tag": tag, "symbol": symbol, "msg": msg})
         if len(trade_log) > 300:
             trade_log.pop(0)
+
+def _log_scan(symbol, mint, bond, sig, result, fi, msg):
+    entry = {
+        "sym":    symbol,
+        "mint":   (mint[:5] + "…" + mint[-4:]) if len(mint) > 10 else mint,
+        "bond":   round(float(bond or 0), 1),
+        "sig":    int(sig or 0),
+        "result": result,
+        "fi":     fi,
+        "msg":    msg,
+        "ts":     round(time.time(), 3),
+    }
+    with _scan_log_lock:
+        scan_log.insert(0, entry)
+        if len(scan_log) > 30:
+            scan_log.pop()
 
 # ── NOTIFICATIONS ────────────────────────────────────────────────
 _notify_queue = []
@@ -1635,8 +1653,10 @@ def scanner_loop():
                 with trades_lock:
                     if len(open_trades) >= MAX_OPEN:
                         break
-                mint   = coin["mint"]
-                symbol = coin["symbol"]
+                mint      = coin["mint"]
+                symbol    = coin["symbol"]
+                _bond_pre = coin.get("bond_pct", 0)
+                _sig_pre  = sum([bool(coin.get("twitter")), bool(coin.get("telegram")), bool(coin.get("website"))])
 
                 if mint in blacklisted_mints:
                     continue
@@ -1646,6 +1666,7 @@ def scanner_loop():
 
                 # Require Twitter, Telegram, or Website (at least one social signal)
                 if not coin.get("twitter") and not coin.get("telegram") and not coin.get("website"):
+                    _log_scan(symbol, mint, _bond_pre, 0, "social", 0, "NO SOCIAL LINKS")
                     continue
                 n_social += 1
 
@@ -1655,6 +1676,7 @@ def scanner_loop():
                 if last_trade > 0:
                     secs_since = time.time() - last_trade / 1000
                     if secs_since > 900:
+                        _log_scan(symbol, mint, _bond_pre, _sig_pre, "active", 1, "LAST TRADE >15MIN")
                         continue
                 n_replies += 1  # reuse counter — now means "recently active"
 
@@ -1699,27 +1721,33 @@ def scanner_loop():
                         bond = details["bond_pct"]
                         if details.get("complete"):
                             log("info", f"BOND SKIP: already graduated bond={bond:.1f}%", symbol)
+                            _log_scan(symbol, mint, bond, _sig_pre, "bond", 2, "ALREADY GRADUATED")
                             continue
                     if not (BOND_ENTRY_MIN <= bond <= BOND_ENTRY_MAX):
                         log("info", f"BOND SKIP: bond moved to {bond:.1f}% (range {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%)", symbol)
+                        _log_scan(symbol, mint, bond, _sig_pre, "bond", 2, f"BOND {bond:.0f}% MOVED")
                         continue
 
                     rug = run_rugcheck(mint)
                     if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
                         log("warn", f"BOND SKIP: mint/freeze auth rug={rug}", symbol)
                         blacklisted_mints.add(mint)
+                        _log_scan(symbol, mint, bond, _sig_pre, "rug", 3, "RUG · MINT/FREEZE AUTH")
                         continue
                     if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
                         log("warn", f"BOND SKIP: bundled", symbol)
+                        _log_scan(symbol, mint, bond, _sig_pre, "rug", 3, "BUNDLED TOKEN")
                         continue
                     holder_ok, holder_reason = check_holder_concentration(mint)
                     if not holder_ok:
                         log("warn", f"SKIP: {holder_reason}", symbol)
+                        _log_scan(symbol, mint, bond, _sig_pre, "holder", 4, holder_reason[:18].upper())
                         continue
                     dev_wallet = coin.get("creator", "") or coin.get("dev", "")
                     dev_ok, dev_reason = check_dev_history(dev_wallet)
                     if not dev_ok:
                         log("warn", f"SKIP: {dev_reason}", symbol)
+                        _log_scan(symbol, mint, bond, _sig_pre, "dev", 5, dev_reason[:18].upper())
                         continue
                     if gmgn_smart_money_selling(mint):
                         log("warn", "SKIP: smart money selling", symbol)
@@ -1742,6 +1770,7 @@ def scanner_loop():
 
                     amt = trade_size()
                     log("ok", f"BOND RUNNER | bond={bond:.1f}% | sig={sig_score}", symbol)
+                    _log_scan(symbol, mint, bond, _sig_pre, "pass", -1, f"TRADE ENTERED · ${amt:.2f}")
                     enter_trade(mint, symbol, market["price"], amt, "bond", bond, 0)
                     time.sleep(0.5)
                     continue
@@ -3058,6 +3087,8 @@ def live_api():
     with capital_lock:
         cap = capital
     recent_closed = list(reversed(completed_trades[-30:]))
+    with _scan_log_lock:
+        sl = list(scan_log[:20])
     return jsonify({
         "ts":       round(time.time()),
         "capital":  round(cap, 2),
@@ -3066,6 +3097,7 @@ def live_api():
         "scanning": scan_active,
         "paused":   _pause_until > time.time(),
         "today":    {"trades": _daily_trades, "wins": _daily_wins, "losses": _daily_losses},
+        "scan_log": sl,
     })
 
 @app.route("/live", methods=["GET"])
@@ -3074,245 +3106,541 @@ def live():
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<title>Live Feed — Boogey's Treasure Chest</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Live Feed — __BOT_NAME__</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
-  *{box-sizing:border-box;margin:0;padding:0}
-  :root{--acc:#00f5ff;--bg:#0a0008;--card:#110010;--border:#ffffff15}
-  body{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}
-  .bg-art{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}
-  .wrap{position:relative}
-  nav{display:flex;gap:0;border-bottom:2px solid var(--acc);overflow-x:auto;scrollbar-width:none}
-  nav::-webkit-scrollbar{display:none}
-  nav a{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;border-right:1px solid var(--border);transition:all .15s}
-  nav a:hover{background:var(--acc);color:#000}
-  nav a.active{background:var(--acc);color:#000}
-  .page-title{font-family:'Bebas Neue',sans-serif;font-size:3rem;color:var(--acc);text-shadow:0 0 24px #00f5ff88;padding:18px 16px 8px;line-height:1;letter-spacing:.04em}
-  .status-bar{display:flex;flex-wrap:wrap;gap:6px;padding:0 12px 12px}
-  .pill{padding:5px 12px;font-size:.68rem;font-weight:700;border:1px solid var(--border);background:var(--card);display:inline-flex;align-items:center;gap:6px;letter-spacing:.04em}
-  .dot{width:7px;height:7px;border-radius:50%}
-  .dot.green{background:#39ff14;box-shadow:0 0 8px #39ff14}
-  .dot.red{background:#ff006e;box-shadow:0 0 8px #ff006e}
-  .dot.cyan{background:var(--acc);box-shadow:0 0 8px var(--acc)}
-  .blink{animation:blink 1s infinite}
-  @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
-  .cap-display{text-align:center;padding:20px 16px;background:var(--card);border-top:2px solid var(--acc);border-bottom:2px solid var(--border);margin-bottom:12px}
-  .cap-display .lbl{font-size:.62rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.15em;margin-bottom:4px}
-  .cap-display .amount{font-family:'Bebas Neue',sans-serif;font-size:4rem;color:var(--acc);text-shadow:0 0 30px #00f5ff66;letter-spacing:.02em;line-height:1}
-  .cap-display .sub{font-size:.68rem;color:#888;margin-top:6px}
-  .section{background:var(--card);border-top:2px solid var(--border);padding:14px;margin:0 12px 12px}
-  .section-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
-  .section-hdr h2{font-size:.62rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em}
-  .count-badge{background:#00f5ff20;color:var(--acc);border:1px solid #00f5ff40;font-size:.62rem;font-weight:700;padding:2px 8px;letter-spacing:.04em}
-  .live-dot{display:inline-block;width:6px;height:6px;background:#39ff14;border-radius:50%;margin-right:4px;animation:blink 1s infinite;box-shadow:0 0 6px #39ff14}
-  .table-wrap{overflow-x:auto;border:1px solid var(--border)}
-  table{width:100%;border-collapse:collapse;font-size:.72rem}
-  th{padding:8px 10px;font-size:.56rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.08em;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap;background:#0d000c}
-  td{padding:9px 10px;border-bottom:1px solid #ffffff05;vertical-align:middle}
-  tr:last-child td{border-bottom:none}
-  tr.new-row{animation:flash .8s ease-out}
-  @keyframes flash{0%{background:#00f5ff18}100%{background:transparent}}
-  .timer{font-family:'JetBrains Mono',monospace;font-size:.8rem;color:var(--acc);font-weight:600}
-  .mono{font-family:'JetBrains Mono',monospace;font-size:.68rem}
-  .sym{font-weight:900;font-size:.8rem}
-  .muted{color:#888}
-  .green{color:#39ff14} .red{color:#ff006e} .cyan{color:var(--acc)}
-  .badge{display:inline-block;padding:2px 6px;font-size:.56rem;font-weight:900;letter-spacing:.06em;border:1px solid}
-  .badge.win{color:#39ff14;border-color:#39ff14;background:#39ff1415}
-  .badge.loss{color:#ff006e;border-color:#ff006e;background:#ff006e15}
-  .badge.strat{color:#00f5ff;border-color:#00f5ff;background:#00f5ff12}
-  .badge.open{color:var(--acc);border-color:var(--acc);background:#00f5ff15}
-  .feed{display:flex;flex-direction:column;gap:6px;max-height:400px;overflow-y:auto}
-  .feed-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--border);background:#0d000c;font-size:.75rem;animation:flash .8s ease-out}
-  .feed-item.buy{border-color:#00f5ff30;background:#00f5ff08}
-  .feed-item.win{border-color:#39ff1430;background:#39ff1408}
-  .feed-item.loss{border-color:#ff006e30;background:#ff006e08}
-  .feed-ts{font-family:'JetBrains Mono',monospace;font-size:.62rem;color:#888;white-space:nowrap;min-width:56px}
-  .feed-icon{font-size:1rem;width:20px;text-align:center}
-  .feed-body{flex:1}
-  .feed-sym{font-weight:900;margin-right:6px}
-  .feed-detail{color:#888;font-size:.68rem;margin-top:1px}
-  .feed-pnl{font-family:'JetBrains Mono',monospace;font-weight:700;white-space:nowrap}
-  .empty{text-align:center;padding:28px;color:#888;font-size:.78rem}
-  #last-update{font-size:.62rem;color:#888}
-  footer{padding:14px 16px;text-align:center;font-size:.6rem;color:#444;border-top:1px solid var(--border)}
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#050a14;--bg2:#080f1e;--bg3:#0d1628;--cyan:#00e5ff;--green:#00ff88;--red:#ff3355;--yellow:#ffee00;--text:#c8d8f0;--muted:#4a6080}
+html,body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-height:100vh;-webkit-user-select:none;user-select:none;overflow-x:hidden}
+body{max-width:430px;margin:0 auto}
+nav{background:rgba(5,10,20,.97);border-bottom:1px solid rgba(0,229,255,.1);display:flex;overflow-x:auto;position:sticky;top:0;z-index:100}
+nav::-webkit-scrollbar{display:none}
+.nav-tab{font-family:'Bebas Neue',sans-serif;font-size:13px;letter-spacing:2px;padding:14px 18px;color:var(--muted);white-space:nowrap;border-bottom:2px solid transparent;flex-shrink:0;text-decoration:none}
+.nav-tab.active{color:var(--cyan);border-bottom-color:var(--cyan)}
+.page-hdr{padding:14px 16px 6px;display:flex;align-items:center;justify-content:space-between}
+.page-title{font-family:'Bebas Neue',sans-serif;font-size:32px;letter-spacing:4px;color:var(--cyan)}
+.status-strip{display:flex;flex-wrap:wrap;gap:5px;padding:0 16px 10px}
+.s-pill{display:flex;align-items:center;gap:5px;padding:4px 9px;border-radius:20px;border:1px solid rgba(255,255,255,.07);background:rgba(255,255,255,.03);font-size:10px;font-family:'JetBrains Mono',monospace}
+.s-dot{width:6px;height:6px;border-radius:50%;background:var(--green);animation:pulse 1.8s ease infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.s-val{color:var(--cyan);font-weight:700}
+.s-open{color:var(--yellow);font-weight:700}
+.pos-section{margin:0 16px 10px;border:1px solid rgba(0,229,255,.12);border-radius:14px;overflow:hidden}
+.sec-hdr{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:var(--bg2);border-bottom:1px solid rgba(0,229,255,.08)}
+.sec-title{font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--text);display:flex;align-items:center;gap:7px}
+.s-dot2{width:6px;height:6px;border-radius:50%;background:var(--green);animation:pulse 1.8s ease infinite}
+.cbadge{font-family:'JetBrains Mono',monospace;font-size:8px;padding:2px 7px;border-radius:10px;font-weight:700;background:rgba(255,238,0,.12);color:var(--yellow);border:1px solid rgba(255,238,0,.25);transition:all .3s}
+.sec-btn{font-family:'JetBrains Mono',monospace;font-size:8px;padding:3px 9px;border:1px solid rgba(0,229,255,.25);border-radius:6px;color:var(--cyan);background:rgba(0,229,255,.07);letter-spacing:1px;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.pos-stack-wrap{position:relative;transition:height .45s cubic-bezier(.22,.8,.36,1);overflow:hidden;background:var(--bg2)}
+.pos-card{position:absolute;left:14px;right:14px;height:100px;border-radius:12px;overflow:hidden;transition:top .45s cubic-bezier(.22,.8,.36,1),transform .45s cubic-bezier(.22,.8,.36,1),opacity .45s,box-shadow .3s;will-change:transform,top,opacity}
+.pos-card.neutral-card{border:1px solid rgba(0,229,255,.2);box-shadow:0 2px 14px rgba(0,229,255,.04)}
+.pc-hide-bg{position:absolute;inset:0;background:linear-gradient(90deg,transparent 25%,rgba(0,80,100,.88));display:flex;align-items:center;justify-content:flex-end;padding-right:18px;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;letter-spacing:1px;color:#fff;opacity:0;pointer-events:none}
+.pc-inner{position:absolute;inset:0;background:var(--bg3);padding:11px 13px;display:flex;flex-direction:column;justify-content:space-between;will-change:transform}
+.pc-row1{display:flex;align-items:baseline;justify-content:space-between}
+.pc-sym{font-family:'Bebas Neue',sans-serif;font-size:26px;letter-spacing:2px;line-height:1;color:var(--cyan)}
+.pc-bond{font-family:'Bebas Neue',sans-serif;font-size:16px;letter-spacing:1px;line-height:1;color:var(--green)}
+.pc-row2{display:flex;align-items:center;justify-content:space-between}
+.pc-bond-bar{flex:1;height:4px;background:rgba(255,255,255,.06);border-radius:2px;margin:0 8px;overflow:hidden}
+.pc-bond-fill{height:4px;border-radius:2px;background:linear-gradient(90deg,var(--cyan),var(--green));transition:width .6s ease}
+.pc-strat{font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--muted)}
+.pc-row3{display:flex;align-items:center;justify-content:space-between}
+.pc-size{font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--muted)}
+.pc-time{font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--muted)}
+.pc-swipe-lbl{font-family:'JetBrains Mono',monospace;font-size:7px;color:rgba(74,96,128,.4);letter-spacing:1px}
+.pos-collapse-hint{background:var(--bg2);border-top:1px solid rgba(0,229,255,.06);padding:8px 14px;text-align:center;font-family:'JetBrains Mono',monospace;font-size:8px;letter-spacing:2px;color:var(--muted);cursor:pointer;-webkit-tap-highlight-color:transparent}
+.scan-section{margin:0 16px 10px;background:var(--bg2);border:1px solid rgba(0,229,255,.12);border-radius:14px;clip-path:inset(0 round 14px)}
+.scan-now-bar{display:flex;align-items:center;gap:8px;padding:7px 14px;border-bottom:1px solid rgba(0,229,255,.08);background:var(--bg2)}
+.sn-pulse{width:7px;height:7px;border-radius:50%;background:var(--cyan);animation:pulse .9s ease infinite;flex-shrink:0}
+.sn-label{font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:2px;color:var(--muted)}
+.sn-coin{font-family:'Bebas Neue',sans-serif;font-size:14px;letter-spacing:2px;color:var(--cyan);margin-left:auto}
+.sn-status{font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;flex-shrink:0}
+.sn-status.scan{color:var(--cyan);animation:blink .6s infinite}
+.sn-status.pass{color:var(--green)}.sn-status.fail{color:var(--red)}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.1}}
+.deck-wrap{position:relative;height:390px;perspective:900px;perspective-origin:50% 50%;touch-action:none}
+.scan-card{position:absolute;left:50%;top:50%;width:284px;margin-left:-142px;background:var(--bg3);border:1px solid rgba(0,229,255,.12);border-radius:14px;padding:11px 13px;will-change:transform,opacity;transition:transform .42s cubic-bezier(.22,.8,.36,1),opacity .42s,box-shadow .35s,border-color .35s;pointer-events:none;transform-origin:center center}
+.scan-card.is-focus{pointer-events:auto;z-index:5!important}
+.scan-card.state-pass{border-color:rgba(0,255,136,.5);box-shadow:0 0 26px rgba(0,255,136,.18)}
+.scan-card.state-fail{border-color:rgba(255,51,85,.45);box-shadow:0 0 26px rgba(255,51,85,.13)}
+.sc-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px}
+.sc-sym{font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:2px;color:var(--cyan);line-height:1}
+.sc-mint{font-family:'JetBrains Mono',monospace;font-size:7px;color:var(--muted);margin-top:2px}
+.sc-right{display:flex;flex-direction:column;align-items:flex-end;gap:3px}
+.sc-badge{font-family:'JetBrains Mono',monospace;font-size:7px;padding:2px 6px;border-radius:4px}
+.b-bond{background:rgba(0,229,255,.1);border:1px solid rgba(0,229,255,.25);color:var(--cyan)}
+.b-sig{background:rgba(255,238,0,.08);border:1px solid rgba(255,238,0,.22);color:var(--yellow)}
+.sc-bar{height:2px;background:rgba(255,255,255,.05);border-radius:1px;margin-bottom:7px}
+.sc-bar-fill{height:2px;border-radius:1px;background:linear-gradient(90deg,var(--cyan),var(--green))}
+.sc-filters{display:grid;grid-template-columns:1fr 1fr;gap:2px 8px;margin-bottom:8px;min-height:48px}
+.frow{display:flex;align-items:center;gap:4px;height:15px;opacity:0;transform:translateX(-5px);transition:opacity .2s,transform .2s}
+.frow.vis{opacity:1;transform:translateX(0)}
+.ficon{font-size:8px;width:11px;flex-shrink:0;text-align:center}
+.fname{font-family:'JetBrains Mono',monospace;font-size:7px;color:var(--muted);flex:1}
+.fval{font-family:'JetBrains Mono',monospace;font-size:7px;font-weight:700;flex-shrink:0}
+.fval.ok{color:var(--green)}.fval.bad{color:var(--red)}.fval.chk{color:var(--cyan);animation:blink .55s infinite}
+.sc-status{height:22px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-family:'Bebas Neue',sans-serif;font-size:11px;letter-spacing:2.5px;border:1px solid rgba(0,229,255,.15);background:rgba(0,229,255,.03);color:var(--muted);transition:all .3s;position:relative;overflow:hidden}
+.sc-status.scanning{color:var(--cyan);border-color:rgba(0,229,255,.35);animation:spulse 1s ease infinite}
+.sc-status.pass{background:rgba(0,255,136,.07);border-color:rgba(0,255,136,.4);color:var(--green)}
+.sc-status.fail{background:rgba(255,51,85,.07);border-color:rgba(255,51,85,.35);color:var(--red)}
+.sc-status.pass::after,.sc-status.fail::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.1),transparent);animation:sweep .65s ease forwards}
+@keyframes sweep{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
+@keyframes spulse{0%,100%{opacity:1}50%{opacity:.5}}
+.sc-fig{position:absolute;bottom:10px;right:10px;width:20px;height:26px;opacity:.35;transition:opacity .3s;pointer-events:none}
+.scan-card.is-focus .sc-fig{opacity:.8}
+.deck-dots{position:absolute;right:5px;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;gap:6px;z-index:20;pointer-events:none}
+.ddot{width:5px;height:5px;border-radius:50%;background:rgba(0,229,255,.12);transition:all .22s}
+.ddot.active{background:var(--cyan);transform:scale(1.6);box-shadow:0 0 5px var(--cyan)}
+.ddot.dp{background:var(--green);opacity:.7}.ddot.df{background:var(--red);opacity:.7}
+.live-btn{position:absolute;top:8px;right:32px;font-family:'JetBrains Mono',monospace;font-size:7px;letter-spacing:1.5px;padding:3px 9px;border-radius:10px;background:rgba(0,229,255,.12);border:1px solid rgba(0,229,255,.4);color:var(--cyan);cursor:pointer;z-index:20;animation:livePulse 1.5s ease infinite;display:none}
+@keyframes livePulse{0%,100%{box-shadow:0 0 4px rgba(0,229,255,.2)}50%{box-shadow:0 0 10px rgba(0,229,255,.5)}}
+.deck-hint{position:absolute;bottom:6px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:4px;opacity:0;transition:opacity .4s;pointer-events:none;z-index:20}
+.deck-hint.show{opacity:.35}
+.dh-u{width:0;height:0;border-left:3px solid transparent;border-right:3px solid transparent;border-bottom:4px solid var(--cyan)}
+.dh-d{width:0;height:0;border-left:3px solid transparent;border-right:3px solid transparent;border-top:4px solid var(--cyan)}
+.dh-lbl{font-family:'JetBrains Mono',monospace;font-size:6px;letter-spacing:1.5px;color:var(--cyan);text-transform:uppercase}
+.scan-stats{border-top:1px solid rgba(0,229,255,.07);padding:7px 14px;display:flex;align-items:center;gap:7px;background:var(--bg2);border-radius:0 0 14px 14px}
+.st-dot{width:5px;height:5px;border-radius:50%;background:var(--cyan);animation:pulse 1s ease infinite;flex-shrink:0}
+.st-counts{display:flex;gap:10px;font-family:'JetBrains Mono',monospace;font-size:8px;margin-left:auto}
+.section2{margin:0 16px 18px}
+.sec2-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.sec2-title{font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;letter-spacing:2px;color:var(--text);text-transform:uppercase}
+.sec2-link{font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--cyan);text-decoration:none}
+.trade-row{display:flex;align-items:flex-start;gap:9px;padding:10px;background:var(--bg2);border:1px solid rgba(255,255,255,.04);border-radius:10px;margin-bottom:6px}
+.tr-time{font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--muted);white-space:nowrap;margin-top:2px}
+.tr-icon{width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;flex-shrink:0}
+.tr-icon.win{background:rgba(0,255,136,.15);color:var(--green)}
+.tr-icon.loss{background:rgba(255,51,85,.12);color:var(--red)}
+.tr-icon.open{background:rgba(0,229,255,.12);color:var(--cyan)}
+.tr-body{flex:1}
+.tr-sym{font-family:'Bebas Neue',sans-serif;font-size:14px;letter-spacing:1.5px;line-height:1;margin-bottom:3px}
+.tr-tags{display:flex;gap:4px;margin-bottom:2px}
+.tag{font-family:'JetBrains Mono',monospace;font-size:7px;padding:2px 5px;border-radius:3px;font-weight:700}
+.tag-win{background:rgba(0,255,136,.2);color:var(--green)}.tag-loss{background:rgba(255,51,85,.18);color:var(--red)}
+.tag-open{background:rgba(0,229,255,.12);color:var(--cyan)}.tag-bond{background:rgba(0,229,255,.1);color:var(--cyan)}
+.tr-detail{font-family:'JetBrains Mono',monospace;font-size:7px;color:var(--muted);line-height:1.5}
+.tr-pnl{font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;white-space:nowrap}
+.tr-pnl.pos{color:var(--green)}.tr-pnl.neg{color:var(--red)}
+.bot-name{text-align:center;font-size:9px;color:rgba(74,96,128,.4);padding-bottom:20px;letter-spacing:1px}
 </style>
 </head>
 <body>
-<img src="/static/tankgirl.png" class="bg-art" alt="">
-<div class="wrap">
-  <nav>
-    <a href="/">HOME</a>
-    <a href="/live" class="active">LIVE</a>
-    <a href="/trades">TRADES</a>
-    <a href="/status">STATUS</a>
-    <a href="/learn">STRATEGY</a>
-    <a href="/setup">SETUP</a>
-  </nav>
-
-  <div class="page-title">LIVE FEED</div>
-
-  <div class="status-bar">
-    <div class="pill"><span class="dot green blink" id="scan-dot"></span><span id="scan-label">Scanning</span></div>
-    <div class="pill">Capital: <strong id="cap-pill" class="cyan">$--</strong></div>
-    <div class="pill">Today: <span id="today-pill">--</span></div>
-    <div class="pill">Open: <span id="open-count" class="cyan">0</span></div>
-  </div>
-
-  <div class="cap-display">
-    <div class="lbl">Current Capital</div>
-    <div class="amount" id="cap-big">$---.--</div>
-    <div class="sub">Started at ${STARTING_CAPITAL:.2f} &nbsp;·&nbsp; Goal: ${PROFIT_GOAL:,.0f}</div>
-  </div>
-
-  <div class="section" id="open-section">
-    <div class="section-hdr">
-      <h2><span class="live-dot"></span>Open Trades</h2>
-      <span class="count-badge" id="open-badge">0 active</span>
-    </div>
-    <div id="open-body">
-      <div class="table-wrap">
-        <table>
-          <thead><tr>
-            <th>Symbol</th><th>Strategy</th><th>Size</th>
-            <th>Bond In</th><th>Bond High</th><th>Elapsed</th>
-          </tr></thead>
-          <tbody id="open-rows"><tr><td colspan="6" class="empty">No open trades — scanning...</td></tr></tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-
-  <div class="section">
-    <div class="section-hdr">
-      <h2>TRADE EVENTS</h2>
-      <a href="/trades" style="font-size:.68rem;color:var(--acc);text-decoration:none;font-weight:700;letter-spacing:.06em">FULL HISTORY →</a>
-    </div>
-    <div class="feed" id="feed">
-      <div class="empty">Waiting for trades...</div>
-    </div>
-  </div>
-
-  <div style="padding:0 12px 8px;text-align:right"><span id="last-update"></span></div>
-  <footer>Boogey's Treasure Chest · Live</footer>
+<nav>
+  <a href="/" class="nav-tab">HOME</a>
+  <a href="/live" class="nav-tab active">LIVE</a>
+  <a href="/trades" class="nav-tab">TRADES</a>
+  <a href="/status" class="nav-tab">STATUS</a>
+  <a href="/learn" class="nav-tab">STRATEGY</a>
+</nav>
+<div class="page-hdr"><div class="page-title">LIVE FEED</div></div>
+<div class="status-strip">
+  <div class="s-pill"><span class="s-dot"></span><span id="scanStatus">Scanning</span></div>
+  <div class="s-pill">Capital: <span class="s-val" id="capVal">--</span></div>
+  <div class="s-pill">Today: <span style="color:var(--text)" id="todayVal">--</span></div>
+  <div class="s-pill">Open: <span class="s-open" id="openCount">0</span></div>
 </div>
+<div class="pos-section">
+  <div class="sec-hdr">
+    <div class="sec-title"><span class="s-dot2"></span>OPEN POSITIONS<span class="cbadge" id="posBadge">0 OPEN</span></div>
+    <div class="sec-btn" id="expandBtn" onclick="toggleExpand()" style="display:none">EXPAND &#x2195;</div>
+  </div>
+  <div class="pos-stack-wrap" id="posStackWrap"></div>
+  <div class="pos-collapse-hint" id="collapseHint" onclick="toggleExpand()" style="display:none">&#x2191; COLLAPSE</div>
+</div>
+<div class="scan-section">
+  <div class="scan-now-bar">
+    <div class="sn-pulse"></div>
+    <div class="sn-label">NOW SCANNING</div>
+    <div class="sn-coin" id="snCoin">&#x2014;</div>
+    <div class="sn-status scan" id="snStatus">WAITING</div>
+  </div>
+  <div class="deck-wrap" id="deckWrap">
+    <div class="live-btn" id="liveBtn" onclick="jumpToLive()">&#x25B6; LIVE</div>
+    <div class="deck-dots" id="deckDots"></div>
+    <div class="deck-hint" id="deckHint">
+      <div class="dh-u"></div><div class="dh-lbl">drag</div><div class="dh-d"></div>
+    </div>
+  </div>
+  <div class="scan-stats">
+    <div class="st-dot"></div>
+    <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--muted)">SCAN HISTORY</span>
+    <div class="st-counts">
+      <span style="color:var(--text)" id="st-n">0 scanned</span>
+      <span style="color:var(--green)" id="st-p">0 &#x2713;</span>
+      <span style="color:var(--red)" id="st-f">0 &#x2717;</span>
+    </div>
+  </div>
+</div>
+<div class="section2">
+  <div class="sec2-hdr">
+    <div class="sec2-title">TRADE EVENTS</div>
+    <a href="/trades" class="sec2-link">FULL HISTORY &#x2192;</a>
+  </div>
+  <div id="eventsWrap"><div style="font-family:monospace;font-size:9px;color:var(--muted);text-align:center;padding:20px">Waiting for events...</div></div>
+</div>
+<div class="bot-name">__BOT_NAME__ &#xB7; Live</div>
 <script>
-let seenIds = new Set();
-let openTimers = {};
-
-function fmt(n, dec=4) { return (n>=0?'+':'')+n.toFixed(dec); }
-function fmtTime(ts) {
-  const d = new Date(ts*1000);
-  return d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+// OPEN POSITIONS — iOS card stack
+const CARD_H=100,PEEK=17,EXP_GAP=10,PAD=13;
+let stackExpanded=false;
+const dismissed=new Set();
+const posCards={};
+const posTimers={};
+const posWrap=document.getElementById('posStackWrap');
+const expandBtn=document.getElementById('expandBtn');
+const badge=document.getElementById('posBadge');
+const colHint=document.getElementById('collapseHint');
+function fmt(s){s=Math.round(s);return s<60?s+'s':Math.floor(s/60)+'m '+String(s%60).padStart(2,'0')+'s';}
+function makePos(t){
+  var mint=t.mint;
+  if(posCards[mint])return;
+  var el=document.createElement('div');
+  el.className='pos-card neutral-card';
+  var bpct=Math.min(100,t.bond_entry||0);
+  el.innerHTML=
+    '<div class="pc-hide-bg">&#x2190; HIDE</div>'+
+    '<div class="pc-inner">'+
+      '<div class="pc-row1">'+
+        '<div class="pc-sym">'+t.symbol+'</div>'+
+        '<div class="pc-bond">'+t.bond_entry.toFixed(1)+'% &#x2192; '+t.bond_high.toFixed(1)+'%</div>'+
+      '</div>'+
+      '<div class="pc-row2">'+
+        '<div class="pc-strat">BOND</div>'+
+        '<div class="pc-bond-bar"><div class="pc-bond-fill" style="width:'+bpct+'%"></div></div>'+
+        '<div class="pc-strat">'+t.strategy.toUpperCase()+'</div>'+
+      '</div>'+
+      '<div class="pc-row3">'+
+        '<div class="pc-size">$'+t.amount.toFixed(2)+'</div>'+
+        '<div class="pc-time" id="pct'+mint+'">'+fmt(t.elapsed_s)+'</div>'+
+        '<div class="pc-swipe-lbl">&#x2190; HIDE</div>'+
+      '</div>'+
+    '</div>';
+  posWrap.appendChild(el);
+  posCards[mint]={card:el,timeEl:document.getElementById('pct'+mint)};
+  posTimers[mint]=t.elapsed_s;
+  initSwipe(el,mint);
 }
-function elapsed(s) {
-  if (s < 60) return s.toFixed(0)+'s';
-  return Math.floor(s/60)+'m '+(s%60).toFixed(0)+'s';
+function visMints(){return Object.keys(posCards).filter(function(m){return !dismissed.has(m)&&posCards[m].card.style.display!=='none';});}
+function updateStack(){
+  var vk=visMints();var n=vk.length;
+  badge.textContent=n+' OPEN';
+  document.getElementById('openCount').textContent=n;
+  if(n===0){posWrap.style.height='0px';colHint.style.display='none';expandBtn.style.display='none';return;}
+  expandBtn.style.display='';
+  colHint.style.display=stackExpanded&&n>1?'':'none';
+  expandBtn.textContent=stackExpanded?'COLLAPSE &#x2195;':'EXPAND &#x2195;';
+  if(stackExpanded){
+    posWrap.style.height=(PAD+n*CARD_H+(n-1)*EXP_GAP+PAD)+'px';
+    vk.forEach(function(m,i){var c=posCards[m].card;c.style.top=(PAD+i*(CARD_H+EXP_GAP))+'px';c.style.transform='scale(1)';c.style.opacity='1';c.style.zIndex=n-i;c.style.pointerEvents='auto';});
+  }else{
+    posWrap.style.height=(PAD+CARD_H+(n-1)*PEEK+PAD)+'px';
+    vk.forEach(function(m,i){var c=posCards[m].card;c.style.top=(PAD+i*PEEK)+'px';c.style.transform='scale('+(1-i*0.03)+')';c.style.opacity=i===0?'1':i===1?'0.78':'0.58';c.style.zIndex=n-i;c.style.pointerEvents='auto';});
+  }
 }
+function toggleExpand(){if(visMints().length<=1)return;stackExpanded=!stackExpanded;updateStack();}
+function initSwipe(card,mint){
+  var inner=card.querySelector('.pc-inner');
+  var bg=card.querySelector('.pc-hide-bg');
+  var sx,sy,isH=null,moved=false;
+  function snap(){inner.style.transition='transform .35s cubic-bezier(.22,.8,.36,1)';inner.style.transform='translateX(0)';bg.style.opacity='0';}
+  card.addEventListener('touchstart',function(e){sx=e.touches[0].clientX;sy=e.touches[0].clientY;isH=null;moved=false;inner.style.transition='none';bg.style.transition='none';},{passive:true});
+  card.addEventListener('touchmove',function(e){
+    var dx=e.touches[0].clientX-sx,dy=e.touches[0].clientY-sy;
+    if(isH===null&&(Math.abs(dx)>6||Math.abs(dy)>6))isH=Math.abs(dx)>Math.abs(dy);
+    if(!isH)return;moved=true;if(dx>8)return;
+    inner.style.transform='translateX('+Math.min(0,dx)+'px)';
+    bg.style.opacity=Math.min(1,Math.abs(Math.min(0,dx))/88);
+    e.preventDefault();
+  },{passive:false});
+  card.addEventListener('touchend',function(e){
+    var dx=e.changedTouches[0].clientX-sx;
+    if(!moved||isH===null){snap();if(!stackExpanded)toggleExpand();return;}
+    if(!isH){snap();return;}
+    if(dx<-80){
+      inner.style.transition='transform .28s ease';inner.style.transform='translateX(-110%)';bg.style.opacity='1';
+      setTimeout(function(){dismissCard(mint);},290);
+    }else snap();
+  },{passive:true});
+}
+function dismissCard(mint){
+  var c=posCards[mint];if(!c)return;
+  var card=c.card;
+  card.style.transition='height .38s ease,opacity .28s ease';
+  var h=card.offsetHeight;void card.offsetHeight;card.style.height=h+'px';
+  requestAnimationFrame(function(){card.style.height='0';card.style.opacity='0';card.style.overflow='hidden';});
+  setTimeout(function(){card.style.display='none';dismissed.add(mint);if(visMints().length<2&&stackExpanded)stackExpanded=false;updateStack();},400);
+}
+setInterval(function(){Object.keys(posTimers).forEach(function(m){if(dismissed.has(m))return;posTimers[m]+=1;var c=posCards[m];if(c&&c.timeEl)c.timeEl.textContent=fmt(posTimers[m]);});},1000);
 
-function tick() {
-  // Update elapsed timers for open trades
-  document.querySelectorAll('.elapsed-cell').forEach(el => {
-    const start = parseInt(el.dataset.start);
-    el.textContent = elapsed(Date.now()/1000 - start);
+// COIN SCANNER — ISO perspective deck + real scan_log
+var FILTERS=[
+  {label:'SOCIAL',icon:'&#x1F517;'},{label:'ACTIVE',icon:'&#x23F1;'},
+  {label:'BOND%', icon:'&#x1F4C8;'},{label:'RUG',   icon:'&#x1F6E1;'},
+  {label:'HOLDER',icon:'&#x1F465;'},{label:'DEV',   icon:'&#x1F50D;'},
+];
+var SLOTS=[
+  {ty:-130,s:0.54,rx:-15,op:0.08,z:1},
+  {ty: -65,s:0.78,rx: -7,op:0.40,z:2},
+  {ty:   0,s:1.00,rx:  0,op:1.00,z:5},
+  {ty:  65,s:0.78,rx:  7,op:0.40,z:2},
+  {ty: 130,s:0.54,rx: 15,op:0.08,z:1},
+];
+var MAX_H=20;
+var scanHistory=[],viewIdx=0,isAtLive=true,nPass=0,nFail=0;
+var seenTs=new Set(),animQueue=[],isAnimating=false,firstPoll=true;
+var deckWrap=document.getElementById('deckWrap');
+var dotsEl=document.getElementById('deckDots');
+var hintEl=document.getElementById('deckHint');
+var liveBtn=document.getElementById('liveBtn');
+function g(id){return document.getElementById(id);}
+function makeCard(ci){
+  var el=document.createElement('div');
+  el.className='scan-card';el.id='card-'+ci;
+  var fHTML=FILTERS.map(function(_,fi){
+    return '<div class="frow" id="fr-'+ci+'-'+fi+'">'+
+      '<div class="ficon" id="fi-'+ci+'-'+fi+'">&#x25FD;</div>'+
+      '<div class="fname">'+FILTERS[fi].label+'</div>'+
+      '<div class="fval" id="fv-'+ci+'-'+fi+'">&#x2014;</div>'+
+    '</div>';
+  }).join('');
+  el.innerHTML=
+    '<div class="sc-top">'+
+      '<div><div class="sc-sym" id="csym-'+ci+'">&#x2014;</div><div class="sc-mint" id="cmint-'+ci+'"></div></div>'+
+      '<div class="sc-right">'+
+        '<div class="sc-badge b-bond" id="cbond-'+ci+'">BOND &#x2014;</div>'+
+        '<div class="sc-badge b-sig" id="csig-'+ci+'">SIG &#x2014;</div>'+
+      '</div>'+
+    '</div>'+
+    '<div class="sc-bar"><div class="sc-bar-fill" id="cbar-'+ci+'" style="width:0%"></div></div>'+
+    '<div class="sc-filters">'+fHTML+'</div>'+
+    '<div class="sc-status" id="csb-'+ci+'">QUEUED</div>'+
+    '<svg class="sc-fig" viewBox="0 0 22 30" fill="none">'+
+      '<circle cx="11" cy="3.5" r="3" stroke="#00e5ff" stroke-width="1.2"/>'+
+      '<line x1="11" y1="6.5" x2="11" y2="19" stroke="#00e5ff" stroke-width="1.2"/>'+
+      '<line x1="11" y1="10" x2="4" y2="15" stroke="#00e5ff" stroke-width="1.2">'+
+        '<animateTransform id="arm-'+ci+'" attributeName="transform" type="rotate"'+
+        ' from="0 11 10" to="-22 11 10" dur="0.5s" repeatCount="indefinite"'+
+        ' calcMode="discrete" begin="indefinite"/>'+
+      '</line>'+
+      '<line x1="11" y1="10" x2="18" y2="15" stroke="#00e5ff" stroke-width="1.2"/>'+
+      '<line x1="11" y1="19" x2="7" y2="28" stroke="#00e5ff" stroke-width="1.2"/>'+
+      '<line x1="11" y1="19" x2="15" y2="28" stroke="#00e5ff" stroke-width="1.2"/>'+
+    '</svg>';
+  deckWrap.insertBefore(el,dotsEl);
+  return el;
+}
+var cardEls=[];
+for(var i=0;i<MAX_H;i++)cardEls.push(makeCard(i));
+var dotEls=[];
+for(var i=0;i<MAX_H;i++){var d=document.createElement('div');d.className='ddot';dotsEl.appendChild(d);dotEls.push(d);}
+function layout(){
+  cardEls.forEach(function(card,ci){
+    var delta=ci-viewIdx,si=delta+2;
+    if(si<0||si>4||ci>=scanHistory.length){
+      card.style.opacity='0';card.style.pointerEvents='none';card.style.zIndex='0';
+      card.style.transform='translateY('+(delta>0?180:-180)+'px) scale(0.4) rotateX('+(delta>0?20:-20)+'deg)';
+    }else{
+      var sl=SLOTS[si];
+      card.style.opacity=sl.op;card.style.zIndex=sl.z;
+      card.style.transform='translateY('+sl.ty+'px) scale('+sl.s+') rotateX('+sl.rx+'deg)';
+      card.style.pointerEvents=si===2?'auto':'none';
+      if(si===2)card.classList.add('is-focus');else card.classList.remove('is-focus');
+    }
   });
+  dotEls.forEach(function(dd,i){
+    if(i>=scanHistory.length){dd.className='ddot';dd.style.display='none';return;}
+    dd.style.display='block';
+    var r=scanHistory[i].result;
+    dd.className='ddot '+(r==='pass'?'dp':r==='fail'?'df':'dq');
+    if(i===viewIdx)dd.classList.add('active');
+  });
+  isAtLive=viewIdx===0;
+  liveBtn.style.display=isAtLive?'none':'block';
+  hintEl.classList.toggle('show',scanHistory.length>1);
 }
-setInterval(tick, 1000);
-
-async function poll() {
-  try {
-    const r = await fetch('/live/api');
-    const d = await r.json();
-
-    // Capital
-    document.getElementById('cap-big').textContent = '$'+d.capital.toFixed(2);
-    document.getElementById('cap-pill').textContent = '$'+d.capital.toFixed(2);
-    document.getElementById('today-pill').textContent =
-      d.today.trades+'T '+d.today.wins+'W '+d.today.losses+'L';
-    document.getElementById('open-count').textContent = d.open.length;
-    document.getElementById('open-badge').textContent = d.open.length+' active';
-
-    // Scan status
-    const dot = document.getElementById('scan-dot');
-    const lbl = document.getElementById('scan-label');
-    if (d.paused) {
-      dot.className='dot red blink'; lbl.textContent='Cooling Down';
-    } else if (d.scanning) {
-      dot.className='dot green blink'; lbl.textContent='Scanning';
-    } else {
-      dot.className='dot red'; lbl.textContent='Halted';
+function entryToCoin(e){
+  return {sym:e.sym,mint:e.mint,bond:e.bond,sig:Math.min(3,e.sig||0),failAt:e.fi,passMsg:e.msg||'',failMsg:e.msg||''};
+}
+function fillCard(ci){
+  if(ci>=scanHistory.length)return;
+  var coin=scanHistory[ci].coin;
+  var cs=g('csym-'+ci);if(cs)cs.textContent=coin.sym;
+  var cm=g('cmint-'+ci);if(cm)cm.textContent=coin.mint;
+  var cb=g('cbond-'+ci);if(cb)cb.textContent='BOND '+coin.bond+'%';
+  var csg=g('csig-'+ci);if(csg)csg.textContent='SIG '+coin.sig+'/3';
+  var cbar=g('cbar-'+ci);if(cbar)cbar.style.width=Math.min(100,coin.bond)+'%';
+  FILTERS.forEach(function(_,fi){
+    var fr=g('fr-'+ci+'-'+fi);if(fr)fr.className='frow';
+    var fic=g('fi-'+ci+'-'+fi);if(fic)fic.innerHTML='&#x25FD;';
+    var fv=g('fv-'+ci+'-'+fi);if(fv){fv.className='fval';fv.innerHTML='&#x2014;';}
+  });
+  var sb=g('csb-'+ci);if(sb){sb.className='sc-status';sb.textContent='QUEUED';}
+  cardEls[ci].className='scan-card';
+}
+function applyFinalState(ci){
+  if(ci>=scanHistory.length)return;
+  var coin=scanHistory[ci].coin,result=scanHistory[ci].result;
+  var showUntil=result==='fail'?coin.failAt:FILTERS.length-1;
+  for(var fi=0;fi<FILTERS.length;fi++){
+    var row=g('fr-'+ci+'-'+fi);if(!row)continue;
+    if(fi>showUntil){row.className='frow';continue;}
+    row.className='frow vis';
+    if(result==='fail'&&fi===coin.failAt){
+      g('fi-'+ci+'-'+fi).innerHTML='&#x1F534;';
+      g('fv-'+ci+'-'+fi).className='fval bad';
+      g('fv-'+ci+'-'+fi).textContent='FAIL';
+    }else{
+      g('fi-'+ci+'-'+fi).innerHTML='&#x2705;';
+      g('fv-'+ci+'-'+fi).className='fval ok';
+      g('fv-'+ci+'-'+fi).textContent='OK';
     }
-
-    // Open trades table
-    const tbody = document.getElementById('open-rows');
-    if (d.open.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="6" class="empty">No open trades — scanning...</td></tr>';
-    } else {
-      tbody.innerHTML = d.open.map(t => `
-        <tr>
-          <td><span class="sym">${t.symbol}</span><br>
-            <span class="muted" style="font-size:.65rem">${t.strategy.toUpperCase()}</span></td>
-          <td><span class="badge strat">${t.strategy.toUpperCase()}</span></td>
-          <td class="mono cyan">$${t.amount.toFixed(2)}</td>
-          <td class="mono">${t.bond_entry.toFixed(1)}%</td>
-          <td class="mono cyan">${t.bond_high.toFixed(1)}%</td>
-          <td class="timer elapsed-cell" data-start="${t.opened_at}">${elapsed(Date.now()/1000 - t.opened_at)}</td>
-        </tr>`).join('');
+  }
+  var sb=g('csb-'+ci);cardEls[ci].className='scan-card';
+  if(result==='pass'){sb.className='sc-status pass';sb.innerHTML='&#x2713; '+(coin.passMsg||'TRADE ENTERED');cardEls[ci].classList.add('state-pass');}
+  else{sb.className='sc-status fail';sb.innerHTML='&#x2717; '+(coin.failMsg||'REJECTED');cardEls[ci].classList.add('state-fail');}
+}
+function animateEntry(ci,onDone){
+  var coin=scanHistory[ci].coin;
+  var sb=g('csb-'+ci),card=cardEls[ci];
+  g('snCoin').textContent=coin.sym;
+  g('snStatus').className='sn-status scan';g('snStatus').textContent='CHECKING';
+  try{g('arm-'+ci).beginElement();}catch(e){}
+  sb.className='sc-status scanning';sb.textContent='SCANNING';
+  var step=0;
+  function tick(){
+    if(step>=FILTERS.length){
+      try{g('arm-'+ci).endElement();}catch(e){}
+      sb.className='sc-status pass';sb.innerHTML='&#x2713; '+(coin.passMsg||'TRADE ENTERED');
+      card.classList.add('state-pass');scanHistory[ci].result='pass';nPass++;
+      g('snStatus').className='sn-status pass';g('snStatus').innerHTML='&#x2713; ENTERED';
+      g('st-n').textContent=(nPass+nFail)+' scanned';g('st-p').innerHTML=nPass+' &#x2713;';
+      setTimeout(onDone,2000);return;
     }
-
-    // Feed — closed trades, newest first
-    const feed = document.getElementById('feed');
-    let added = false;
-    const sorted = [...d.closed].reverse();
-    const newItems = [];
-
-    sorted.forEach(t => {
-      const key = t.id ?? (t.symbol+t.time);
-      if (!seenIds.has(key)) {
-        seenIds.add(key);
-        added = true;
-        const won = t.pnl > 0;
-        const isBuy = false; // closed trades only here
-        const sign = t.pnl >= 0 ? '+' : '';
-        newItems.push(`
-          <div class="feed-item ${won?'win':'loss'}">
-            <span class="feed-ts">${t.time}</span>
-            <span class="feed-icon">${won?'✅':'❌'}</span>
-            <div class="feed-body">
-              <span class="feed-sym">${t.symbol}</span>
-              <span class="badge ${won?'win':'loss'}">${won?'WIN':'LOSS'}</span>
-              &nbsp;<span class="badge strat">${t.strategy.toUpperCase()}</span>
-              <div class="feed-detail">
-                Entry $${t.entry.toFixed(6)} → Exit $${t.exit.toFixed(6)}
-                &nbsp;·&nbsp; ${t.result} &nbsp;·&nbsp; held ${t.hold_m.toFixed(1)}m
-              </div>
-            </div>
-            <span class="feed-pnl ${won?'green':'red'}">${sign}$${t.pnl.toFixed(4)}</span>
-          </div>`);
-      }
-    });
-
-    if (newItems.length > 0) {
-      const existing = feed.innerHTML === '<div class="empty">Waiting for trades...</div>'
-        ? '' : feed.innerHTML;
-      feed.innerHTML = newItems.join('') + existing;
+    var fr=g('fr-'+ci+'-'+step);if(fr)fr.className='frow vis';
+    var fic=g('fi-'+ci+'-'+step);if(fic)fic.innerHTML=FILTERS[step].icon;
+    var fv=g('fv-'+ci+'-'+step);if(fv){fv.className='fval chk';fv.textContent='...';}
+    if(coin.failAt===step){
+      setTimeout(function(){
+        if(fic)fic.innerHTML='&#x1F534;';if(fv){fv.className='fval bad';fv.textContent='FAIL';}
+        setTimeout(function(){
+          try{g('arm-'+ci).endElement();}catch(e){}
+          sb.className='sc-status fail';sb.innerHTML='&#x2717; '+(coin.failMsg||'REJECTED');
+          card.classList.add('state-fail');scanHistory[ci].result='fail';nFail++;
+          g('snStatus').className='sn-status fail';g('snStatus').innerHTML='&#x2717; REJECTED';
+          g('st-n').textContent=(nPass+nFail)+' scanned';g('st-f').innerHTML=nFail+' &#x2717;';
+          setTimeout(onDone,1600);
+        },380);
+      },340);return;
     }
+    setTimeout(function(){
+      if(fic)fic.innerHTML='&#x2705;';if(fv){fv.className='fval ok';fv.textContent='OK';}
+      step++;setTimeout(tick,150);
+    },340);
+  }
+  setTimeout(tick,200);
+}
+function drainQueue(){
+  if(isAnimating||animQueue.length===0)return;
+  isAnimating=true;
+  var entry=animQueue.shift();
+  var coin=entryToCoin(entry);
+  scanHistory.unshift({coin:coin,result:'scanning'});
+  if(scanHistory.length>MAX_H)scanHistory.pop();
+  scanHistory.forEach(function(_,ci){fillCard(ci);});
+  if(isAtLive)viewIdx=0;
+  layout();
+  animateEntry(0,function(){isAnimating=false;drainQueue();});
+}
+function jumpToLive(){viewIdx=0;isAtLive=true;layout();}
+var ty0=0,dacc=0,ddrag=false;
+deckWrap.addEventListener('touchstart',function(e){ty0=e.touches[0].clientY;dacc=0;ddrag=true;},{passive:true});
+deckWrap.addEventListener('touchmove',function(e){if(ddrag)dacc=e.touches[0].clientY-ty0;},{passive:true});
+deckWrap.addEventListener('touchend',function(){if(!ddrag)return;ddrag=false;if(Math.abs(dacc)>40){viewIdx=Math.max(0,Math.min(scanHistory.length-1,viewIdx+(dacc<0?1:-1)));isAtLive=viewIdx===0;layout();}});
+var md=false,my0=0,ma=0;
+deckWrap.addEventListener('mousedown',function(e){md=true;my0=e.clientY;ma=0;});
+deckWrap.addEventListener('mousemove',function(e){if(md)ma=e.clientY-my0;});
+deckWrap.addEventListener('mouseup',function(){if(!md)return;md=false;if(Math.abs(ma)>40){viewIdx=Math.max(0,Math.min(scanHistory.length-1,viewIdx+(ma<0?1:-1)));isAtLive=viewIdx===0;layout();}});
 
-    // Last updated
-    document.getElementById('last-update').textContent =
-      'Updated ' + new Date().toLocaleTimeString();
-
-  } catch(e) { console.error(e); }
+// TRADE EVENTS
+function fmtP(p){if(!p||p===0)return '-';return p<0.0001?p.toFixed(10):p.toFixed(6);}
+function elStr(s){s=Math.round(s||0);if(s<3600)return Math.floor(s/60)+'m '+String(s%60).padStart(2,'0')+'s';return Math.floor(s/3600)+'h '+(Math.floor(s/60)%60)+'m';}
+function renderEvents(d){
+  var wrap=g('eventsWrap');var rows=[];
+  (d.open||[]).forEach(function(t){
+    rows.push(
+      '<div class="trade-row">'+
+      '<div class="tr-time">'+elStr(t.elapsed_s)+'</div>'+
+      '<div class="tr-icon open">&#x2192;</div>'+
+      '<div class="tr-body">'+
+        '<div class="tr-sym">'+t.symbol+'</div>'+
+        '<div class="tr-tags"><span class="tag tag-open">OPEN</span><span class="tag tag-bond">'+t.strategy.toUpperCase()+'</span></div>'+
+        '<div class="tr-detail">$'+t.amount.toFixed(2)+' &#xB7; BOND '+t.bond_entry.toFixed(1)+'%&#x2192;'+t.bond_high.toFixed(1)+'%</div>'+
+      '</div>'+
+      '<div class="tr-pnl" style="color:var(--muted)">OPEN</div>'+
+      '</div>');
+  });
+  (d.closed||[]).slice(0,8).forEach(function(t){
+    var win=(t.pnl||0)>0;
+    rows.push(
+      '<div class="trade-row">'+
+      '<div class="tr-time">'+elStr(t.elapsed_s||0)+'</div>'+
+      '<div class="tr-icon '+(win?'win':'loss')+'">'+(win?'&#x2713;':'&#x2717;')+'</div>'+
+      '<div class="tr-body">'+
+        '<div class="tr-sym">'+t.symbol+'</div>'+
+        '<div class="tr-tags"><span class="tag '+(win?'tag-win':'tag-loss')+'">'+(win?'WIN':'LOSS')+'</span><span class="tag tag-bond">'+(t.strategy||'').toUpperCase()+'</span></div>'+
+        '<div class="tr-detail">'+(t.exit_reason||t.result||'EXIT')+'</div>'+
+      '</div>'+
+      '<div class="tr-pnl '+(win?'pos':'neg')+'">'+(win?'+':'')+' $'+Math.abs(t.pnl||0).toFixed(2)+'</div>'+
+      '</div>');
+  });
+  if(!rows.length)rows.push('<div style="font-family:monospace;font-size:9px;color:var(--muted);text-align:center;padding:20px">No events yet</div>');
+  wrap.innerHTML=rows.join('');
 }
 
+// API POLL
+function poll(){
+  fetch('/live/api').then(function(r){return r.json();}).then(function(d){
+    document.getElementById('capVal').textContent='$'+d.capital.toFixed(2);
+    document.getElementById('todayVal').textContent=d.today.trades+'T '+d.today.wins+'W '+d.today.losses+'L';
+    var sc=g('scanStatus');if(sc)sc.textContent=d.scanning?(d.paused?'Paused':'Scanning'):'Stopped';
+    var mintSet=new Set((d.open||[]).map(function(t){return t.mint;}));
+    (d.open||[]).forEach(function(t){makePos(t);});
+    Object.keys(posCards).forEach(function(m){if(!mintSet.has(m)&&!dismissed.has(m)){var c=posCards[m];if(c&&c.card)c.card.style.display='none';}});
+    (d.open||[]).forEach(function(t){posTimers[t.mint]=t.elapsed_s;});
+    updateStack();
+    var sl=d.scan_log||[];
+    if(firstPoll){
+      firstPoll=false;
+      var seed=sl.slice(0,Math.min(4,sl.length));
+      seed.forEach(function(e){seenTs.add(e.ts);});
+      seed.slice().reverse().forEach(function(e){
+        var coin=entryToCoin(e);
+        scanHistory.unshift({coin:coin,result:e.result==='pass'?'pass':'fail'});
+      });
+      scanHistory.forEach(function(_,ci){fillCard(ci);applyFinalState(ci);});
+      nPass=scanHistory.filter(function(s){return s.result==='pass';}).length;
+      nFail=scanHistory.filter(function(s){return s.result==='fail';}).length;
+      g('st-n').textContent=(nPass+nFail)+' scanned';
+      g('st-p').innerHTML=nPass+' &#x2713;';
+      g('st-f').innerHTML=nFail+' &#x2717;';
+      if(sl.length>0&&sl[0].sym)g('snCoin').textContent=sl[0].sym;
+      sl.forEach(function(e){seenTs.add(e.ts);});
+      layout();
+    }else{
+      var fresh=sl.filter(function(e){return !seenTs.has(e.ts);});
+      fresh.forEach(function(e){seenTs.add(e.ts);});
+      fresh.slice().reverse().forEach(function(e){animQueue.push(e);});
+      drainQueue();
+    }
+    renderEvents(d);
+  }).catch(function(){});
+}
 poll();
-setInterval(poll, 3000);
+setInterval(poll,3000);
 </script>
 </body></html>"""
-    html = html.replace("Boogey's Treasure Chest", BOT_NAME)
+    html = html.replace("__BOT_NAME__", BOT_NAME)
     return html, 200
-
 @app.route("/learn/api", methods=["GET"])
 def learn_api():
     try:
