@@ -793,6 +793,13 @@ def get_pumpfun_coins():
                     coin.get("creation_time") or
                     0
                 )
+                # Detect pump.swap protocol: native SOL quote mint (all 1s = system program)
+                quote_mint = coin.get("quote_mint", "")
+                is_pump_swap = (
+                    quote_mint == "11111111111111111111111111111111"
+                    or bool(coin.get("pump_swap_pool"))
+                    or bool(coin.get("is_cashback_enabled"))
+                )
                 coins.append({
                     "mint":       mint,
                     "symbol":     coin.get("symbol", mint[:8]),
@@ -807,6 +814,7 @@ def get_pumpfun_coins():
                     "created_at": created_ts,
                     "last_trade": last_ts,
                     "complete":   False,
+                    "pump_swap":  is_pump_swap,
                 })
             log("info", f"pump.fun API: {len(coins)} live coins")
             if coins:
@@ -1130,7 +1138,7 @@ def lock_profit_to_usdc(profit_usd):
         log("warn", f"USDC lock error: {e}", "USDC")
 
 # ── TRADE EXECUTION ──────────────────────────────────────────────
-def execute_buy(mint, symbol, amount):
+def execute_buy(mint, symbol, amount, pump_swap=False):
     if PAPER_MODE:
         log("ok", f"[PAPER] Buy ${amount:.2f} -> {symbol}", symbol)
         return "PAPER_TX"
@@ -1140,13 +1148,14 @@ def execute_buy(mint, symbol, amount):
             log("err", "Cannot get SOL price — buy aborted", symbol)
             return None
         sol_amount = round(amount / sol_price, 6)
+        pool = "pump-swap" if pump_swap else "pump"
 
         res = _session.post(
             PUMPPORTAL,
             headers={"Content-Type": "application/json"},
             json={"publicKey": WALLET, "action": "buy", "mint": mint,
                   "denominatedInSol": "true", "amount": sol_amount,
-                  "slippage": 20, "priorityFee": 0.001, "pool": "pump"},
+                  "slippage": 20, "priorityFee": 0.001, "pool": pool},
             timeout=15
         )
         if res.status_code != 200:
@@ -1167,17 +1176,18 @@ def execute_buy(mint, symbol, amount):
         log("err", f"Buy error: {e}", symbol)
         return None
 
-def execute_sell(tokens, mint, symbol):
+def execute_sell(tokens, mint, symbol, pump_swap=False):
     if PAPER_MODE:
         log("ok", f"[PAPER] Sell {symbol}", symbol)
         return "PAPER_TX"
     try:
+        pool = "pump-swap" if pump_swap else "pump"
         res = _session.post(
             PUMPPORTAL,
             headers={"Content-Type": "application/json"},
             json={"publicKey": WALLET, "action": "sell", "mint": mint,
                   "denominatedInSol": "false", "amount": tokens,
-                  "slippage": 20, "priorityFee": 0.001, "pool": "pump"},
+                  "slippage": 20, "priorityFee": 0.001, "pool": pool},
             timeout=15
         )
         if res.status_code != 200:
@@ -1197,7 +1207,7 @@ def execute_sell(tokens, mint, symbol):
         return None
 
 # ── ENTER / EXIT ─────────────────────────────────────────────────
-def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, replies=0):
+def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, replies=0, pump_swap=False):
     global capital, _daily_trades
     if daily_limit_reached():
         return False
@@ -1213,7 +1223,7 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
         if capital < amount:
             return False
 
-    tx = execute_buy(mint, symbol, amount)
+    tx = execute_buy(mint, symbol, amount, pump_swap=pump_swap)
     if not tx:
         return False
 
@@ -1239,6 +1249,7 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
             "bond_slip_start":   None,
             "price_high":        entry_price,   # trailing SL tracks peak price
             "replies":           replies,
+            "pump_swap":         pump_swap,
         }
 
     log("ok", f"ENTER [{strategy.upper()}] ${amount:.2f} | bond={bond_entry:.1f}%", symbol)
@@ -1269,7 +1280,7 @@ def exit_trade(mint, price, reason, bond=0):
     notify(f"{emoji} {'WIN' if pnl>=0 else 'LOSS'} {trade['symbol']}",
            f"Reason: {reason}\nPnL: {sign}${pnl:.4f}\nHeld: {hold_m:.1f} min\nCapital: ${capital:.2f}")
 
-    execute_sell(trade["tokens"], mint, trade["symbol"])
+    execute_sell(trade["tokens"], mint, trade["symbol"], pump_swap=trade.get("pump_swap", False))
     with _copy_lock:
         _sold_mints[mint] = time.time()  # 30 min cooldown before re-buying
     record_daily_trade(won=(pnl > 0))
@@ -1710,7 +1721,7 @@ def scanner_loop():
                         if market and market["price"] > 0 and market["liq"] >= MIN_LIQ:
                             amt = trade_size()
                             log("ok", f"BUNDLE RIDE | bond={bond:.1f}% | sig={sig_score}", symbol)
-                            enter_trade(mint, symbol, market["price"], amt, "bundle", bond, 0)
+                            enter_trade(mint, symbol, market["price"], amt, "bundle", bond, 0, pump_swap=coin.get("pump_swap", False))
                             time.sleep(0.5)
                             continue
 
@@ -1771,7 +1782,7 @@ def scanner_loop():
                     amt = trade_size()
                     log("ok", f"BOND RUNNER | bond={bond:.1f}% | sig={sig_score}", symbol)
                     _log_scan(symbol, mint, bond, _sig_pre, "pass", -1, f"TRADE ENTERED · ${amt:.2f}")
-                    enter_trade(mint, symbol, market["price"], amt, "bond", bond, 0)
+                    enter_trade(mint, symbol, market["price"], amt, "bond", bond, 0, pump_swap=coin.get("pump_swap", False))
                     time.sleep(0.5)
                     continue
 
@@ -1799,7 +1810,7 @@ def scanner_loop():
                             continue
                     amt = trade_size()
                     log("ok", f"TRENCH | bond={bond:.1f}% | sig={sig_score}", symbol)
-                    enter_trade(mint, symbol, market["price"], amt, "trench", bond, 0)
+                    enter_trade(mint, symbol, market["price"], amt, "trench", bond, 0, pump_swap=coin.get("pump_swap", False))
                     time.sleep(0.5)
                     continue
 
@@ -1835,7 +1846,7 @@ def scanner_loop():
                         sig_score = gmgn_signal_score(mint)
                         amt = trade_size()
                         log("ok", f"DORMANT SPIKE | age={age_h:.1f}h 1h={market['change1h']:+.0f}% | sig={sig_score}", symbol)
-                        enter_trade(mint, symbol, market["price"], amt, "spike", bond, 0)
+                        enter_trade(mint, symbol, market["price"], amt, "spike", bond, 0, pump_swap=coin.get("pump_swap", False))
                         time.sleep(0.5)
 
                 time.sleep(0.2)
