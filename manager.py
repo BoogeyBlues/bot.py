@@ -24,23 +24,25 @@ DRIFT_PORT = int(os.environ.get("DRIFT_PORT", "5001"))
 
 BOTS = [
     {
-        "name":      "sniper",
-        "cmd":       [PYTHON, "bot.py"],
+        "name":       "sniper",
+        "cmd":        [PYTHON, "bot.py"],
         "health_url": f"http://localhost:{PORT}/status/api",
-        "startup_s":  0,          # start immediately
+        "startup_s":  0,           # start immediately
+        "port":       PORT,
     },
     {
-        "name":      "drift",
-        "cmd":       [PYTHON, "drift_bot.py"],
+        "name":       "drift",
+        "cmd":        [PYTHON, "drift_bot.py"],
         "health_url": f"http://localhost:{DRIFT_PORT}/status/api",
-        "startup_s":  3,          # 3-second stagger so ports don't race
+        "startup_s":  3,           # 3-second stagger so ports don't race
+        "port":       DRIFT_PORT,
     },
 ]
 
-_procs   = {}          # name -> Popen
-_lock    = threading.Lock()
-_running = True
-_restarts = {}         # name -> count
+_procs    = {}          # name -> Popen
+_lock     = threading.Lock()
+_running  = True
+_restarts = {}          # name -> count
 
 def ts():
     return time.strftime("%H:%M:%S")
@@ -52,11 +54,17 @@ def log(name, msg):
 # ── Bot watcher ───────────────────────────────────────────────────────────────
 
 def _start(bot) -> subprocess.Popen:
+    # Give each bot its own PORT so Railway's injected PORT doesn't cause
+    # both processes to bind the same address.
+    env = dict(os.environ)
+    env["PORT"]       = str(bot["port"])
+    env["DRIFT_PORT"] = str(DRIFT_PORT)   # always visible to both
     proc = subprocess.Popen(
         bot["cmd"],
         stdout=sys.stdout,
         stderr=sys.stderr,
         cwd=BASE_DIR,
+        env=env,
     )
     with _lock:
         _procs[bot["name"]] = proc
@@ -72,7 +80,7 @@ def _watch(bot):
     time.sleep(bot.get("startup_s", 0))
 
     while _running:
-        log(name, f"Starting (restart #{_restarts.get(name, 0)})")
+        log(name, f"Starting on port {bot['port']} (restart #{_restarts.get(name, 0)})")
         proc = _start(bot)
         rc   = proc.wait()       # blocks until the process exits
         if not _running:
@@ -95,7 +103,7 @@ def _health_loop():
             try:
                 r = _req.get(bot["health_url"], timeout=6)
                 if r.status_code == 200:
-                    log(bot["name"], f"healthy ✓")
+                    log(bot["name"], "healthy ✓")
                 else:
                     log(bot["name"], f"health check returned {r.status_code}")
             except Exception as e:
@@ -149,7 +157,7 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT,  _shutdown)
 
     log("MGR", f"Production manager online | python={PYTHON}")
-    log("MGR", f"Supervising: {[b['name'] for b in BOTS]}")
+    log("MGR", f"sniper → port {PORT} | drift → port {DRIFT_PORT}")
 
     threads = []
     for bot in BOTS:
