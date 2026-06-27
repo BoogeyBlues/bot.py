@@ -3122,5 +3122,5 @@ if __name__ == "__main__":
         f"Capital: ${_capital:.2f}"
     )
 
-    _port = int(os.environ.get("PORT", DRIFT_PORT))
+    _port = int(os.environ.get("DRIFT_PORT", os.environ.get("PORT", DRIFT_PORT)))
     app.run(host="0.0.0.0", port=_port, debug=False)
