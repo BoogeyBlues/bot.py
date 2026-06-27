@@ -32,8 +32,7 @@ jobs:
       - name: Baseline syntax check (before)
         run: |
           echo "=== BEFORE ==="
-          python -m py_compile bot.py       && echo "bot.py       OK" || echo "bot.py       FAIL"
-          python -m py_compile drift_bot.py && echo "drift_bot.py OK" || echo "drift_bot.py FAIL"
+          python -m py_compile bot.py && echo "bot.py OK" || echo "bot.py FAIL"
 
       - name: Claude diagnostic and auto-repair
         uses: anthropics/claude-code-action@beta
@@ -42,27 +41,25 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           allowed_tools: "Bash,Read,Edit,Write,Grep,Glob"
           direct_prompt: |
-            You are running daily diagnostics on two live trading bots in this repository.
+            You are running daily diagnostics on the PumpFun sniper bot in this repository.
+            The only file to check and repair is bot.py. Do NOT touch any other file.
             Fix every issue you find. Make no changes if nothing is wrong.
 
-            FILES:
-            - bot.py        — PumpFun sniper bot (Flask, ~4100 lines)
-            - drift_bot.py  — Drift perpetuals bot (Flask, ~2100 lines)
+            FILE: bot.py — PumpFun sniper bot (Flask, ~4100 lines)
 
-            CHECKS TO RUN ON BOTH FILES:
+            CHECKS TO RUN:
 
-            1. SYNTAX — run: python -m py_compile bot.py && python -m py_compile drift_bot.py
+            1. SYNTAX — run: python -m py_compile bot.py
 
             2. UNDEFINED VARIABLES — any variable used before it is assigned in the
                same scope (especially in loops and background threads)
 
             3. THREAD SAFETY — shared mutable state accessed without the correct lock:
-               bot.py locks: capital_lock (capital), trades_lock (open_trades),
+               Locks: capital_lock (capital), trades_lock (open_trades),
                  log_lock (completed_trades, trade_log), _daily_lock (_daily_*),
                  _copy_lock (_copy_wallets, _copied_mints, _sold_mints),
                  _signal_lock (all _gmgn_* sets), usdc_lock (usdc_locked)
-               drift_bot.py lock: _state_lock (all shared state)
-               Lock ordering rule in bot.py: capital_lock ALWAYS acquired before _daily_lock
+               Lock ordering rule: capital_lock ALWAYS acquired before _daily_lock
 
             4. FLASK ROUTES — every @app.route handler:
                - Must return a value (None → 500)
@@ -78,24 +75,23 @@ jobs:
 
             7. IMPORT ERRORS — any import that could fail at runtime
 
-            After all fixes run python -m py_compile on both files and confirm clean.
+            After all fixes run python -m py_compile bot.py and confirm clean.
             Do NOT change working logic, refactor, or add features — correctness fixes only.
 
       - name: Confirm syntax clean (after)
         run: |
           echo "=== AFTER ==="
-          python -m py_compile bot.py       && echo "bot.py       OK" || (echo "bot.py       STILL BROKEN" && exit 1)
-          python -m py_compile drift_bot.py && echo "drift_bot.py OK" || (echo "drift_bot.py STILL BROKEN" && exit 1)
+          python -m py_compile bot.py && echo "bot.py OK" || (echo "bot.py STILL BROKEN" && exit 1)
 
       - name: Commit and push repairs
         run: |
           git config user.name  "BoogeyBot Auto-Repair"
           git config user.email "autorepair@noreply.github.com"
           if git diff --quiet; then
-            echo "Both bots healthy — no changes needed"
+            echo "Sniper bot healthy — no changes needed"
           else
-            git add bot.py drift_bot.py
-            git commit -m "Auto-repair $(date +%Y-%m-%d): daily diagnostic fixes"
+            git add bot.py
+            git commit -m "Auto-repair $(date +%Y-%m-%d): sniper bot diagnostic fixes"
             git push origin main
             echo "Fixes committed and pushed"
           fi
