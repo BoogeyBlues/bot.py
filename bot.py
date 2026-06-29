@@ -3100,6 +3100,19 @@ document.addEventListener('keydown', e => {{ if(e.key==='Escape') closeModal(); 
 </body></html>"""
     return html, 200
 
+@app.route("/admin/reset-daily", methods=["POST"])
+def admin_reset_daily():
+    global _daily_trades, _daily_wins, _daily_losses, _pause_until, _daily_cap_notified
+    with _daily_lock:
+        _daily_trades        = 0
+        _daily_wins          = 0
+        _daily_losses        = 0
+        _pause_until         = 0.0
+        _daily_cap_notified  = False
+    _save_daily_state()
+    log("ok", "Daily state reset via /admin/reset-daily")
+    return jsonify({"ok": True, "msg": "Daily counters reset — bot will resume trading"})
+
 @app.route("/log", methods=["GET"])
 def get_log():
     return jsonify({"logs": trade_log[-100:]})
