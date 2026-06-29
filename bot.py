@@ -98,9 +98,9 @@ TRENCH_MAX_SECS  = int(os.environ.get("TRENCH_MAX_SECS",    "90"))  # 90s — ve
 
 # Migration bounce — coins that just graduated to Raydium (first 2 min momentum)
 MIGRATE_MAX_AGE  = int(os.environ.get("MIGRATE_MAX_AGE",    "120")) # enter within 2 min of graduation
-MIGRATE_TP_PCT   = float(os.environ.get("MIGRATE_TP_PCT",   "30"))
+MIGRATE_TP_PCT   = float(os.environ.get("MIGRATE_TP_PCT",   "100"))
 MIGRATE_SL_PCT   = float(os.environ.get("MIGRATE_SL_PCT",   "12"))
-MIGRATE_MAX_SECS = int(os.environ.get("MIGRATE_MAX_SECS",   "120"))
+MIGRATE_MAX_SECS = int(os.environ.get("MIGRATE_MAX_SECS",   "300"))
 GRAD_THROUGH     = os.environ.get("GRAD_THROUGH", "true").lower() != "false"  # hold bond positions through graduation to Raydium
 
 # Exit protection
