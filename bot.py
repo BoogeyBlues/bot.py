@@ -1221,6 +1221,7 @@ def execute_sell(tokens, mint, symbol, pump_swap=False, raydium=False):
 def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, replies=0, pump_swap=False, raydium=False):
     global capital, _daily_trades
     if daily_limit_reached():
+        _log_scan(symbol, mint, bond_entry, 0, "cap", -1, "DAILY CAP / COOLDOWN")
         return False
     with trades_lock:
         if mint in open_trades or len(open_trades) >= MAX_OPEN:
@@ -1689,6 +1690,9 @@ def scanner_loop():
                 with trades_lock:
                     if len(open_trades) >= MAX_OPEN:
                         break
+                if daily_limit_reached():
+                    log("info", "Daily cap/cooldown active — skipping remaining coins")
+                    break
                 mint      = coin["mint"]
                 symbol    = coin["symbol"]
                 _bond_pre = coin.get("bond_pct", 0)
@@ -1787,6 +1791,7 @@ def scanner_loop():
                         continue
                     if gmgn_smart_money_selling(mint):
                         log("warn", "SKIP: smart money selling", symbol)
+                        _log_scan(symbol, mint, bond, _sig_pre, "sm", 6, "SMART $ SELLING")
                         continue
                     sig_score = gmgn_signal_score(mint)
 
@@ -1820,6 +1825,7 @@ def scanner_loop():
                     if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
                         continue
                     if gmgn_smart_money_selling(mint):
+                        _log_scan(symbol, mint, bond, _sig_pre, "sm", 6, "SMART $ SELLING")
                         continue
                     sig_score = gmgn_signal_score(mint)
                     market = get_market_data(mint)
