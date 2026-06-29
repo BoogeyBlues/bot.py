@@ -101,6 +101,7 @@ MIGRATE_MAX_AGE  = int(os.environ.get("MIGRATE_MAX_AGE",    "120")) # enter with
 MIGRATE_TP_PCT   = float(os.environ.get("MIGRATE_TP_PCT",   "30"))
 MIGRATE_SL_PCT   = float(os.environ.get("MIGRATE_SL_PCT",   "12"))
 MIGRATE_MAX_SECS = int(os.environ.get("MIGRATE_MAX_SECS",   "120"))
+GRAD_THROUGH     = os.environ.get("GRAD_THROUGH", "true").lower() != "false"  # hold bond positions through graduation to Raydium
 
 # Exit protection
 SLIP_TRIGGER   = float(os.environ.get("SLIP_TRIGGER",  "90"))
@@ -1138,7 +1139,7 @@ def lock_profit_to_usdc(profit_usd):
         log("warn", f"USDC lock error: {e}", "USDC")
 
 # ── TRADE EXECUTION ──────────────────────────────────────────────
-def execute_buy(mint, symbol, amount, pump_swap=False):
+def execute_buy(mint, symbol, amount, pump_swap=False, raydium=False):
     if PAPER_MODE:
         log("ok", f"[PAPER] Buy ${amount:.2f} -> {symbol}", symbol)
         return "PAPER_TX"
@@ -1148,7 +1149,12 @@ def execute_buy(mint, symbol, amount, pump_swap=False):
             log("err", "Cannot get SOL price — buy aborted", symbol)
             return None
         sol_amount = round(amount / sol_price, 6)
-        pool = "pump-swap" if pump_swap else "pump"
+        if raydium:
+            pool = "raydium"
+        elif pump_swap:
+            pool = "pump-swap"
+        else:
+            pool = "pump"
 
         res = _session.post(
             PUMPPORTAL,
@@ -1176,12 +1182,17 @@ def execute_buy(mint, symbol, amount, pump_swap=False):
         log("err", f"Buy error: {e}", symbol)
         return None
 
-def execute_sell(tokens, mint, symbol, pump_swap=False):
+def execute_sell(tokens, mint, symbol, pump_swap=False, raydium=False):
     if PAPER_MODE:
         log("ok", f"[PAPER] Sell {symbol}", symbol)
         return "PAPER_TX"
     try:
-        pool = "pump-swap" if pump_swap else "pump"
+        if raydium:
+            pool = "raydium"
+        elif pump_swap:
+            pool = "pump-swap"
+        else:
+            pool = "pump"
         res = _session.post(
             PUMPPORTAL,
             headers={"Content-Type": "application/json"},
@@ -1207,7 +1218,7 @@ def execute_sell(tokens, mint, symbol, pump_swap=False):
         return None
 
 # ── ENTER / EXIT ─────────────────────────────────────────────────
-def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, replies=0, pump_swap=False):
+def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, replies=0, pump_swap=False, raydium=False):
     global capital, _daily_trades
     if daily_limit_reached():
         return False
@@ -1223,7 +1234,7 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
         if capital < amount:
             return False
 
-    tx = execute_buy(mint, symbol, amount, pump_swap=pump_swap)
+    tx = execute_buy(mint, symbol, amount, pump_swap=pump_swap, raydium=raydium)
     if not tx:
         return False
 
@@ -1250,6 +1261,7 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
             "price_high":        entry_price,   # trailing SL tracks peak price
             "replies":           replies,
             "pump_swap":         pump_swap,
+            "raydium":           raydium,
         }
 
     log("ok", f"ENTER [{strategy.upper()}] ${amount:.2f} | bond={bond_entry:.1f}%", symbol)
@@ -1280,7 +1292,7 @@ def exit_trade(mint, price, reason, bond=0):
     notify(f"{emoji} {'WIN' if pnl>=0 else 'LOSS'} {trade['symbol']}",
            f"Reason: {reason}\nPnL: {sign}${pnl:.4f}\nHeld: {hold_m:.1f} min\nCapital: ${capital:.2f}")
 
-    execute_sell(trade["tokens"], mint, trade["symbol"], pump_swap=trade.get("pump_swap", False))
+    execute_sell(trade["tokens"], mint, trade["symbol"], pump_swap=trade.get("pump_swap", False), raydium=trade.get("raydium", False))
     with _copy_lock:
         _sold_mints[mint] = time.time()  # 30 min cooldown before re-buying
     record_daily_trade(won=(pnl > 0))
@@ -1409,6 +1421,16 @@ def monitor_loop():
             else:
                 tsl_price = trade["entry"] * (1 - BOND_SL_PCT / 100)
 
+            # Graduation follow-through: bond position graduated — ride on Raydium via migrate rules
+            if strategy == "bond" and GRAD_THROUGH and details and details.get("complete"):
+                with trades_lock:
+                    if mint in open_trades:
+                        open_trades[mint]["strategy"]       = "migrate"
+                        open_trades[mint]["raydium"]        = True
+                        open_trades[mint]["grad_opened_at"] = time.time()
+                strategy = "migrate"
+                log("ok", f"GRADUATED → riding on Raydium (bond={bond:.1f}%)", symbol)
+
             # Bond Runner exits
             if strategy == "bond":
                 if bond >= BOND_TP:
@@ -1470,6 +1492,8 @@ def monitor_loop():
 
             # Migration bounce exits — Raydium momentum after graduation
             if strategy == "migrate":
+                # grad_opened_at resets the clock at graduation so full MIGRATE_MAX_SECS applies
+                migrate_elapsed = time.time() - trade.get("grad_opened_at", trade["opened_at"])
                 move = ((price - trade["entry"]) / trade["entry"]) * 100
                 if move >= MIGRATE_TP_PCT:
                     exit_trade(mint, price, "MIGRATE_TP", bond)
@@ -1478,7 +1502,7 @@ def monitor_loop():
                     reason = "MIGRATE_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "MIGRATE_SL"
                     exit_trade(mint, price, reason, bond)
                     continue
-                if elapsed >= MIGRATE_MAX_SECS:
+                if migrate_elapsed >= MIGRATE_MAX_SECS:
                     exit_trade(mint, price, "MIGRATE_TIME", bond)
                     continue
 
@@ -1895,7 +1919,7 @@ def scanner_loop():
                 log("ok", f"MIGRATION | {gc['grad_age']}s ago | liq=${market['liq']:.0f} | sig={sig_score}", gc["symbol"])
                 notify(f"🚀 MIGRATION {gc['symbol']}",
                        f"Just graduated to Raydium!\nAge: {gc['grad_age']}s\nLiq: ${market['liq']:.0f}\nAmount: ${amt:.2f}")
-                enter_trade(gmint, gc["symbol"], market["price"], amt, "migrate", 0, 0)
+                enter_trade(gmint, gc["symbol"], market["price"], amt, "migrate", 0, 0, raydium=True)
                 time.sleep(0.5)
 
             # ── GMGN Signal Scan ─────────────────────────────────────
