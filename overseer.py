@@ -91,7 +91,7 @@ def _claude(system, user_msg, max_tokens=2048):
 
 def _extract_json(text):
     s, e = text.find("{"), text.rfind("}") + 1
-    return json.loads(text[s:e]) if s != -1 and e > 0 else {}
+    return json.loads(text[s:e]) if s != -1 and e > s else {}
 
 # ── 1. Health monitor ─────────────────────────────────────────────────────────
 def _health_loop():
@@ -247,15 +247,19 @@ def _git_push():
         subprocess.run(["git", "commit", "-m", f"overseer: autonomous improvement [{stamp}]"],
                        cwd=BASE_DIR, check=True, capture_output=True)
         push_target = f"HEAD:{GIT_BRANCH}"
+        pushed = False
         if GITHUB_TOKEN:
             remote_url = subprocess.run(["git", "remote", "get-url", "origin"],
                                         cwd=BASE_DIR, capture_output=True, text=True).stdout.strip()
-            if "https://" in remote_url:
+            if "https://" in remote_url and GITHUB_TOKEN not in remote_url:
                 auth_url = remote_url.replace("https://", f"https://{GITHUB_TOKEN}@")
-                subprocess.run(["git", "push", auth_url, push_target], cwd=BASE_DIR, check=True, capture_output=True)
-                log("SHIP", f"Pushed to {GIT_BRANCH}")
-                return True
-        subprocess.run(["git", "push", "origin", push_target], cwd=BASE_DIR, check=True, capture_output=True)
+                try:
+                    subprocess.run(["git", "push", auth_url, push_target], cwd=BASE_DIR, check=True, capture_output=True)
+                    pushed = True
+                except subprocess.CalledProcessError as auth_err:
+                    log("SHIP", f"Auth push failed, trying plain: {auth_err.stderr.decode(errors='replace')[:200] if auth_err.stderr else auth_err}")
+        if not pushed:
+            subprocess.run(["git", "push", "origin", push_target], cwd=BASE_DIR, check=True, capture_output=True)
         log("SHIP", f"Pushed to {GIT_BRANCH}")
         return True
     except subprocess.CalledProcessError as exc:
@@ -286,7 +290,7 @@ def _generate_patches():
         "Return {\"patches\": []} if no safe, high-confidence improvement exists."
     )
     sources_text = "\n\n".join(
-        f"=== {fn} (first 5000 chars) ===\n{src[:5000]}" for fn, src in sources.items()
+        f"=== {fn} (first 20000 chars) ===\n{src[:20000]}" for fn, src in sources.items()
     )
     raw = _claude(
         system,
@@ -304,38 +308,39 @@ def _generate_patches():
 def _idea_loop():
     time.sleep(360)
     while _running:
-        time.sleep(IDEA_INTERVAL)
         if not _HAS_CLAUDE:
             log("SHIP", "ANTHROPIC_API_KEY not set — skipping idea cycle")
+            time.sleep(IDEA_INTERVAL)
             continue
         log("SHIP", "Generating improvement patches")
         patches = _generate_patches()
         if not patches:
             log("SHIP", "No patches proposed")
-            continue
-        applied = 0
-        for patch in patches:
-            fname    = patch.get("file", "")
-            desc     = patch.get("description", "")
-            old_code = patch.get("old_code", "")
-            new_code = patch.get("new_code", "")
-            if not fname or not old_code or not new_code or old_code == new_code:
-                continue
-            fpath = os.path.join(BASE_DIR, fname)
-            if not os.path.exists(fpath):
-                log("SHIP", f"File not found: {fname}")
-                continue
-            log("SHIP", f"Applying: {desc}")
-            if _apply_patch(fpath, old_code, new_code):
-                log("SHIP", f"Applied: {desc}")
-                applied += 1
-            else:
-                log("SHIP", f"Rejected: {desc}")
-        if applied:
-            log("SHIP", f"{applied} patch(es) applied — pushing to {GIT_BRANCH}")
-            _git_push()
         else:
-            log("SHIP", "No patches applicable this cycle")
+            applied = 0
+            for patch in patches:
+                fname    = patch.get("file", "")
+                desc     = patch.get("description", "")
+                old_code = patch.get("old_code", "")
+                new_code = patch.get("new_code", "")
+                if not fname or not old_code or not new_code or old_code == new_code:
+                    continue
+                fpath = os.path.join(BASE_DIR, fname)
+                if not os.path.exists(fpath):
+                    log("SHIP", f"File not found: {fname}")
+                    continue
+                log("SHIP", f"Applying: {desc}")
+                if _apply_patch(fpath, old_code, new_code):
+                    log("SHIP", f"Applied: {desc}")
+                    applied += 1
+                else:
+                    log("SHIP", f"Rejected: {desc}")
+            if applied:
+                log("SHIP", f"{applied} patch(es) applied — pushing to {GIT_BRANCH}")
+                _git_push()
+            else:
+                log("SHIP", "No patches applicable this cycle")
+        time.sleep(IDEA_INTERVAL)
 
 # ── Minimal HTTP server so Railway keeps this service alive ───────────────────
 def _health_server():

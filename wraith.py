@@ -12,7 +12,7 @@ Usage:
   python wraith.py bot.py        # scan specific file(s)
   python wraith.py --json        # machine-readable JSON output
 
-Exit code: 0 = clean, 1 = findings, 2 = error
+Exit code: 0 = clean, 1 = HIGH/CRITICAL findings, 2 = error
 """
 import os, sys, json, shutil, subprocess
 
@@ -76,7 +76,7 @@ def _claude_sweep(fname, source):
         )
         raw  = resp.content[0].text
         s, e = raw.find("{"), raw.rfind("}") + 1
-        data = json.loads(raw[s:e]) if s != -1 else {}
+        data = json.loads(raw[s:e]) if s != -1 and e > s else {}
         return [
             {"pass": "claude", "severity": iss.get("severity", "?"),
              "line": iss.get("line"), "description": iss.get("description", "")}
@@ -116,6 +116,12 @@ def main():
     results  = scan(files)
     has_high = False
 
+    for fname, findings in results.items():
+        for f in findings:
+            if f.get("severity") in ("CRITICAL", "HIGH"):
+                has_high = True
+                break
+
     if as_json:
         print(json.dumps(results, indent=2))
     else:
@@ -129,8 +135,6 @@ def main():
                 ln   = f.get("line")
                 loc  = f"{fname}:{ln}" if ln else fname
                 print(f"[wraith] [{sev}] {loc} — {desc}")
-                if sev in ("CRITICAL", "HIGH"):
-                    has_high = True
 
     return 1 if has_high else 0
 
