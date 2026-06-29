@@ -1268,9 +1268,9 @@ def gmgn_trending_scan_loop():
                 details = get_bonding_details(mint)
                 bond = details["bond_pct"] if details else 0
                 if details and details.get("complete"):
-                    _trend_scanned.add(mint)  # already graduated — skip bond check
-                    # fall through to grad runner check below
-                elif bond > BOND_ENTRY_MAX:
+                    _trend_scanned.add(mint)  # already graduated — fall through to entry
+                elif bond > 99:
+                    # Only skip if fully on bonding curve and pump.fun confirmed it — shouldn't happen
                     _trend_scanned.add(mint)
                     continue
 
@@ -2072,10 +2072,10 @@ def scanner_loop():
                 if age_h >= SPIKE_MIN_AGE_H:
                     n_spike_range += 1
 
-                # ── Hype Scalp — multi-feed GMGN presence + social + momentum ──
+                # ── Hype Scalp — multi-feed GMGN presence + momentum ──
                 hype = coin.get("hype_score", 1)
                 has_social = bool(coin.get("twitter") or coin.get("telegram"))
-                if hype >= HYPE_MIN_FEEDS and has_social:
+                if hype >= HYPE_MIN_FEEDS:
                     market = get_market_data(mint)
                     if (market and market["price"] > 0
                             and market["liq"] >= HYPE_MIN_LIQ
