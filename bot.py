@@ -2243,6 +2243,7 @@ def home():
     <a href="/live" class="btn btn-ghost">📡 Live Feed</a>
     <a href="/trades" class="btn btn-ghost">💼 All Trades</a>
     <button class="btn btn-ghost" onclick="fetch('/admin/reset-daily',{{method:'POST'}}).then(r=>r.json()).then(d=>alert(d.msg)).catch(()=>alert('Failed'))">🔄 Reset Daily</button>
+    <button class="btn btn-ghost" onclick="if(confirm('Reset capital to ${STARTING_CAPITAL:.2f}?'))fetch('/admin/reset-capital',{{method:'POST'}}).then(r=>r.json()).then(d=>alert(d.msg)).catch(()=>alert('Failed'))">💰 Reset Capital</button>
   </div>
 
   <div class="cards">
@@ -3113,6 +3114,15 @@ def admin_reset_daily():
     _save_daily_state()
     log("ok", "Daily state reset via /admin/reset-daily")
     return jsonify({"ok": True, "msg": "Daily counters reset — bot will resume trading"})
+
+@app.route("/admin/reset-capital", methods=["POST"])
+def admin_reset_capital():
+    global capital
+    with capital_lock:
+        capital = STARTING_CAPITAL
+    _save_daily_state()
+    log("ok", f"Capital reset to ${STARTING_CAPITAL:.2f} via /admin/reset-capital")
+    return jsonify({"ok": True, "msg": f"Capital reset to ${STARTING_CAPITAL:.2f}"})
 
 @app.route("/log", methods=["GET"])
 def get_log():
