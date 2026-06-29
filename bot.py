@@ -1691,7 +1691,7 @@ def scanner_loop():
                     if len(open_trades) >= MAX_OPEN:
                         break
                 if daily_limit_reached():
-                    log("info", "Daily cap/cooldown active — skipping remaining coins")
+                    _log_scan(coin.get("symbol","?"), coin.get("mint",""), coin.get("bond_pct",0), 0, "cap", -1, "DAILY CAP / COOLDOWN")
                     break
                 mint      = coin["mint"]
                 symbol    = coin["symbol"]
