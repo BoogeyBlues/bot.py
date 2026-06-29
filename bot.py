@@ -1265,6 +1265,7 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
         }
 
     log("ok", f"ENTER [{strategy.upper()}] ${amount:.2f} | bond={bond_entry:.1f}%", symbol)
+    _log_scan(symbol, mint, bond_entry, 0, "pass", -1, f"ENTERED [{strategy.upper()}] ${amount:.2f}")
     notify(f"🟢 BUY {symbol}",
            f"Strategy: {strategy.upper()}\nAmount: ${amount:.2f}\nBond: {bond_entry:.1f}%\nReplies: {replies}")
     return True
@@ -1805,7 +1806,6 @@ def scanner_loop():
 
                     amt = trade_size()
                     log("ok", f"BOND RUNNER | bond={bond:.1f}% | sig={sig_score}", symbol)
-                    _log_scan(symbol, mint, bond, _sig_pre, "pass", -1, f"TRADE ENTERED · ${amt:.2f}")
                     enter_trade(mint, symbol, market["price"], amt, "bond", bond, 0, pump_swap=coin.get("pump_swap", False))
                     time.sleep(0.5)
                     continue
