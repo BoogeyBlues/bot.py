@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Trade Log — Mockup</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#050a14;--bg2:#080f1e;--bg3:#0d1628;--cyan:#00e5ff;--green:#00ff88;--red:#ff3355;--yellow:#ffee00;--text:#c8d8f0;--muted:#4a6080}
+body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}
+.orb{position:fixed;border-radius:50%;pointer-events:none;z-index:0;filter:blur(80px);opacity:.15}
+.orb-cyan{width:320px;height:320px;top:-60px;left:calc(50% - 160px);background:radial-gradient(circle,var(--cyan),transparent 70%);animation:orbF 9s ease-in-out infinite}
+.orb-green{width:260px;height:260px;bottom:-40px;right:calc(50% - 220px);background:radial-gradient(circle,var(--green),transparent 70%);animation:orbF 9s ease-in-out infinite reverse}
+@keyframes orbF{0%,100%{transform:translate(0,0)}50%{transform:translate(20px,30px)}}
+#particles{position:fixed;inset:0;z-index:0;pointer-events:none}
+.wrapper{max-width:430px;margin:0 auto;position:relative;z-index:1;min-height:100vh}
+
+/* NAV */
+nav{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(5,10,20,.92);backdrop-filter:blur(12px);border-bottom:1px solid rgba(0,229,255,.12);display:flex;align-items:center;justify-content:space-between;padding:0 18px;height:50px;max-width:430px;margin:0 auto}
+.nav-logo{font-family:'Bebas Neue',sans-serif;font-size:19px;color:var(--cyan);letter-spacing:2px;text-shadow:0 0 12px rgba(0,229,255,.5)}
+.nav-links{display:flex;gap:14px}
+.nav-link{font-size:10px;font-weight:600;letter-spacing:1.5px;color:var(--muted);text-decoration:none;text-transform:uppercase;transition:color .2s}
+.nav-link.active,.nav-link:hover{color:var(--cyan)}
+
+.scroll-area{padding-top:50px;padding-bottom:60px}
+
+/* HERO */
+.hero-scene{display:flex;align-items:center;gap:10px;padding:18px 14px 6px}
+.page-title{font-family:'Bebas Neue',sans-serif;font-size:46px;line-height:.95;color:var(--cyan);text-shadow:0 0 22px rgba(0,229,255,.5);letter-spacing:2px}
+.page-sub{font-size:9px;font-weight:700;letter-spacing:2.5px;color:var(--muted);text-transform:uppercase;margin-top:5px}
+.live-badge{display:inline-flex;align-items:center;gap:5px;background:rgba(0,229,255,.07);border:1px solid rgba(0,229,255,.18);padding:3px 9px;border-radius:20px;font-size:9px;font-weight:700;letter-spacing:1px;color:var(--cyan);margin-top:8px}
+.bdot{width:5px;height:5px;border-radius:50%;background:var(--green);animation:blink 1.2s ease-in-out infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.15}}
+
+/* STATS */
+.stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:2px;padding:8px 12px;margin-bottom:2px}
+.stat{background:rgba(13,22,40,.8);border:1px solid rgba(0,229,255,.07);padding:9px 6px;text-align:center}
+.stat-lbl{font-size:7.5px;font-weight:700;letter-spacing:1.5px;color:var(--muted);text-transform:uppercase}
+.stat-val{font-family:'Bebas Neue',sans-serif;font-size:19px;margin-top:2px}
+.cyan{color:var(--cyan)}.green{color:var(--green)}.red{color:var(--red)}
+
+/* TICKER */
+.ticker-wrap{overflow:hidden;background:rgba(0,229,255,.03);border-top:1px solid rgba(0,229,255,.09);border-bottom:1px solid rgba(0,229,255,.09);padding:5px 0;margin-bottom:14px}
+.ticker-track{display:flex;gap:28px;white-space:nowrap;animation:tick 20s linear infinite}
+@keyframes tick{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
+.ti{font-size:10px;font-weight:700;letter-spacing:.8px;font-family:'JetBrains Mono',monospace}
+.ti-g{color:var(--green)}.ti-r{color:var(--red)}
+
+/* SHEET SECTION */
+.sheet-section{padding:0 12px 24px}
+.sheet-label{font-size:9px;font-weight:700;letter-spacing:2px;color:var(--muted);text-transform:uppercase;margin-bottom:8px;padding-left:2px}
+
+/* FLOATING SPREADSHEET */
+.sheet-outer{
+  border-radius:5px;
+  background:#05091a;
+  box-shadow:
+    0 0 0 1px rgba(0,229,255,.16),
+    0 16px 50px rgba(0,0,0,.85),
+    6px 6px 0 rgba(0,229,255,.05),
+    12px 12px 0 rgba(0,229,255,.025);
+  overflow:hidden;
+}
+/* Mac-style title bar = Excel window chrome */
+.sheet-titlebar{
+  background:#0a1525;
+  border-bottom:1px solid rgba(0,229,255,.12);
+  padding:6px 10px;
+  display:flex;
+  align-items:center;
+  gap:6px;
+}
+.tl{width:8px;height:8px;border-radius:50%}
+.tl-r{background:#ff5f56}.tl-y{background:#ffbd2e}.tl-g{background:#27c93f}
+.sheet-name{font-size:9.5px;font-weight:600;color:var(--muted);letter-spacing:.5px;margin:0 auto;font-family:'JetBrains Mono',monospace}
+
+/* FORMULA BAR */
+.formula-bar{
+  background:#06091a;
+  border-bottom:1px solid rgba(255,255,255,.05);
+  padding:4px 10px;
+  display:flex;
+  align-items:center;
+  gap:8px;
+  font-family:'JetBrains Mono',monospace;
+  font-size:9px;
+}
+.fx-label{color:var(--cyan);font-weight:700;font-size:10px}
+.fx-val{color:rgba(0,229,255,.5)}
+
+/* TABLE */
+.tbl-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+table{width:100%;border-collapse:collapse;font-size:9.5px;min-width:500px}
+/* column-letter header row */
+.col-hdr{background:#06091a;border-bottom:1px solid rgba(255,255,255,.05)}
+.col-hdr th{
+  font-family:'JetBrains Mono',monospace;
+  font-size:8px;
+  font-weight:600;
+  color:#2a3a50;
+  text-align:center;
+  padding:2px 0;
+  border-right:1px solid rgba(255,255,255,.03);
+  letter-spacing:0;
+}
+/* field header row */
+.fld-hdr th{
+  background:#080f1c;
+  color:#5a7090;
+  font-size:7.5px;
+  font-weight:700;
+  letter-spacing:1.5px;
+  text-transform:uppercase;
+  padding:6px 8px;
+  border-bottom:2px solid rgba(0,229,255,.14);
+  border-right:1px solid rgba(255,255,255,.04);
+  text-align:left;
+  white-space:nowrap;
+}
+.fld-hdr th.c-fig{text-align:center}
+.fld-hdr th.c-num{text-align:center;color:#253545}
+
+td{
+  padding:0 7px;
+  height:46px;
+  border-bottom:1px solid rgba(255,255,255,.04);
+  border-right:1px solid rgba(255,255,255,.03);
+  vertical-align:middle;
+  white-space:nowrap;
+}
+td.c-fig{padding:0;text-align:center;border-right:1px solid rgba(0,229,255,.08);background:#04081a}
+td.c-num{color:#253545;font-family:'JetBrains Mono',monospace;font-size:8px;text-align:center}
+tr:nth-child(even) td{background:rgba(255,255,255,.012)}
+tr:hover td{background:rgba(0,229,255,.04)!important}
+
+.c-market{font-weight:700;font-size:11px;letter-spacing:.5px}
+.c-side{font-weight:900;font-size:10px}
+.c-mono{font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text)}
+.c-pnl{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:11px;padding-left:6px!important;padding-right:6px!important}
+.c-pct{font-family:'JetBrains Mono',monospace;font-size:9px}
+.win{color:var(--green)}.los{color:var(--red)}
+.win-bg{background:rgba(0,255,136,.05)!important}.los-bg{background:rgba(255,51,85,.05)!important}
+.rbadge{display:inline-block;font-size:7px;font-weight:900;letter-spacing:1px;padding:2px 5px;border:1px solid;border-radius:2px}
+.rbadge-tp{color:var(--green);border-color:var(--green);background:rgba(0,255,136,.08)}
+.rbadge-sl{color:var(--red);border-color:var(--red);background:rgba(255,51,85,.08)}
+
+footer{padding:18px 16px;text-align:center;font-size:9px;color:var(--muted);border-top:1px solid rgba(255,255,255,.04)}
+</style>
+</head>
+<body>
+<div class="orb orb-cyan"></div>
+<div class="orb orb-green"></div>
+<canvas id="particles"></canvas>
+
+<div class="wrapper">
+<nav>
+  <span class="nav-logo">DRIFT SNIPER</span>
+  <div class="nav-links">
+    <a href="/" class="nav-link">HOME</a>
+    <a href="/trades" class="nav-link active">TRADES</a>
+    <a href="/monitor" class="nav-link">MONITOR</a>
+    <a href="https://jup.ag" class="nav-link" target="_blank">JUPITER ↗</a>
+  </div>
+</nav>
+
+<div class="scroll-area">
+
+<!-- HERO -->
+<div class="hero-scene">
+  <div style="flex-shrink:0">
+    <!-- Big analyst at dual monitors -->
+    <svg viewBox="0 0 158 118" width="158" height="118" style="display:block">
+      <!-- Desk surface -->
+      <line x1="6" y1="88" x2="152" y2="88" stroke="#0d1e30" stroke-width="3"/>
+      <line x1="18" y1="88" x2="18" y2="108" stroke="#0d1e30" stroke-width="2.5"/>
+      <line x1="140" y1="88" x2="140" y2="108" stroke="#0d1e30" stroke-width="2.5"/>
+
+      <!-- Monitor 1 -->
+      <rect x="50" y="32" width="36" height="28" rx="2" fill="#040810" stroke="#00e5ff" stroke-width="1.4"/>
+      <rect x="52" y="34" width="32" height="24" rx="1" fill="#00e5ff" fill-opacity=".04"/>
+      <!-- chart on screen 1 -->
+      <polyline points="55,52 61,46 67,48 73,40 79,44 83,38" fill="none" stroke="#00ff88" stroke-width="1.2"/>
+      <!-- stand + base -->
+      <line x1="68" y1="60" x2="68" y2="70" stroke="#0d1e30" stroke-width="2"/>
+      <line x1="62" y1="70" x2="74" y2="70" stroke="#0d1e30" stroke-width="2.2"/>
+      <!-- screen glow pulse -->
+      <rect x="52" y="34" width="32" height="24" fill="#00e5ff" fill-opacity="0">
+        <animate attributeName="fill-opacity" values="0;.07;0" dur="3s" repeatCount="indefinite"/>
+      </rect>
+
+      <!-- Monitor 2 (taller, right) -->
+      <rect x="94" y="24" width="44" height="36" rx="2" fill="#040810" stroke="#00e5ff" stroke-width="1.4"/>
+      <rect x="96" y="26" width="40" height="32" rx="1" fill="#00e5ff" fill-opacity=".03"/>
+      <!-- PnL list on screen 2 -->
+      <text x="99" y="36" fill="#00ff88" font-family="'JetBrains Mono',monospace" font-size="5.5">+$657 SOL</text>
+      <text x="99" y="44" fill="#00ff88" font-family="'JetBrains Mono',monospace" font-size="5.5">+$427 ETH</text>
+      <text x="99" y="52" fill="#ff3355" font-family="'JetBrains Mono',monospace" font-size="5.5">-$319 DOGE</text>
+      <line x1="96" y1="57" x2="136" y2="57" stroke="#ffffff08" stroke-width="1"/>
+      <!-- stand + base -->
+      <line x1="116" y1="60" x2="116" y2="70" stroke="#0d1e30" stroke-width="2"/>
+      <line x1="108" y1="70" x2="124" y2="70" stroke="#0d1e30" stroke-width="2.2"/>
+      <!-- screen glow pulse -->
+      <rect x="96" y="26" width="40" height="32" fill="#00e5ff" fill-opacity="0">
+        <animate attributeName="fill-opacity" values="0;.06;0" dur="3s" begin="1.5s" repeatCount="indefinite"/>
+      </rect>
+
+      <!-- Keyboard -->
+      <rect x="56" y="80" width="50" height="7" rx="1.5" fill="#0a1628"/>
+      <rect x="58" y="81.5" width="46" height="4" rx="1" fill="#0d1e30"/>
+
+      <!-- Coffee cup -->
+      <rect x="32" y="78" width="11" height="10" rx="1.5" fill="#0d1e30" stroke="#253545" stroke-width="1"/>
+      <path d="M43,81 Q48,81 48,84 Q48,87 43,87" fill="none" stroke="#253545" stroke-width="1"/>
+      <!-- steam lines -->
+      <line x1="35" y1="77" x2="34" y2="72" stroke="#253545" stroke-width="1" opacity=".5">
+        <animate attributeName="y1" values="77;76;77" dur="1.8s" repeatCount="indefinite"/>
+        <animate attributeName="y2" values="72;70;72" dur="1.8s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values=".5;.1;.5" dur="1.8s" repeatCount="indefinite"/>
+      </line>
+      <line x1="39" y1="77" x2="40" y2="72" stroke="#253545" stroke-width="1" opacity=".5">
+        <animate attributeName="y1" values="77;76;77" dur="2.1s" repeatCount="indefinite"/>
+        <animate attributeName="y2" values="72;70;72" dur="2.1s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values=".3;.7;.3" dur="2.1s" repeatCount="indefinite"/>
+      </line>
+
+      <!-- Chair back -->
+      <line x1="14" y1="54" x2="14" y2="80" stroke="#0d1e30" stroke-width="3"/>
+      <line x1="14" y1="58" x2="26" y2="58" stroke="#0d1e30" stroke-width="2.5"/>
+
+      <!-- Person -->
+      <!-- Head -->
+      <circle cx="28" cy="40" r="10" fill="none" stroke="#c8d8f0" stroke-width="2"/>
+      <!-- Eye (looking at monitors) -->
+      <circle cx="35" cy="39" r="2" fill="#c8d8f0"/>
+      <!-- Body -->
+      <line x1="28" y1="50" x2="28" y2="74" stroke="#c8d8f0" stroke-width="2.5"/>
+      <!-- Right arm typing - animated -->
+      <g>
+        <line x1="28" y1="58" x2="56" y2="80" stroke="#c8d8f0" stroke-width="2"/>
+        <animateTransform attributeName="transform" type="translate" values="0 0;0 -2;0 0" dur="0.32s" repeatCount="indefinite"/>
+      </g>
+      <!-- Left arm -->
+      <line x1="28" y1="58" x2="20" y2="70" stroke="#c8d8f0" stroke-width="2"/>
+      <line x1="20" y1="70" x2="50" y2="80" stroke="#c8d8f0" stroke-width="1.5"/>
+      <!-- Legs (sitting) -->
+      <line x1="28" y1="74" x2="16" y2="88" stroke="#c8d8f0" stroke-width="2"/>
+      <line x1="16" y1="88" x2="6" y2="88" stroke="#c8d8f0" stroke-width="1.5"/>
+      <line x1="28" y1="74" x2="38" y2="88" stroke="#c8d8f0" stroke-width="2"/>
+      <line x1="38" y1="88" x2="50" y2="88" stroke="#c8d8f0" stroke-width="1.5"/>
+    </svg>
+  </div>
+  <div style="flex:1">
+    <div class="page-title">TRADE<br>LOG</div>
+    <div class="page-sub">ANALYST DESK</div>
+    <div class="live-badge"><div class="bdot"></div>6 TRADES · 4 WINS</div>
+  </div>
+</div>
+
+<!-- STATS -->
+<div class="stats-row">
+  <div class="stat">
+    <div class="stat-lbl">TOTAL</div>
+    <div class="stat-val cyan">6</div>
+  </div>
+  <div class="stat">
+    <div class="stat-lbl">WIN RATE</div>
+    <div class="stat-val green">66.7%</div>
+  </div>
+  <div class="stat">
+    <div class="stat-lbl">TOT PNL</div>
+    <div class="stat-val green">+$1,559</div>
+  </div>
+  <div class="stat">
+    <div class="stat-lbl">BEST</div>
+    <div class="stat-val green">+$880</div>
+  </div>
+</div>
+
+<!-- TICKER -->
+<div class="ticker-wrap">
+  <div class="ticker-track">
+    <span class="ti ti-g">● SOL TP +$657</span>
+    <span class="ti ti-g">● ETH TP +$427</span>
+    <span class="ti ti-r">● DOGE SL −$319</span>
+    <span class="ti ti-g">● WIF TP +$880</span>
+    <span class="ti ti-g">● PEPE TP +$212</span>
+    <span class="ti ti-r">● BONK SL −$298</span>
+    <span class="ti ti-g">● SOL TP +$657</span>
+    <span class="ti ti-g">● ETH TP +$427</span>
+    <span class="ti ti-r">● DOGE SL −$319</span>
+    <span class="ti ti-g">● WIF TP +$880</span>
+    <span class="ti ti-g">● PEPE TP +$212</span>
+    <span class="ti ti-r">● BONK SL −$298</span>
+  </div>
+</div>
+
+<!-- SPREADSHEET -->
+<div class="sheet-section">
+  <div class="sheet-label">◆ ANALYST DESK — TRADE HISTORY</div>
+  <div class="sheet-outer">
+
+    <!-- Title bar -->
+    <div class="sheet-titlebar">
+      <div class="tl tl-r"></div>
+      <div class="tl tl-y"></div>
+      <div class="tl tl-g"></div>
+      <div class="sheet-name">TRADES_LOG.xlsx</div>
+    </div>
+
+    <!-- Formula bar -->
+    <div class="formula-bar">
+      <span class="fx-label">fx</span>
+      <span class="fx-val">=TRADE_LOG!A1:J7</span>
+    </div>
+
+    <div class="tbl-scroll">
+      <table>
+        <!-- Column letter row (Excel A B C D...) -->
+        <thead>
+        <tr class="col-hdr">
+          <th style="width:58px"></th>
+          <th style="width:28px">A</th>
+          <th style="width:80px">B</th>
+          <th style="width:52px">C</th>
+          <th style="width:72px">D</th>
+          <th style="width:72px">E</th>
+          <th style="width:70px">F</th>
+          <th style="width:52px">G</th>
+          <th style="width:44px">H</th>
+          <th style="width:36px">I</th>
+        </tr>
+        <!-- Field name row -->
+        <tr class="fld-hdr">
+          <th class="c-fig">ANALYST</th>
+          <th class="c-num">#</th>
+          <th>MARKET</th>
+          <th>SIDE</th>
+          <th>ENTRY</th>
+          <th>EXIT</th>
+          <th>PNL</th>
+          <th>%</th>
+          <th>CLOSE</th>
+          <th>DUR</th>
+        </tr>
+        </thead>
+
+        <tbody>
+
+          <!-- ROW 1: SOL WIN -->
+          <tr>
+            <td class="c-fig">
+              <svg viewBox="0 0 58 46" width="58" height="46" style="display:block;margin:0 auto">
+                <line x1="2" y1="38" x2="56" y2="38" stroke="#0d1e30" stroke-width="1.2"/>
+                <!-- monitor (green) -->
+                <rect x="30" y="6" width="20" height="15" rx="1.5" fill="#040810" stroke="#00ff88" stroke-width="1.2"/>
+                <rect x="32" y="8" width="16" height="11" fill="#00ff88" fill-opacity=".12"/>
+                <text x="35" y="16" fill="#00ff88" font-size="8" font-family="sans-serif">↑</text>
+                <line x1="40" y1="21" x2="40" y2="27" stroke="#0d1e30" stroke-width="1"/>
+                <line x1="36" y1="27" x2="44" y2="27" stroke="#0d1e30" stroke-width="1.2"/>
+                <!-- keyboard -->
+                <rect x="18" y="34" width="14" height="3" rx=".5" fill="#0a1628"/>
+                <!-- person WIN - arms raised -->
+                <circle cx="10" cy="9" r="5.5" fill="none" stroke="#00ff88" stroke-width="1.5"/>
+                <line x1="10" y1="14.5" x2="10" y2="28" stroke="#00ff88" stroke-width="1.5"/>
+                <!-- raised arms -->
+                <line x1="10" y1="20" x2="2" y2="12" stroke="#00ff88" stroke-width="1.5"/>
+                <line x1="10" y1="20" x2="18" y2="12" stroke="#00ff88" stroke-width="1.5"/>
+                <!-- legs sitting -->
+                <line x1="10" y1="28" x2="6" y2="38" stroke="#00ff88" stroke-width="1.5"/>
+                <line x1="6" y1="38" x2="3" y2="38" stroke="#00ff88" stroke-width="1"/>
+                <line x1="10" y1="28" x2="14" y2="38" stroke="#00ff88" stroke-width="1.5"/>
+                <line x1="14" y1="38" x2="18" y2="38" stroke="#00ff88" stroke-width="1"/>
+              </svg>
+            </td>
+            <td class="c-num">1</td>
+            <td class="c-market">SOL-PERP</td>
+            <td class="c-side win">LONG</td>
+            <td class="c-mono">$145.2300</td>
+            <td class="c-mono">$151.8000</td>
+            <td class="c-pnl win win-bg">+$657.00</td>
+            <td class="c-pct win">+4.5%</td>
+            <td><span class="rbadge rbadge-tp">TP</span></td>
+            <td class="c-mono" style="color:var(--muted)">14m</td>
+          </tr>
+
+          <!-- ROW 2: ETH WIN -->
+          <tr>
+            <td class="c-fig">
+              <svg viewBox="0 0 58 46" width="58" height="46" style="display:block;margin:0 auto">
+                <line x1="2" y1="38" x2="56" y2="38" stroke="#0d1e30" stroke-width="1.2"/>
+                <rect x="30" y="6" width="20" height="15" rx="1.5" fill="#040810" stroke="#00ff88" stroke-width="1.2"/>
+                <rect x="32" y="8" width="16" height="11" fill="#00ff88" fill-opacity=".12"/>
+                <text x="35" y="16" fill="#00ff88" font-size="8" font-family="sans-serif">↑</text>
+                <line x1="40" y1="21" x2="40" y2="27" stroke="#0d1e30" stroke-width="1"/>
+                <line x1="36" y1="27" x2="44" y2="27" stroke="#0d1e30" stroke-width="1.2"/>
+                <rect x="18" y="34" width="14" height="3" rx=".5" fill="#0a1628"/>
+                <circle cx="10" cy="9" r="5.5" fill="none" stroke="#00ff88" stroke-width="1.5"/>
+                <line x1="10" y1="14.5" x2="10" y2="28" stroke="#00ff88" stroke-width="1.5"/>
+                <line x1="10" y1="20" x2="2" y2="12" stroke="#00ff88" stroke-width="1.5"/>
+                <line x1="10" y1="20" x2="18" y2="12" stroke="#00ff88" stroke-width="1.5"/>
+                <line x1="10" y1="28" x2="6" y2="38" stroke="#00ff88" stroke-width="1.5"/>
+                <line x1="6" y1="38" x2="3" y2="38" stroke="#00ff88" stroke-width="1"/>
+                <line x1="10" y1="28" x2="14" y2="38" stroke="#00ff88" stroke-width="1.5"/>
+                <line x1="14" y1="38" x2="18" y2="38" stroke="#00ff88" stroke-width="1"/>
+              </svg>
+            </td>
+            <td class="c-num">2</td>
+            <td class="c-market">ETH-PERP</td>
+            <td class="c-side win">SHORT</td>
+            <td class="c-mono">$3241.1000</td>
+            <td class="c-mono">$3198.4000</td>
+            <td class="c-pnl win win-bg">+$427.00</td>
+            <td class="c-pct win">+10.7%</td>
+            <td><span class="rbadge rbadge-tp">TP</span></td>
+            <td class="c-mono" style="color:var(--muted)">8m</td>
+          </tr>
+
+          <!-- ROW 3: DOGE LOSS -->
+          <tr>
+            <td class="c-fig">
+              <svg viewBox="0 0 58 46" width="58" height="46" style="display:block;margin:0 auto">
+                <line x1="2" y1="38" x2="56" y2="38" stroke="#0d1e30" stroke-width="1.2"/>
+                <rect x="30" y="6" width="20" height="15" rx="1.5" fill="#040810" stroke="#ff3355" stroke-width="1.2"/>
+                <rect x="32" y="8" width="16" height="11" fill="#ff3355" fill-opacity=".1"/>
+                <text x="35" y="16" fill="#ff3355" font-size="8" font-family="sans-serif">↓</text>
+                <line x1="40" y1="21" x2="40" y2="27" stroke="#0d1e30" stroke-width="1"/>
+                <line x1="36" y1="27" x2="44" y2="27" stroke="#0d1e30" stroke-width="1.2"/>
+                <rect x="18" y="34" width="14" height="3" rx=".5" fill="#0a1628"/>
+                <!-- LOSS - head drooping down -->
+                <circle cx="10" cy="13" r="5.5" fill="none" stroke="#ff3355" stroke-width="1.5"/>
+                <line x1="10" y1="18.5" x2="9" y2="30" stroke="#ff3355" stroke-width="1.5"/>
+                <!-- arms still typing -->
+                <g>
+                  <line x1="9" y1="24" x2="18" y2="34" stroke="#ff3355" stroke-width="1.5"/>
+                  <line x1="9" y1="24" x2="22" y2="34" stroke="#ff3355" stroke-width="1.5"/>
+                  <animateTransform attributeName="transform" type="translate" values="0 0;0 -1.5;0 0" dur="0.35s" repeatCount="indefinite"/>
+                </g>
+                <line x1="9" y1="30" x2="5" y2="38" stroke="#ff3355" stroke-width="1.5"/>
+                <line x1="5" y1="38" x2="2" y2="38" stroke="#ff3355" stroke-width="1"/>
+                <line x1="9" y1="30" x2="13" y2="38" stroke="#ff3355" stroke-width="1.5"/>
+                <line x1="13" y1="38" x2="17" y2="38" stroke="#ff3355" stroke-width="1"/>
+              </svg>
+            </td>
+            <td class="c-num">3</td>
+            <td class="c-market">DOGE-PERP</td>
+            <td class="c-side win">LONG</td>
+            <td class="c-mono">$0.14230</td>
+            <td class="c-mono">$0.13390</td>
+            <td class="c-pnl los los-bg">−$319.00</td>
+            <td class="c-pct los">−7.9%</td>
+            <td><span class="rbadge rbadge-sl">SL</span></td>
+            <td class="c-mono" style="color:var(--muted)">22m</td>
+          </tr>
+
+          <!-- ROW 4: WIF WIN -->
+          <tr>
+            <td class="c-fig">
+              <svg viewBox="0 0 58 46" width="58" height="46" style="display:block;margin:0 auto">
+                <line x1="2" y1="38" x2="56" y2="38" stroke="#0d1e30" stroke-width="1.2"/>
+                <rect x="30" y="6" width="20" height="15" rx="1.5" fill="#040810" stroke="#00ff88" stroke-width="1.2"/>
+                <rect x="32" y="8" width="16" height="11" fill="#00ff88" fill-opacity=".12"/>
+                <text x="35" y="16" fill="#00ff88" font-size="8" font-family="sans-serif">↑</text>
+                <line x1="40" y1="21" x2="40" y2="27" stroke="#0d1e30" stroke-width="1"/>
+                <line x1="36" y1="27" x2="44" y2="27" stroke="#0d1e30" stroke-width="1.2"/>
+                <rect x="18" y="34" width="14" height="3" rx=".5" fill="#0a1628"/>
+                <circle cx="10" cy="9" r="5.5" fill="none" stroke="#00ff88" stroke-width="1.5"/>
+                <line x1="10" y1="14.5" x2="10" y2="28" stroke="#00ff88" stroke-width="1.5"/>
+                <line x1="10" y1="20" x2="2" y2="12" stroke="#00ff88" stroke-width="1.5"/>
+                <line x1="10" y1="20" x2="18" y2="12" stroke="#00ff88" stroke-width="1.5"/>
+                <line x1="10" y1="28" x2="6" y2="38" stroke="#00ff88" stroke-width="1.5"/>
+                <line x1="6" y1="38" x2="3" y2="38" stroke="#00ff88" stroke-width="1"/>
+                <line x1="10" y1="28" x2="14" y2="38" stroke="#00ff88" stroke-width="1.5"/>
+                <line x1="14" y1="38" x2="18" y2="38" stroke="#00ff88" stroke-width="1"/>
+              </svg>
+            </td>
+            <td class="c-num">4</td>
+            <td class="c-market">WIF-PERP</td>
+            <td class="c-side win">LONG</td>
+            <td class="c-mono">$2.3140</td>
+            <td class="c-mono">$2.4020</td>
+            <td class="c-pnl win win-bg">+$880.00</td>
+            <td class="c-pct win">+3.8%</td>
+            <td><span class="rbadge rbadge-tp">TP</span></td>
+            <td class="c-mono" style="color:var(--muted)">31m</td>
+          </tr>
+
+          <!-- ROW 5: PEPE WIN -->
+          <tr>
+            <td class="c-fig">
+              <svg viewBox="0 0 58 46" width="58" height="46" style="display:block;margin:0 auto">
+                <line x1="2" y1="38" x2="56" y2="38" stroke="#0d1e30" stroke-width="1.2"/>
+                <rect x="30" y="6" width="20" height="15" rx="1.5" fill="#040810" stroke="#00ff88" stroke-width="1.2"/>
+                <rect x="32" y="8" width="16" height="11" fill="#00ff88" fill-opacity=".12"/>
+                <text x="35" y="16" fill="#00ff88" font-size="8" font-family="sans-serif">↑</text>
+                <line x1="40" y1="21" x2="40" y2="27" stroke="#0d1e30" stroke-width="1"/>
+                <line x1="36" y1="27" x2="44" y2="27" stroke="#0d1e30" stroke-width="1.2"/>
+                <rect x="18" y="34" width="14" height="3" rx=".5" fill="#0a1628"/>
+                <circle cx="10" cy="9" r="5.5" fill="none" stroke="#00ff88" stroke-width="1.5"/>
+                <line x1="10" y1="14.5" x2="10" y2="28" stroke="#00ff88" stroke-width="1.5"/>
+                <line x1="10" y1="20" x2="2" y2="12" stroke="#00ff88" stroke-width="1.5"/>
+                <line x1="10" y1="20" x2="18" y2="12" stroke="#00ff88" stroke-width="1.5"/>
+                <line x1="10" y1="28" x2="6" y2="38" stroke="#00ff88" stroke-width="1.5"/>
+                <line x1="6" y1="38" x2="3" y2="38" stroke="#00ff88" stroke-width="1"/>
+                <line x1="10" y1="28" x2="14" y2="38" stroke="#00ff88" stroke-width="1.5"/>
+                <line x1="14" y1="38" x2="18" y2="38" stroke="#00ff88" stroke-width="1"/>
+              </svg>
+            </td>
+            <td class="c-num">5</td>
+            <td class="c-market">PEPE-PERP</td>
+            <td class="c-side red" style="color:var(--red)">SHORT</td>
+            <td class="c-mono">$0.0000142</td>
+            <td class="c-mono">$0.0000139</td>
+            <td class="c-pnl win win-bg">+$212.00</td>
+            <td class="c-pct win">+2.1%</td>
+            <td><span class="rbadge rbadge-tp">TP</span></td>
+            <td class="c-mono" style="color:var(--muted)">5m</td>
+          </tr>
+
+          <!-- ROW 6: BONK LOSS -->
+          <tr>
+            <td class="c-fig">
+              <svg viewBox="0 0 58 46" width="58" height="46" style="display:block;margin:0 auto">
+                <line x1="2" y1="38" x2="56" y2="38" stroke="#0d1e30" stroke-width="1.2"/>
+                <rect x="30" y="6" width="20" height="15" rx="1.5" fill="#040810" stroke="#ff3355" stroke-width="1.2"/>
+                <rect x="32" y="8" width="16" height="11" fill="#ff3355" fill-opacity=".1"/>
+                <text x="35" y="16" fill="#ff3355" font-size="8" font-family="sans-serif">↓</text>
+                <line x1="40" y1="21" x2="40" y2="27" stroke="#0d1e30" stroke-width="1"/>
+                <line x1="36" y1="27" x2="44" y2="27" stroke="#0d1e30" stroke-width="1.2"/>
+                <rect x="18" y="34" width="14" height="3" rx=".5" fill="#0a1628"/>
+                <circle cx="10" cy="13" r="5.5" fill="none" stroke="#ff3355" stroke-width="1.5"/>
+                <line x1="10" y1="18.5" x2="9" y2="30" stroke="#ff3355" stroke-width="1.5"/>
+                <g>
+                  <line x1="9" y1="24" x2="18" y2="34" stroke="#ff3355" stroke-width="1.5"/>
+                  <line x1="9" y1="24" x2="22" y2="34" stroke="#ff3355" stroke-width="1.5"/>
+                  <animateTransform attributeName="transform" type="translate" values="0 0;0 -1.5;0 0" dur="0.35s" repeatCount="indefinite"/>
+                </g>
+                <line x1="9" y1="30" x2="5" y2="38" stroke="#ff3355" stroke-width="1.5"/>
+                <line x1="5" y1="38" x2="2" y2="38" stroke="#ff3355" stroke-width="1"/>
+                <line x1="9" y1="30" x2="13" y2="38" stroke="#ff3355" stroke-width="1.5"/>
+                <line x1="13" y1="38" x2="17" y2="38" stroke="#ff3355" stroke-width="1"/>
+              </svg>
+            </td>
+            <td class="c-num">6</td>
+            <td class="c-market">BONK-PERP</td>
+            <td class="c-side win">LONG</td>
+            <td class="c-mono">$0.0000231</td>
+            <td class="c-mono">$0.0000198</td>
+            <td class="c-pnl los los-bg">−$298.00</td>
+            <td class="c-pct los">−14.3%</td>
+            <td><span class="rbadge rbadge-sl">SL</span></td>
+            <td class="c-mono" style="color:var(--muted)">47m</td>
+          </tr>
+
+        </tbody>
+      </table>
+    </div><!-- /tbl-scroll -->
+  </div><!-- /sheet-outer -->
+</div><!-- /sheet-section -->
+
+</div><!-- /scroll-area -->
+
+<footer>
+  DRIFT SNIPER · <a href="https://jup.ag" target="_blank">JUPITER ↗</a> · PAPER MODE
+</footer>
+</div><!-- /wrapper -->
+
+<script>
+// Particles
+const canvas = document.getElementById('particles');
+const ctx = canvas.getContext('2d');
+let W, H, pts = [];
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+function mkPt() {
+  return { x: Math.random()*W, y: Math.random()*H,
+    vx: (Math.random()-.5)*.3, vy: (Math.random()-.5)*.3,
+    r: Math.random()*1.4+.4, a: Math.random()*.4+.1 };
+}
+function initPts() { pts = Array.from({length:55},mkPt); }
+function drawPts() {
+  ctx.clearRect(0,0,W,H);
+  pts.forEach(p => {
+    p.x += p.vx; p.y += p.vy;
+    if(p.x<0||p.x>W) p.vx*=-1;
+    if(p.y<0||p.y>H) p.vy*=-1;
+    ctx.beginPath();
+    ctx.arc(p.x,p.y,p.r,0,Math.PI*2);
+    ctx.fillStyle = `rgba(0,229,255,${p.a})`;
+    ctx.fill();
+  });
+  requestAnimationFrame(drawPts);
+}
+window.addEventListener('resize',()=>{ resize(); initPts(); });
+resize(); initPts(); drawPts();
+</script>
+</body>
+</html>

@@ -1,5 +1,5 @@
-import os, time, threading, requests, json, re, csv, io, random
-from flask import Flask, jsonify, Response, request as flask_request
+import os, time, threading, requests, json, re, csv, io
+from flask import Flask, jsonify, Response
 from collections import defaultdict
 
 try:
@@ -21,7 +21,7 @@ def _redis_cmd(*args):
     if not REDIS_URL or not REDIS_TOKEN:
         return None
     try:
-        r = _session.post(
+        r = requests.post(
             REDIS_URL,
             headers={"Authorization": f"Bearer {REDIS_TOKEN}"},
             json=list(args),
@@ -61,25 +61,22 @@ FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "0"))  # 0 = use ti
 
 # Capital tiers per risk level: (min_capital, trade_pct, daily_max_trades)
 _RISK_TIERS = {
-    "conservative": [(5_000,0.12,60),(500,0.10,50),(100,0.08,40),(0,0.05,30)],
-    "standard":     [(5_000,0.18,80),(500,0.15,70),(100,0.12,60),(0,0.08,50)],
-    "aggressive":   [(5_000,0.22,100),(500,0.18,90),(100,0.15,75),(0,0.12,60)],
+    "conservative": [(5_000,0.12,15),(500,0.10,12),(100,0.08,10),(0,0.05,8)],
+    "standard":     [(5_000,0.18,20),(500,0.15,15),(100,0.12,12),(0,0.08,12)],
+    "aggressive":   [(5_000,0.22,25),(500,0.18,20),(100,0.15,15),(0,0.12,15)],
 }
 _CAP_TIERS = _RISK_TIERS.get(RISK_LEVEL, _RISK_TIERS["standard"])
 
 MAX_DAILY_LOSS_PCT = float(os.environ.get("MAX_DAILY_LOSS_PCT", "20"))  # stop day if down >20% of start capital
 
 # Risk limits
-DAILY_TRADE_MIN   = int(os.environ.get("DAILY_TRADE_MIN",  "3"))   # minimum trades before stop rules apply
-DAILY_WIN_TARGET  = int(os.environ.get("DAILY_WIN_TARGET", "3"))   # once wins >= this, allow up to DAILY_LOSS_MAX
-DAILY_LOSS_SOFT   = int(os.environ.get("DAILY_LOSS_SOFT",  "1"))   # default: stop after 1 loss (2W 1L target)
-DAILY_LOSS_MAX    = int(os.environ.get("DAILY_LOSS_MAX",   "3"))   # hard cap: always stop at 3 losses
-LOSS_COOLDOWN_HRS = float(os.environ.get("LOSS_COOLDOWN_HRS", "0.5")) # kept for retune timing
+DAILY_LOSS_MAX    = int(os.environ.get("DAILY_LOSS_MAX",  "6"))   # retune after N consecutive losses
+LOSS_COOLDOWN_HRS = float(os.environ.get("LOSS_COOLDOWN_HRS", "0.083")) # 5-min pause then resume
 ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # retune every 5 trades for faster learning
 
 # Bond Runner strategy
 BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "25"))
-BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "75"))
+BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "80"))
 BOND_TP         = float(os.environ.get("BOND_TP",        "67"))
 BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "10"))
 BOND_MAX_SECS   = int(os.environ.get("BOND_MAX_SECS",    "240"))   # 4 min hard cap
@@ -87,31 +84,24 @@ BOND_STALE_SECS = int(os.environ.get("BOND_STALE_SECS",  "120"))   # exit if bon
 
 # Dormant Spike strategy
 SPIKE_MIN_AGE_H = float(os.environ.get("SPIKE_MIN_AGE_H", "12"))
-SPIKE_MIN_1H    = float(os.environ.get("SPIKE_MIN_1H",    "20"))
+SPIKE_MIN_1H    = float(os.environ.get("SPIKE_MIN_1H",    "30"))
 SPIKE_TP_PCT    = float(os.environ.get("SPIKE_TP_PCT",    "40"))
 SPIKE_SL_PCT    = float(os.environ.get("SPIKE_SL_PCT",    "15"))
 SPIKE_MAX_SECS  = int(os.environ.get("SPIKE_MAX_SECS",    "180"))   # 3 min hard cap
 
-# Raydium Runner strategy (post-graduation tokens on Raydium)
-GRAD_MODE        = os.environ.get("GRAD_MODE", "true").lower() == "true"
-GRAD_MAX_AGE_H   = float(os.environ.get("GRAD_MAX_AGE_H",   "4"))     # only tokens graduated in last 4h
-GRAD_MIN_LIQ     = float(os.environ.get("GRAD_MIN_LIQ",     "15000")) # min $15k liquidity
-GRAD_MIN_1H_PCT  = float(os.environ.get("GRAD_MIN_1H_PCT",  "5"))     # min +5% 1h momentum
-GRAD_MIN_5M_PCT  = float(os.environ.get("GRAD_MIN_5M_PCT",  "-5"))    # reject if dumping >5% in last 5m
-GRAD_MIN_VOL_24H = float(os.environ.get("GRAD_MIN_VOL_24H", "10000")) # min $10k 24h volume
-GRAD_MIN_VOL_LIQ = float(os.environ.get("GRAD_MIN_VOL_LIQ", "0.5"))   # min volume/liq ratio
-GRAD_TP_PCT      = float(os.environ.get("GRAD_TP_PCT",      "30"))
-GRAD_SL_PCT      = float(os.environ.get("GRAD_SL_PCT",      "12"))
-GRAD_MAX_SECS    = int(os.environ.get("GRAD_MAX_SECS",      "300"))   # 5 min hard cap
-GRAD_POOL        = os.environ.get("GRAD_POOL", "raydium")
-GRAD_SMC_MIN     = int(os.environ.get("GRAD_SMC_MIN", "1"))  # min SMC alignment score (0=off, 1-3)
+# Trench strategy — coins 85-97% bonded, about to graduate (fast pump at migration)
+TRENCH_ENTRY_MIN = float(os.environ.get("TRENCH_ENTRY_MIN", "85"))
+TRENCH_ENTRY_MAX = float(os.environ.get("TRENCH_ENTRY_MAX", "97"))
+TRENCH_TP_PCT    = float(os.environ.get("TRENCH_TP_PCT",    "25"))
+TRENCH_SL_PCT    = float(os.environ.get("TRENCH_SL_PCT",    "12"))
+TRENCH_MAX_SECS  = int(os.environ.get("TRENCH_MAX_SECS",    "90"))  # 90s — very fast
 
-# Hype Scalp — fires when a coin appears in 2+ GMGN feeds simultaneously
-HYPE_MIN_FEEDS   = int(os.environ.get("HYPE_MIN_FEEDS",   "2"))    # min feeds to trigger
-HYPE_MIN_LIQ     = float(os.environ.get("HYPE_MIN_LIQ",   "5000")) # lower bar — scalp is fast
-HYPE_TP_PCT      = float(os.environ.get("HYPE_TP_PCT",    "15"))   # take profit at 15%
-HYPE_SL_PCT      = float(os.environ.get("HYPE_SL_PCT",    "8"))    # stop loss at 8%
-HYPE_MAX_SECS    = int(os.environ.get("HYPE_MAX_SECS",    "120"))  # 2 min max hold
+# Migration bounce — coins that just graduated to Raydium (first 2 min momentum)
+MIGRATE_MAX_AGE  = int(os.environ.get("MIGRATE_MAX_AGE",    "120")) # enter within 2 min of graduation
+MIGRATE_TP_PCT   = float(os.environ.get("MIGRATE_TP_PCT",   "30"))
+MIGRATE_SL_PCT   = float(os.environ.get("MIGRATE_SL_PCT",   "12"))
+MIGRATE_MAX_SECS = int(os.environ.get("MIGRATE_MAX_SECS",   "120"))
+GRAD_THROUGH     = os.environ.get("GRAD_THROUGH", "true").lower() != "false"  # hold bond positions through graduation to Raydium
 
 # Exit protection
 SLIP_TRIGGER   = float(os.environ.get("SLIP_TRIGGER",  "90"))
@@ -137,25 +127,23 @@ COPY_TRADE        = os.environ.get("COPY_TRADE", "true").lower() == "true"
 COPY_WINRATE_MIN  = float(os.environ.get("COPY_WINRATE_MIN",  "60"))
 COPY_WINRATE_MAX  = float(os.environ.get("COPY_WINRATE_MAX",  "99"))
 COPY_MAX_WALLETS  = int(os.environ.get("COPY_MAX_WALLETS",    "5"))
-COPY_MAX_AGE_SECS = int(os.environ.get("COPY_MAX_AGE_SECS",  "60"))   # ignore trades older than 60s
+COPY_MAX_AGE_SECS = int(os.environ.get("COPY_MAX_AGE_SECS",  "120"))  # ignore trades older than 2 min
+# Manually tracked wallets — comma-separated Solana addresses; merged with GMGN auto-discovered wallets
+TRACKED_WALLETS   = [w.strip() for w in os.environ.get("TRACKED_WALLETS", "").split(",") if w.strip()]
 COPY_REFRESH_MINS = int(os.environ.get("COPY_REFRESH_MINS",  "60"))   # refresh wallet list hourly
 COPY_TP_PCT       = float(os.environ.get("COPY_TP_PCT",       "40"))
 COPY_SL_PCT       = float(os.environ.get("COPY_SL_PCT",       "15"))
 COPY_MAX_SECS     = int(os.environ.get("COPY_MAX_SECS",       "180"))
-COPY_PINNED_WALLETS = [a.strip() for a in os.environ.get("COPY_PINNED_WALLETS", "").split(",") if a.strip()]
 GMGN_RANK         = "https://gmgn.ai/defi/quotation/v1/rank/sol/wallets/7d"
 GMGN_ACTIVITY     = "https://gmgn.ai/defi/quotation/v1/wallet_activity/sol"
 GMGN_API_KEY       = os.environ.get("GMGN_API_KEY", "")
 GMGN_TOP_HOLDERS   = "https://gmgn.ai/defi/quotation/v1/tokens/top_holders/sol"
 GMGN_CREATED_TOKENS= "https://gmgn.ai/defi/quotation/v1/portfolio/sol"
 GMGN_SIGNALS_URL   = "https://gmgn.ai/defi/quotation/v1/signals/sol"
-GMGN_KOL_TRACK      = "https://gmgn.ai/defi/quotation/v1/tracks/kol/sol"
-GMGN_SM_TRACK       = "https://gmgn.ai/defi/quotation/v1/tracks/smartmoney/sol"
-GMGN_TRENDING_URL   = "https://gmgn.ai/defi/quotation/v1/tokens/trending/sol"
-GMGN_HOT_SEARCH_URL = "https://gmgn.ai/defi/quotation/v1/tokens/hot_searches/sol"
-GMGN_COMPLETING_URL = "https://gmgn.ai/defi/quotation/v1/tokens/completing/sol"
-GMGN_NEW_PAIRS_URL  = "https://gmgn.ai/defi/quotation/v1/tokens/new_pairs/sol"
-GMGN_TREND_SCAN_INTERVAL = int(os.environ.get("GMGN_TREND_SCAN_INTERVAL", "120"))  # seconds between trend scans
+GMGN_KOL_TRACK     = "https://gmgn.ai/defi/quotation/v1/tracks/kol/sol"
+GMGN_SM_TRACK      = "https://gmgn.ai/defi/quotation/v1/tracks/smartmoney/sol"
+GMGN_TRENDING_URL  = "https://gmgn.ai/defi/quotation/v1/tokens/trending/sol"
+GMGN_HOT_SEARCH    = "https://gmgn.ai/defi/quotation/v1/tokens/hot_search/sol"
 
 # Notifications
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
@@ -164,11 +152,11 @@ NTFY_TOPIC       = os.environ.get("NTFY_TOPIC", "")
 
 # Social / quality gates
 MIN_REPLIES  = int(os.environ.get("MIN_REPLIES",  "10"))
-MIN_LIQ      = float(os.environ.get("MIN_LIQ",    "500"))
+MIN_LIQ      = float(os.environ.get("MIN_LIQ",    "75"))
 
 # General
-MAX_OPEN      = int(os.environ.get("MAX_OPEN",      "4"))
-SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "10"))
+MAX_OPEN      = int(os.environ.get("MAX_OPEN",      "6"))
+SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "5"))
 
 SOL_RPC     = "https://api.mainnet-beta.solana.com"
 PUMPPORTAL  = "https://pumpportal.fun/api/trade-local"
@@ -205,28 +193,27 @@ _daily_wins       = 0
 _daily_losses     = 0
 _day_start_cap    = 0.0    # capital at start of day — used for daily loss % guard
 _pause_until      = 0.0    # Unix timestamp — bot pauses trading until this time
+_daily_cap_notified = False  # prevent Telegram spam when daily cap is active
 _daily_lock       = threading.Lock()
-_tune_lock        = threading.Lock()
 # Weekly tracking
 _week_start_date  = ""
 _week_day_logs    = []     # one entry per day: {date, trades, wins, losses, pnl, start_cap, end_cap}
-_copy_wallets     = [{"address": a, "winrate": "pinned"} for a in COPY_PINNED_WALLETS]
+_copy_wallets     = []   # [{address, winrate}]
 _copy_wallet_time = 0.0
 _copied_mints     = {}   # mint -> timestamp, to avoid double-copy
 _copy_lock        = threading.Lock()
-_gmgn_backoff     = 0    # epoch timestamp — retry GMGN rank after this time (0 = no backoff)
+_gmgn_backoff     = 0    # seconds to wait before retrying GMGN rank
 _sold_mints       = {}   # mint -> timestamp, cooldown after selling to prevent re-buy
 _gmgn_sm_signal_mints  = set()   # smart money buy signal mints (type 12)
 _gmgn_surge_mints      = set()   # price surge signal mints (type 6)
-_gmgn_kol_mints        = set()   # KOL buy mints (entry signal)
-_gmgn_sm_sell_mints    = set()   # smart money sell mints (exit/skip signal)
-_gmgn_trending_mints   = set()   # trending tokens (1h/4h movers)
-_gmgn_hot_mints        = set()   # hot search mints
-_gmgn_completing_mints = set()   # bonding curve near completion
-_gmgn_new_pair_mints   = set()   # newly listed pairs
+_gmgn_kol_mints        = set()   # KOL buy mints
+_gmgn_sm_sell_mints    = set()   # smart money sell mints (exit/skip filter)
+_gmgn_trending_mints   = set()   # trending tokens (1h price movers on GMGN)
+_gmgn_hot_mints        = set()   # hot search tokens (what people are searching on GMGN)
 _gmgn_signal_time      = 0.0     # last signal refresh time
 _signal_lock           = threading.Lock()
-_trend_scanned         = set()   # mints already evaluated by trend scanner (cleared hourly)
+scan_log               = []
+_scan_log_lock         = threading.Lock()
 
 # ── LOGGING ─────────────────────────────────────────────────────
 def log(tag, msg, symbol=""):
@@ -238,6 +225,22 @@ def log(tag, msg, symbol=""):
         if len(trade_log) > 300:
             trade_log.pop(0)
 
+def _log_scan(symbol, mint, bond, sig, result, fi, msg):
+    entry = {
+        "sym":    symbol,
+        "mint":   (mint[:5] + "…" + mint[-4:]) if len(mint) > 10 else mint,
+        "bond":   round(float(bond or 0), 1),
+        "sig":    int(sig or 0),
+        "result": result,
+        "fi":     fi,
+        "msg":    msg,
+        "ts":     round(time.time(), 3),
+    }
+    with _scan_log_lock:
+        scan_log.insert(0, entry)
+        if len(scan_log) > 30:
+            scan_log.pop()
+
 # ── NOTIFICATIONS ────────────────────────────────────────────────
 _notify_queue = []
 _notify_q_lock = threading.Lock()
@@ -245,8 +248,7 @@ _notify_q_lock = threading.Lock()
 def notify(title, body):
     """Queue a notification — sent by dedicated thread to avoid Telegram rate limits."""
     with _notify_q_lock:
-        if len(_notify_queue) < 100:
-            _notify_queue.append((title, body))
+        _notify_queue.append((title, body))
 
 def _notify_worker():
     """Single thread sends queued notifications 1/sec so nothing gets dropped."""
@@ -262,7 +264,7 @@ def _notify_worker():
                     _session.post(
                         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                         json={"chat_id": TELEGRAM_CHAT_ID,
-                              "text": f"*{BOT_NAME}* · {title}\n{body}",
+                              "text": f"*{title}*\n{body}",
                               "parse_mode": "Markdown"},
                         timeout=8
                     )
@@ -307,15 +309,13 @@ def daily_trade_limit():
 
 # ── DAILY LIMITS ─────────────────────────────────────────────────
 def _save_daily_state():
-    with capital_lock:
-        cap_snapshot = capital
     state = {
         "date":         _daily_date,
         "trades":       _daily_trades,
         "wins":         _daily_wins,
         "losses":       _daily_losses,
         "pause_until":  _pause_until,
-        "capital":      cap_snapshot,
+        "capital":      capital,
         "week_start":   _week_start_date,
         "week_logs":    _week_day_logs,
     }
@@ -329,7 +329,6 @@ def _save_daily_state():
 def _load_daily_state():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses
     global _pause_until, capital, _week_start_date, _week_day_logs, completed_trades
-    global _day_start_cap
     today = time.strftime("%Y-%m-%d")
 
     # Try Redis first (survives redeploys), fall back to local file
@@ -371,37 +370,10 @@ def _load_daily_state():
         completed_trades.extend(trades_data)
         log("ok", f"Reloaded {len(completed_trades)} completed trades")
 
-    # Restore auto-tuned params (Redis > local file > defaults)
-    global BOND_ENTRY_MIN, BOND_ENTRY_MAX, BOND_SL_PCT, BOND_STALE_SECS, BOND_MAX_SECS, SPIKE_TP_PCT
-    tuned = redis_load("bot_tuned_params")
-    if not tuned:
-        try:
-            tuned_file = LEARN_FILE.replace(".json", "_tuned.json")
-            if os.path.exists(tuned_file):
-                with open(tuned_file) as f:
-                    tuned = json.load(f)
-        except Exception:
-            tuned = {}
-    if tuned:
-        try:
-            BOND_ENTRY_MIN  = float(tuned.get("BOND_ENTRY_MIN",  BOND_ENTRY_MIN))
-            BOND_ENTRY_MAX  = float(tuned.get("BOND_ENTRY_MAX",  BOND_ENTRY_MAX))
-            BOND_SL_PCT     = float(tuned.get("BOND_SL_PCT",     BOND_SL_PCT))
-            BOND_STALE_SECS = int(tuned.get("BOND_STALE_SECS",   BOND_STALE_SECS))
-            BOND_MAX_SECS   = int(tuned.get("BOND_MAX_SECS",     BOND_MAX_SECS))
-            SPIKE_TP_PCT    = float(tuned.get("SPIKE_TP_PCT",    SPIKE_TP_PCT))
-            log("ok", f"Restored tuned params: bond={BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% sl={BOND_SL_PCT}% stale={BOND_STALE_SECS}s")
-        except (ValueError, TypeError) as e:
-            log("warn", f"Corrupted tuned params — using defaults: {e}")
-
-    _day_start_cap = capital  # initialize daily loss guard from loaded capital
-
 def _reset_daily_if_needed():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses, _pause_until
     global _week_start_date, _week_day_logs, _day_start_cap
     today = time.strftime("%Y-%m-%d")
-    with capital_lock:
-        cap_snap = capital  # snapshot before _daily_lock to respect lock ordering
     with _daily_lock:
         if _daily_date != today:
             if _daily_date:
@@ -410,7 +382,7 @@ def _reset_daily_if_needed():
                     "trades":  _daily_trades,
                     "wins":    _daily_wins,
                     "losses":  _daily_losses,
-                    "capital": cap_snap,
+                    "capital": capital,
                 })
             if not _week_start_date:
                 _week_start_date = today
@@ -419,57 +391,79 @@ def _reset_daily_if_needed():
             _daily_wins    = 0
             _daily_losses  = 0
             _pause_until   = 0.0
-            _day_start_cap = cap_snap
+            _daily_cap_notified = False
+            _day_start_cap = capital  # snapshot for daily loss % guard
             limit = daily_trade_limit()
-            pct, _ = _cap_tier(cap_snap)
-            log("ok", f"New day {today} | Day {len(_week_day_logs)+1} | cap=${cap_snap:.2f} | trade={pct*100:.0f}% (${trade_size():.2f}) | limit={limit}/day")
+            with capital_lock:
+                cap = capital
+            pct, _ = _cap_tier(cap)
+            log("ok", f"New day {today} | Day {len(_week_day_logs)+1} | cap=${cap:.2f} | trade={pct*100:.0f}% (${trade_size():.2f}) | limit={limit}/day")
             _save_daily_state()
+            if len(_week_day_logs) > 0:
+                notify(
+                    f"🌅 *Boogeys Sniper* — New Day\n"
+                    f"Date: {today}\n"
+                    f"Capital: ${cap:,.2f}\n"
+                    f"Daily limits reset — sniping resumed."
+                )
 
 def daily_limit_reached():
+    global _daily_cap_notified
     _reset_daily_if_needed()
-    with capital_lock:
-        cap_now = capital  # snapshot outside _daily_lock to avoid lock-order inversion
     with _daily_lock:
-        dt = _daily_trades
-        dw = _daily_wins
-        dl = _daily_losses
-        # Daily loss gate — only applies after minimum trades reached
-        if dt >= DAILY_TRADE_MIN:
-            loss_limit = DAILY_LOSS_MAX if dw >= DAILY_WIN_TARGET else DAILY_LOSS_SOFT
-            if dl >= loss_limit:
-                log("info", f"Daily gate: {dt} trades | {dw}W {dl}L — done for today (resets midnight)")
-                return True
+        if _pause_until > time.time():
+            resume = time.strftime("%H:%M", time.localtime(_pause_until))
+            log("info", f"Cooling down after {_daily_losses} losses — resumes {resume}")
+            return True
         # Capital-tiered daily trade cap
         limit = daily_trade_limit()
         if _daily_trades >= limit:
             log("info", f"Daily cap: {_daily_trades}/{limit} trades at current capital level — resumes tomorrow")
+            if not _daily_cap_notified:
+                _daily_cap_notified = True
+                with capital_lock:
+                    cap_now = capital
+                notify(
+                    f"🔒 *Boogeys Sniper* — Daily Cap\n"
+                    f"{_daily_trades} trades | {_daily_wins}W {_daily_losses}L\n"
+                    f"Cap: ${cap_now:,.2f}\n"
+                    f"Done for today. Auto-resumes at midnight."
+                )
             return True
         # Max daily loss guard — stop if down >MAX_DAILY_LOSS_PCT% from today's open
         if _day_start_cap > 0:
+            with capital_lock:
+                cap_now = capital
             loss_pct = (_day_start_cap - cap_now) / _day_start_cap * 100
             if loss_pct >= MAX_DAILY_LOSS_PCT:
                 log("warn", f"Daily loss guard: down {loss_pct:.1f}% today (${_day_start_cap - cap_now:.2f}) — stopping until tomorrow")
+                if not _daily_cap_notified:
+                    _daily_cap_notified = True
+                    notify(
+                        f"🛑 *Boogeys Sniper* — Loss Guard\n"
+                        f"Down {loss_pct:.1f}% today (${_day_start_cap - cap_now:.2f})\n"
+                        f"Stopping to protect capital. Auto-resumes at midnight."
+                    )
                 return True
         return False
 
 def record_daily_trade(won):
-    global _daily_wins, _daily_losses
+    global _daily_wins, _daily_losses, _pause_until
     with _daily_lock:
         if won:
             _daily_wins += 1
         else:
             _daily_losses += 1
-        dt, dw, dl = _daily_trades, _daily_wins, _daily_losses
         log("ok" if won else "info",
-            f"Daily: {dt} trades | {dw}W {dl}L")
-        # Notify when we hit the loss limit (after min trades)
-        if not won and dt >= DAILY_TRADE_MIN:
-            loss_limit = DAILY_LOSS_MAX if dw >= DAILY_WIN_TARGET else DAILY_LOSS_SOFT
-            if dl >= loss_limit:
-                log("warn", f"Daily limit reached: {dt} trades {dw}W {dl}L — stopping until midnight")
-                notify("🛑 Daily limit hit",
-                       f"{dl} losses after {dt} trades.\nStopping until midnight.\n{dw}W {dl}L today.")
-                threading.Thread(target=_retune_strategies, daemon=True).start()
+            f"Daily: {_daily_trades} trades | {_daily_wins}W {_daily_losses}L")
+        if not won and _daily_losses % DAILY_LOSS_MAX == 0:
+            resume_ts   = time.time() + LOSS_COOLDOWN_HRS * 3600
+            _pause_until = resume_ts
+            resume_str   = time.strftime("%H:%M", time.localtime(resume_ts))
+            log("warn", f"{_daily_losses} losses — pausing 30min to retune. Resumes {resume_str}")
+            notify("🔧 Retuning",
+                   f"{_daily_losses} losses hit.\nPausing 30min, retuning strategy.\nResumes: {resume_str}")
+            threading.Thread(target=_retune_strategies, daemon=True).start()
     _save_daily_state()
 
 def _retune_strategies():
@@ -482,9 +476,7 @@ def _retune_strategies():
                 history = json.load(f)
         if len(history) >= 5:
             auto_tune(history)
-            with _daily_lock:
-                resume_ts = _pause_until
-            resume_str = time.strftime("%H:%M", time.localtime(resume_ts))
+            resume_str = time.strftime("%H:%M", time.localtime(_pause_until))
             notify("✅ Strategy Retuned",
                    f"New bond entry: {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%\n"
                    f"Stale exit: {BOND_STALE_SECS}s\n"
@@ -503,9 +495,7 @@ def _send_daily_summary():
         today_pnl = cap - _day_start_cap if _day_start_cap > 0 else 0
         wr = round(_daily_wins / max(_daily_trades, 1) * 100, 1)
         # Today's exit breakdown
-        with log_lock:
-            trades_snap = list(completed_trades)
-        today_trades = [t for t in trades_snap if t.get("date", "") == time.strftime("%Y-%m-%d")]
+        today_trades = [t for t in completed_trades if t.get("date", "") == time.strftime("%Y-%m-%d")]
         exit_counts = {}
         for t in today_trades:
             r = t.get("result", "?")
@@ -516,7 +506,7 @@ def _send_daily_summary():
         to_go = goal - cap
         day_num = len(_week_day_logs) + 1
         # Next tune in N trades
-        total_done = len(trades_snap)
+        total_done = len(completed_trades)
         next_tune_in = ANALYZE_EVERY - (total_done % ANALYZE_EVERY)
         pct_tier, _ = _cap_tier(cap)
         msg = (f"Day {day_num} wrap-up\n"
@@ -577,15 +567,14 @@ def _send_weekly_report():
         # Day-by-day capital
         cap_progression = " → ".join(f"${d['capital']:.0f}" for d in _week_day_logs) if _week_day_logs else "N/A"
 
-        with capital_lock:
-            cap = capital
-
-        # Apply best bond range from weekly bucket analysis, then let auto_tune refine further
-        global BOND_ENTRY_MIN, BOND_ENTRY_MAX
+        # Apply best settings for week 2
         if best_bucket:
             best_b = best_bucket[0]
-            BOND_ENTRY_MIN = max(50.0, best_b - 2)
-            BOND_ENTRY_MAX = min(78.0, best_b + 4)
+            BOND_ENTRY_MIN_new = max(50.0, best_b - 2)
+            BOND_ENTRY_MAX_new = min(78.0, best_b + 4)
+        else:
+            BOND_ENTRY_MIN_new = BOND_ENTRY_MIN
+            BOND_ENTRY_MAX_new = BOND_ENTRY_MAX
 
         auto_tune(history)
 
@@ -595,7 +584,7 @@ def _send_weekly_report():
             f"Trades: {total} | {len(wins)}W {len(losses)}L\n"
             f"Win rate: {wr}%\n"
             f"Total PnL: ${total_pnl:+.2f}\n"
-            f"Capital: ${cap:.2f}\n\n"
+            f"Capital: ${capital:.2f}\n\n"
             f"Best bond range: {best_bucket[0] if best_bucket else '?'}%\n"
             f"Best hour: {best_hour}:00\n"
             f"Top loss reason: {top_loss}\n\n"
@@ -604,7 +593,7 @@ def _send_weekly_report():
             f"Bond: {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%\n"
             f"Stale: {BOND_STALE_SECS}s | SL: {BOND_SL_PCT}%"
         )
-        log("ok", f"WEEK 1 DONE | {wr}% WR | PnL ${total_pnl:+.2f} | cap ${cap:.2f}", "WEEK")
+        log("ok", f"WEEK 1 DONE | {wr}% WR | PnL ${total_pnl:+.2f} | cap ${capital:.2f}", "WEEK")
         notify("📈 Week 1 Complete!", report)
 
         # Save full report
@@ -613,7 +602,7 @@ def _send_weekly_report():
                 json.dump({
                     "week": 1, "trades": total, "wins": len(wins), "losses": len(losses),
                     "win_rate": wr, "total_pnl": round(total_pnl, 4),
-                    "final_capital": round(cap, 2),
+                    "final_capital": round(capital, 2),
                     "best_bond_bucket": best_bucket[0] if best_bucket else None,
                     "best_hour": best_hour, "top_loss_reason": top_loss,
                     "day_logs": _week_day_logs,
@@ -633,13 +622,9 @@ def daily_summary_loop():
         now = time.localtime()
         secs_to_midnight = (23 - now.tm_hour) * 3600 + (59 - now.tm_min) * 60 + (60 - now.tm_sec)
         time.sleep(secs_to_midnight + 5)
-        _reset_daily_if_needed()  # ensure today's entry is in week_day_logs before counting
         _send_daily_summary()
-        if COPY_PINNED_WALLETS:
-            time.sleep(5)
-            _send_wallet_report()
         # Weekly deep report every 7 days — then keeps running
-        if len(_week_day_logs) > 0 and len(_week_day_logs) % 7 == 0:
+        if len(_week_day_logs) % 7 == 6:
             time.sleep(10)
             _send_weekly_report()
 
@@ -661,27 +646,22 @@ def record_trade(trade_data):
     try:
         history = []
         if os.path.exists(LEARN_FILE):
-            try:
-                with open(LEARN_FILE, "r") as f:
-                    history = json.load(f)
-            except json.JSONDecodeError as e:
-                log("warn", f"Corrupted learn file — starting fresh: {e}")
+            with open(LEARN_FILE, "r") as f:
+                history = json.load(f)
         history.append(trade_data)
         trimmed = history[-200:]
         with open(LEARN_FILE, "w") as f:
             json.dump(trimmed, f)
         redis_save("bot_trades", trimmed)
-        if len(trimmed) % ANALYZE_EVERY == 0:
+        if len(history) % ANALYZE_EVERY == 0:
             log("ok", f"Analyzing last {ANALYZE_EVERY} trades — retuning strategy...", "TUNE")
-            auto_tune(trimmed)
+            auto_tune(history)
             log("ok", f"Tuned: bond={BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% stale={BOND_STALE_SECS}s SL={BOND_SL_PCT}% spikeTP={SPIKE_TP_PCT}%", "TUNE")
     except Exception as e:
         log("warn", f"Learning record: {e}")
 
 def auto_tune(history):
     global BOND_ENTRY_MIN, BOND_ENTRY_MAX, SPIKE_TP_PCT, BOND_STALE_SECS, BOND_SL_PCT, BOND_MAX_SECS
-    if not _tune_lock.acquire(blocking=False):
-        return  # already tuning — skip concurrent call
     try:
         recent = history[-60:]
         wins   = [t for t in recent if t.get("pnl", 0) > 0]
@@ -699,7 +679,7 @@ def auto_tune(history):
         # Tune bond entry range toward what's winning
         if bond_wins:
             avg_win_entry = sum(t.get("bond_entry", BOND_ENTRY_MIN) for t in bond_wins) / len(bond_wins)
-            BOND_ENTRY_MIN = round(min(max(avg_win_entry - 2, 25), 72), 1)
+            BOND_ENTRY_MIN = round(min(max(avg_win_entry - 2, 50), 72), 1)
             BOND_ENTRY_MAX = round(min(BOND_ENTRY_MIN + 6, 78), 1)
         elif bond_wr < 0.35 and len(bond_all) >= 5:
             # Poor win rate — tighten entry, look for higher momentum
@@ -716,10 +696,10 @@ def auto_tune(history):
             avg_win_hold_secs = (sum(t.get("hold_m", 2) for t in bond_wins) / len(bond_wins)) * 60
             BOND_MAX_SECS = max(180, min(480, int(avg_win_hold_secs * 1.5)))
 
-        # >60% of bond losses are hitting SL — give price more room to breathe
+        # Loosen SL if losses are all from price drop (not stale/timeout)
         sl_losses = [t for t in bond_losses if t.get("result") == "BOND_SL"]
-        if len(sl_losses) > len(bond_losses) * 0.6 and BOND_SL_PCT < 15:
-            BOND_SL_PCT = round(BOND_SL_PCT + 1, 1)  # widen SL — too many premature stop-outs
+        if len(sl_losses) > len(bond_losses) * 0.6 and BOND_SL_PCT > 6:
+            BOND_SL_PCT = round(BOND_SL_PCT - 1, 1)  # tighten SL to cut losses faster
 
         # Spike tuning
         if spike_wr > bond_wr + 0.2 and SPIKE_TP_PCT < 80:
@@ -750,21 +730,6 @@ def auto_tune(history):
                f"Bond entry: {BOND_ENTRY_MIN}–{BOND_ENTRY_MAX}%\n"
                f"Stale exit: {BOND_STALE_SECS}s | SL: {BOND_SL_PCT}%\n"
                f"Spike TP: {SPIKE_TP_PCT}%")
-        # Persist tuned params so restarts don't lose learned values
-        tuned = {
-            "BOND_ENTRY_MIN": BOND_ENTRY_MIN,
-            "BOND_ENTRY_MAX": BOND_ENTRY_MAX,
-            "BOND_SL_PCT":    BOND_SL_PCT,
-            "BOND_STALE_SECS":BOND_STALE_SECS,
-            "BOND_MAX_SECS":  BOND_MAX_SECS,
-            "SPIKE_TP_PCT":   SPIKE_TP_PCT,
-        }
-        redis_save("bot_tuned_params", tuned)
-        try:
-            with open(LEARN_FILE.replace(".json", "_tuned.json"), "w") as f:
-                json.dump(tuned, f, indent=2)
-        except Exception:
-            pass
         try:
             with open(LEARN_FILE.replace(".json", "_stats.json"), "w") as f:
                 json.dump(stats, f, indent=2)
@@ -772,93 +737,131 @@ def auto_tune(history):
             pass
     except Exception as e:
         log("warn", f"Auto-tune: {e}")
-    finally:
-        _tune_lock.release()
 
-# ── GMGN COIN DISCOVERY ──────────────────────────────────────────
-def get_gmgn_coins():
-    """
-    Pull candidate coins from all 4 GMGN feeds in one function.
-    Covers all Solana tokens (Raydium, Meteora, Orca, Jupiter, PumpFun)
-    — broader scope than the old PumpFun-only API.
-
-    Returns (active_coins, graduated_coins) where:
-      active_coins    — still on bonding curve or fresh listings
-      graduated_coins — complete=True or established tokens (for grad runner)
-    """
-    hdrs = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept":     "application/json",
-        "Referer":    "https://gmgn.ai/",
-        "Origin":     "https://gmgn.ai",
-    }
-    if GMGN_API_KEY:
-        hdrs["Authorization"] = f"Bearer {GMGN_API_KEY}"
-
-    seen  = {}   # mint → coin dict  (dedup across feeds)
-    feeds = [
-        (GMGN_COMPLETING_URL,  "completing", {"limit": 50}),
-        (GMGN_TRENDING_URL,    "trending",   {"limit": 50, "orderby": "volume", "direction": "desc"}),
-        (GMGN_HOT_SEARCH_URL,  "hot_search", {"limit": 30}),
-        (GMGN_NEW_PAIRS_URL,   "new_pairs",  {"limit": 30}),
+# ── PUMP.FUN COINS ───────────────────────────────────────────────
+def get_pumpfun_coins():
+    endpoints = [
+        "https://frontend-api-v3.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false",
+        "https://frontend-api-v3.pump.fun/coins/currently-live?offset=0&limit=50&includeNsfw=false&order=DESC",
+        "https://frontend-api-v2.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false",
+        "https://client-api-2.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false",
     ]
-
-    for url, label, params in feeds:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Referer": "https://pump.fun/",
+        "Origin": "https://pump.fun",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+    }
+    for url in endpoints:
         try:
-            r = _session.get(url, headers=hdrs, params=params, timeout=10)
-            if r.status_code != 200:
-                log("warn", f"GMGN {label}: {r.status_code}")
+            res = _session.get(url, headers=headers, timeout=10)
+            if res.status_code != 200:
+                log("warn", f"pump.fun {res.status_code}: {url[-50:]}")
                 continue
-            data  = r.json().get("data", {})
-            items = data.get("tokens") or data.get("rank") or data.get("pairs") or []
-            if isinstance(items, dict):
-                items = list(items.values())
-            for item in items:
-                mint = item.get("address") or item.get("mint", "")
-                if mint in seen:
-                    # Coin appeared in another feed — accumulate sources, raise hype score
-                    if label not in seen[mint]["_sources"]:
-                        seen[mint]["_sources"].append(label)
-                        seen[mint]["hype_score"] = len(seen[mint]["_sources"])
+            data  = res.json()
+            items = data if isinstance(data, list) else data.get("coins", data.get("data", []))
+            if not items:
+                continue
+            coins = []
+            for coin in items[:100]:
+                mint  = coin.get("mint", "")
+                vsol  = float(coin.get("virtual_sol_reserves", 0) or 0)
+                vtok  = float(coin.get("virtual_token_reserves", 0) or 0)
+                bond  = min((vsol / 85_000_000_000) * 100, 99.9) if vsol > 0 else 0
+                if not mint or coin.get("complete", False):
                     continue
-                # Bond % — completing feed populates this; others default 0 (unknown/graduated)
-                bond_raw = float(
-                    item.get("progress") or           # GMGN completing feed
-                    item.get("bond_progress") or
-                    item.get("bondingCurveProgress") or
-                    item.get("king_of_hill_progress") or 0
+                # Resilient social field lookups — API field names vary by version
+                socials  = coin.get("socials") or {}
+                has_tw   = bool(coin.get("twitter") or coin.get("twitter_url") or socials.get("twitter"))
+                has_tg   = bool(coin.get("telegram") or coin.get("telegram_url") or socials.get("telegram"))
+                has_web  = bool(coin.get("website") or coin.get("website_url") or socials.get("website"))
+                # Resilient timestamp field lookups
+                last_ts  = int(
+                    coin.get("last_trade_timestamp") or
+                    coin.get("last_trade_time") or
+                    coin.get("last_trade") or
+                    coin.get("updated_timestamp") or
+                    0
                 )
-                # GMGN returns progress as 0-100 %; cap at 99.9
-                if bond_raw > 100:
-                    bond_raw = 99.9
-                # Timestamps — GMGN may be seconds or ms; normalise to ms
-                def _to_ms(v):
-                    v = int(v or 0)
-                    return v * 1000 if 0 < v < 10_000_000_000 else v
-                lt_ms = _to_ms(item.get("last_trade_unix_time") or item.get("last_trade_timestamp") or item.get("last_trade_time") or item.get("last_trade"))
-                ct_ms = _to_ms(item.get("created_timestamp") or item.get("open_timestamp"))
-
-                seen[mint] = {
+                created_ts = int(
+                    coin.get("created_timestamp") or
+                    coin.get("created_at") or
+                    coin.get("creation_time") or
+                    0
+                )
+                # Detect pump.swap protocol: native SOL quote mint (all 1s = system program)
+                quote_mint = coin.get("quote_mint", "")
+                is_pump_swap = (
+                    quote_mint == "11111111111111111111111111111111"
+                    or bool(coin.get("pump_swap_pool"))
+                    or bool(coin.get("is_cashback_enabled"))
+                )
+                coins.append({
                     "mint":       mint,
-                    "symbol":     item.get("symbol", mint[:8]),
-                    "bond_pct":   round(bond_raw, 1),
-                    "twitter":    bool(item.get("twitter_username") or item.get("twitter")),
-                    "telegram":   bool(item.get("telegram")),
-                    "dev":        item.get("creator") or item.get("dev") or "",
-                    "replies":    int(item.get("reply_count") or 0),
-                    "created_at": ct_ms,
-                    "last_trade": lt_ms,
-                    "complete":    bool(item.get("complete") or bond_raw >= 100),
-                    "_sources":   [label],
-                    "hype_score": 1,
-                }
+                    "symbol":     coin.get("symbol", mint[:8]),
+                    "bond_pct":   round(bond, 1),
+                    "vsol":       vsol / 1e9,
+                    "vtok":       vtok,
+                    "twitter":    has_tw,
+                    "telegram":   has_tg,
+                    "website":    has_web,
+                    "dev":        coin.get("creator", "") or coin.get("dev", ""),
+                    "replies":    int(coin.get("reply_count", 0) or 0),
+                    "created_at": created_ts,
+                    "last_trade": last_ts,
+                    "complete":   False,
+                    "pump_swap":  is_pump_swap,
+                })
+            log("info", f"pump.fun API: {len(coins)} live coins")
+            if coins:
+                return coins
         except Exception as e:
-            log("warn", f"GMGN {label}: {e}")
+            log("warn", f"pump.fun endpoint failed: {e}")
+    return []
 
-    active    = [c for c in seen.values() if not c["complete"]]
-    graduated = [c for c in seen.values() if c["complete"]]
-    log("info", f"GMGN: {len(active)} active + {len(graduated)} graduated across 4 feeds")
-    return active, graduated
+def get_recently_graduated():
+    """Pump.fun coins that just graduated to Raydium within MIGRATE_MAX_AGE seconds."""
+    hdrs = {"User-Agent": "Mozilla/5.0", "Referer": "https://pump.fun/", "Accept": "application/json"}
+    endpoints = [
+        "https://frontend-api-v3.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false&complete=true",
+        "https://frontend-api-v2.pump.fun/coins?offset=0&limit=50&sort=last_trade_timestamp&order=DESC&includeNsfw=false&complete=true",
+    ]
+    now = time.time()
+    for url in endpoints:
+        try:
+            res = _session.get(url, headers=hdrs, timeout=10)
+            if res.status_code != 200:
+                continue
+            data  = res.json()
+            items = data if isinstance(data, list) else data.get("coins", [])
+            recent = []
+            for coin in items:
+                mint = coin.get("mint", "")
+                if not mint:
+                    continue
+                # king_of_the_hill_timestamp is set when the coin graduates
+                koth = int(coin.get("king_of_the_hill_timestamp", 0) or 0)
+                last = int(coin.get("last_trade_timestamp", 0) or 0)
+                grad_ts = koth if koth > 0 else last
+                age_secs = (now - grad_ts / 1000) if grad_ts > 0 else 9999
+                if 0 < age_secs <= MIGRATE_MAX_AGE:
+                    recent.append({
+                        "mint":     mint,
+                        "symbol":   coin.get("symbol", mint[:8]),
+                        "dev":      coin.get("creator", ""),
+                        "grad_age": int(age_secs),
+                    })
+            if recent:
+                log("info", f"Migration scan: {len(recent)} recently graduated", "GRAD")
+            return recent
+        except Exception as e:
+            log("warn", f"get_recently_graduated: {e}", "GRAD")
+    return []
 
 def get_bonding_details(mint):
     try:
@@ -870,10 +873,7 @@ def get_bonding_details(mint):
         if res.status_code == 200:
             data  = res.json()
             vsol  = float(data.get("virtual_sol_reserves", 0) or 0)
-            vtok  = float(data.get("virtual_token_reserves", 0) or 0)
             bond  = min((vsol / 85_000_000_000) * 100, 99.9)
-            # price_sol: lamports/μtoken → SOL/token after adjusting decimals (÷1000)
-            price_sol = (vsol / vtok / 1000) if vtok > 0 else 0
             return {
                 "bond_pct":   round(bond, 1),
                 "complete":   data.get("complete", False),
@@ -881,7 +881,6 @@ def get_bonding_details(mint):
                 "twitter":    bool(data.get("twitter")),
                 "telegram":   bool(data.get("telegram")),
                 "created_at": int(data.get("created_timestamp", 0) or 0),
-                "price_sol":  price_sol,
             }
     except Exception:
         pass
@@ -895,106 +894,14 @@ def get_market_data(mint):
         if not pairs:
             return None
         pair = max(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
-        vol  = pair.get("volume", {})
-        pc   = pair.get("priceChange", {})
         return {
-            "price":        float(pair.get("priceUsd", 0) or 0),
-            "liq":          float(pair.get("liquidity", {}).get("usd", 0) or 0),
-            "change5m":     float(pc.get("m5", 0) or 0),
-            "change1h":     float(pc.get("h1",  0) or 0),
-            "change6h":     float(pc.get("h6",  0) or 0),
-            "vol_h1":       float(vol.get("h1",  0) or 0),
-            "vol_h6":       float(vol.get("h6",  0) or 0),
-            "vol_h24":      float(vol.get("h24", 0) or 0),
-            "age_h":        (time.time() - float(pair.get("pairCreatedAt", time.time() * 1000)) / 1000) / 3600,
-            "pair_address": pair.get("pairAddress", ""),
-            "symbol":       pair.get("baseToken", {}).get("symbol", ""),
+            "price":    float(pair.get("priceUsd", 0) or 0),
+            "liq":      float(pair.get("liquidity", {}).get("usd", 0) or 0),
+            "change1h": float(pair.get("priceChange", {}).get("h1", 0) or 0),
+            "age_h":    (time.time() - float(pair.get("pairCreatedAt", time.time() * 1000)) / 1000) / 3600,
         }
     except Exception:
         return None
-
-# ── SMC ANALYSIS (EMA / VWAP / FVG) ─────────────────────────────
-def _ema(prices, period):
-    if len(prices) < period:
-        return None
-    k   = 2 / (period + 1)
-    ema = sum(prices[:period]) / period
-    for p in prices[period:]:
-        ema = p * k + ema * (1 - k)
-    return ema
-
-def get_candles(pair_address, resolution="5", limit=60):
-    """Fetch up to `limit` OHLCV candles from DexScreener (5m default)."""
-    if not pair_address:
-        return []
-    try:
-        now  = int(time.time())
-        res  = _session.get(
-            f"https://api.dexscreener.com/latest/dex/candles/solana/{pair_address}",
-            params={"res": resolution, "from": now - limit * int(resolution) * 60, "to": now},
-            timeout=8
-        )
-        if res.status_code != 200:
-            return []
-        raw = res.json()
-        candles = raw.get("candles") or raw.get("data") or []
-        return [c for c in candles if c.get("close", 0) > 0]
-    except Exception:
-        return []
-
-def smc_score(candles, current_price):
-    """
-    Score 0-3 for graduated coin entry quality:
-      +1  price above EMA(21) on 5m chart — trend alignment
-      +1  price above session VWAP         — intraday bullish bias
-      +1  price pulling back into a bullish FVG — optimal entry zone
-    Returns (score: int, detail: str)
-    """
-    if len(candles) < 5:
-        return 0, "no_candles"
-
-    closes = [c["close"] for c in candles]
-    score  = 0
-    parts  = []
-
-    # ── EMA(21) ──────────────────────────────────────────────────
-    ema21 = _ema(closes, min(21, len(closes)))
-    if ema21:
-        if current_price > ema21:
-            score += 1
-            parts.append(f"EMA✓{ema21:.6f}")
-        else:
-            parts.append(f"EMA✗{ema21:.6f}")
-
-    # ── VWAP ─────────────────────────────────────────────────────
-    total_vol = sum(c.get("volume", 0) for c in candles)
-    if total_vol > 0:
-        vwap = sum(
-            (c.get("high", c["close"]) + c.get("low", c["close"]) + c["close"]) / 3
-            * c.get("volume", 0)
-            for c in candles
-        ) / total_vol
-        if current_price > vwap:
-            score += 1
-            parts.append(f"VWAP✓{vwap:.6f}")
-        else:
-            parts.append(f"VWAP✗{vwap:.6f}")
-
-    # ── Bullish FVG ───────────────────────────────────────────────
-    # Candle[i].high < candle[i+2].low = unfilled gap; price in gap = pullback entry
-    fvg_hit = False
-    for i in range(len(candles) - 2):
-        gap_bot = candles[i].get("high", 0)
-        gap_top = candles[i + 2].get("low", 0)
-        if gap_top > gap_bot > 0 and gap_bot <= current_price <= gap_top:
-            score   += 1
-            fvg_hit  = True
-            parts.append(f"FVG✓[{gap_bot:.6f}-{gap_top:.6f}]")
-            break
-    if not fvg_hit:
-        parts.append("FVG✗")
-
-    return score, " ".join(parts)
 
 def get_sol_price():
     try:
@@ -1043,9 +950,7 @@ def check_holder_concentration(mint) -> tuple:
         if r.status_code != 200:
             return True, ""
         data = r.json().get("data") or {}
-        holders = data.get("holders")
-        if holders is None:
-            holders = data if isinstance(data, list) else []
+        holders = data.get("holders") or data if isinstance(data, list) else []
         top10_pct = sum(float(h.get("amount_percentage") or h.get("percent") or 0) for h in holders[:10])
         if top10_pct > 60:
             return False, f"top10={top10_pct:.0f}%"
@@ -1078,31 +983,27 @@ def check_dev_history(dev_wallet) -> tuple:
         return True, ""
 
 def _refresh_gmgn_signals():
-    """Refresh smart-money / KOL / trending / hot-search signal mint sets every 5 min."""
-    global _gmgn_sm_signal_mints, _gmgn_surge_mints, _gmgn_kol_mints, _gmgn_sm_sell_mints
-    global _gmgn_trending_mints, _gmgn_hot_mints, _gmgn_completing_mints, _gmgn_new_pair_mints
-    global _gmgn_signal_time
+    """Refresh all GMGN signal mint sets: smart-money, KOL, trending, hot search."""
+    global _gmgn_sm_signal_mints, _gmgn_surge_mints, _gmgn_kol_mints
+    global _gmgn_sm_sell_mints, _gmgn_trending_mints, _gmgn_hot_mints, _gmgn_signal_time
     try:
-        hdrs = {"Referer": "https://gmgn.ai/", "Origin": "https://gmgn.ai",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        hdrs = {
+            "Referer":    "https://gmgn.ai/",
+            "Origin":     "https://gmgn.ai",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        }
         if GMGN_API_KEY:
             hdrs["Authorization"] = f"Bearer {GMGN_API_KEY}"
 
-        def _extract(data):
-            """Pull mint address from any GMGN response item shape."""
-            if not data:
-                return set()
-            return {
-                (i.get("address") or i.get("mint") or i.get("token_address") or "")
-                for i in data if (i.get("address") or i.get("mint") or i.get("token_address"))
-            }
+        def _addrs(items):
+            return {i.get("address") or i.get("mint") or i.get("token_address","")
+                    for i in (items or [])
+                    if i.get("address") or i.get("mint") or i.get("token_address")}
 
         def _fetch_signal(stype):
             r = _session.get(GMGN_SIGNALS_URL, headers=hdrs,
-                             params={"signal_type": stype, "chain": "sol", "limit": 100}, timeout=8)
-            if r.status_code == 200:
-                return _extract(r.json().get("data") or [])
-            return set()
+                             params={"signal_type": stype, "chain":"sol","limit":100}, timeout=8)
+            return _addrs(r.json().get("data") or []) if r.status_code == 200 else set()
 
         sm  = _fetch_signal(12)   # smart money buy
         srg = _fetch_signal(6)    # price surge
@@ -1110,74 +1011,43 @@ def _refresh_gmgn_signals():
         # KOL buys
         kol = set()
         if GMGN_API_KEY:
-            r2 = _session.get(GMGN_KOL_TRACK, headers=hdrs, params={"side": "buy", "limit": 50}, timeout=8)
+            r2 = _session.get(GMGN_KOL_TRACK, headers=hdrs,
+                              params={"side":"buy","limit":50}, timeout=8)
             if r2.status_code == 200:
-                kol = _extract(r2.json().get("data") or [])
+                kol = _addrs(r2.json().get("data") or [])
 
-        # Smart-money sells (exit/skip signal)
+        # Smart-money sells — separate set, used only for exit filter
         sm_sell = set()
-        r3 = _session.get(GMGN_SM_TRACK, headers=hdrs, params={"side": "sell", "limit": 50}, timeout=8)
+        r3 = _session.get(GMGN_SM_TRACK, headers=hdrs,
+                          params={"side":"sell","limit":50}, timeout=8)
         if r3.status_code == 200:
-            sm_sell = _extract(r3.json().get("data") or [])
+            sm_sell = _addrs(r3.json().get("data") or [])
 
-        # Trending tokens (1h movers)
+        # Trending tokens — 1h price movers
         trending = set()
-        for period in ("1h", "4h"):
-            try:
-                rt = _session.get(GMGN_TRENDING_URL, headers=hdrs,
-                                  params={"orderby": "volume", "direction": "desc",
-                                          "period": period, "limit": 50}, timeout=8)
-                if rt.status_code == 200:
-                    items = rt.json().get("data") or rt.json().get("tokens") or []
-                    trending |= _extract(items)
-            except Exception:
-                pass
+        r4 = _session.get(GMGN_TRENDING_URL, headers=hdrs,
+                          params={"period":"1h","limit":50}, timeout=8)
+        if r4.status_code == 200:
+            trending = _addrs(r4.json().get("data") or [])
 
-        # Hot search
+        # Hot search — what traders are actively searching right now
         hot = set()
-        try:
-            rh = _session.get(GMGN_HOT_SEARCH_URL, headers=hdrs, params={"limit": 50}, timeout=8)
-            if rh.status_code == 200:
-                items = rh.json().get("data") or rh.json().get("tokens") or []
-                hot = _extract(items)
-        except Exception:
-            pass
-
-        # Completing bonding curve (near graduation)
-        completing = set()
-        try:
-            rc = _session.get(GMGN_COMPLETING_URL, headers=hdrs,
-                              params={"limit": 50}, timeout=8)
-            if rc.status_code == 200:
-                items = rc.json().get("data") or rc.json().get("tokens") or []
-                completing = _extract(items)
-        except Exception:
-            pass
-
-        # New pairs
-        new_pairs = set()
-        try:
-            rn = _session.get(GMGN_NEW_PAIRS_URL, headers=hdrs, params={"limit": 50}, timeout=8)
-            if rn.status_code == 200:
-                items = rn.json().get("data") or rn.json().get("tokens") or []
-                new_pairs = _extract(items)
-        except Exception:
-            pass
+        r5 = _session.get(GMGN_HOT_SEARCH, headers=hdrs,
+                          params={"limit":30}, timeout=8)
+        if r5.status_code == 200:
+            hot = _addrs(r5.json().get("data") or [])
 
         with _signal_lock:
-            _gmgn_sm_signal_mints  = sm
-            _gmgn_surge_mints      = srg
-            _gmgn_kol_mints        = kol
-            _gmgn_sm_sell_mints    = sm_sell
-            _gmgn_trending_mints   = trending
-            _gmgn_hot_mints        = hot
-            _gmgn_completing_mints = completing
-            _gmgn_new_pair_mints   = new_pairs
-            _gmgn_signal_time      = time.time()
+            _gmgn_sm_signal_mints = sm
+            _gmgn_surge_mints     = srg
+            _gmgn_kol_mints       = kol
+            _gmgn_sm_sell_mints   = sm_sell
+            _gmgn_trending_mints  = trending
+            _gmgn_hot_mints       = hot
+            _gmgn_signal_time     = time.time()
         log("info",
             f"GMGN signals: sm_buy={len(sm)} surge={len(srg)} kol={len(kol)} "
-            f"sm_sell={len(sm_sell)} trending={len(trending)} hot={len(hot)} "
-            f"completing={len(completing)} new_pairs={len(new_pairs)}", "GMGN")
+            f"sm_sell={len(sm_sell)} trending={len(trending)} hot={len(hot)}", "GMGN")
     except Exception as e:
         log("warn", f"GMGN signal refresh error: {e}", "GMGN")
 
@@ -1189,134 +1059,23 @@ def run_signal_refresh_loop():
 
 def gmgn_signal_score(mint) -> int:
     """
-    Returns 0-7 signal score for a mint:
+    Returns 0-5 signal score for a mint:
       +1 smart money buy  +1 price surge  +1 KOL buy
-      +1 trending (1h/4h) +1 hot search   +1 completing bonding curve  +1 new pair
+      +1 trending (1h)    +1 hot search
     """
     with _signal_lock:
         return (
-            (1 if mint in _gmgn_sm_signal_mints  else 0) +
-            (1 if mint in _gmgn_surge_mints       else 0) +
+            (1 if mint in _gmgn_sm_signal_mints else 0) +
+            (1 if mint in _gmgn_surge_mints      else 0) +
             (1 if mint in _gmgn_kol_mints         else 0) +
             (1 if mint in _gmgn_trending_mints    else 0) +
-            (1 if mint in _gmgn_hot_mints         else 0) +
-            (1 if mint in _gmgn_completing_mints  else 0) +
-            (1 if mint in _gmgn_new_pair_mints    else 0)
+            (1 if mint in _gmgn_hot_mints         else 0)
         )
 
 def gmgn_smart_money_selling(mint) -> bool:
     """Returns True if smart money is actively selling this mint."""
     with _signal_lock:
         return mint in _gmgn_sm_sell_mints
-
-def gmgn_trending_scan_loop():
-    """
-    Every GMGN_TREND_SCAN_INTERVAL seconds: take all mints from the trending,
-    hot-search, completing, and new-pair sets and evaluate them as entry candidates.
-    These may not appear in get_pumpfun_coins() at all, so this is an independent
-    discovery path.
-    """
-    global _trend_scanned
-    time.sleep(30)  # let signal refresh run first
-    while scan_active:
-        try:
-            with _signal_lock:
-                candidates = (
-                    _gmgn_trending_mints |
-                    _gmgn_hot_mints |
-                    _gmgn_completing_mints |
-                    _gmgn_new_pair_mints
-                ) - _trend_scanned
-
-            with trades_lock:
-                num_open = len(open_trades)
-            if num_open >= MAX_OPEN or daily_limit_reached():
-                time.sleep(GMGN_TREND_SCAN_INTERVAL)
-                continue
-
-            if not candidates:
-                time.sleep(GMGN_TREND_SCAN_INTERVAL)
-                continue
-
-            log("info", f"GMGN trend scan: {len(candidates)} new candidates", "GMGN")
-            for mint in list(candidates):
-                if not scan_active or daily_limit_reached():
-                    break
-                with trades_lock:
-                    if len(open_trades) >= MAX_OPEN:
-                        break
-                    if mint in open_trades:
-                        _trend_scanned.add(mint)
-                        continue
-
-                if not mint or len(mint) < 30:
-                    _trend_scanned.add(mint)
-                    continue
-                if mint in blacklisted_mints:
-                    _trend_scanned.add(mint)
-                    continue
-                if gmgn_smart_money_selling(mint):
-                    log("info", f"TREND SKIP: smart money selling", mint[:8])
-                    _trend_scanned.add(mint)
-                    continue
-
-                market = get_market_data(mint)
-                if not market or market["price"] <= 0 or market["liq"] < MIN_LIQ:
-                    _trend_scanned.add(mint)
-                    continue
-
-                details = get_bonding_details(mint)
-                bond = details["bond_pct"] if details else 0
-                if details and details.get("complete"):
-                    _trend_scanned.add(mint)  # already graduated — fall through to entry
-                elif bond > 99:
-                    # Only skip if fully on bonding curve and pump.fun confirmed it — shouldn't happen
-                    _trend_scanned.add(mint)
-                    continue
-
-                rug = run_rugcheck(mint)
-                if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
-                    blacklisted_mints.add(mint)
-                    _trend_scanned.add(mint)
-                    continue
-                if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
-                    _trend_scanned.add(mint)
-                    continue
-
-                holder_ok, holder_reason = check_holder_concentration(mint)
-                if not holder_ok:
-                    log("info", f"TREND SKIP: {holder_reason}", mint[:8])
-                    _trend_scanned.add(mint)
-                    continue
-
-                sig_score = gmgn_signal_score(mint)
-                symbol    = market.get("symbol", mint[:8])
-                amt       = trade_size()
-
-                with _signal_lock:
-                    src = ("trend" if mint in _gmgn_trending_mints else
-                           "hot"   if mint in _gmgn_hot_mints else
-                           "comp"  if mint in _gmgn_completing_mints else "new")
-
-                log("ok", f"GMGN {src.upper()} | bond={bond:.1f}% | liq=${market['liq']:.0f} | sig={sig_score}", symbol)
-                notify(f"🔥 GMGN {src.upper()} {symbol}",
-                       f"Bond: {bond:.1f}% | Liq: ${market['liq']:.0f}\n"
-                       f"Signal score: {sig_score}/7 | Amount: ${amt:.2f}")
-                enter_trade(mint, symbol, market["price"], amt, f"gmgn_{src}", bond, 0)
-                _trend_scanned.add(mint)
-                time.sleep(1)
-
-            # Clear the scanned set hourly so tokens can be re-evaluated if they're still trending
-            with _signal_lock:
-                still_live = (
-                    _gmgn_trending_mints | _gmgn_hot_mints |
-                    _gmgn_completing_mints | _gmgn_new_pair_mints
-                )
-            _trend_scanned -= still_live  # only forget tokens no longer in any set
-
-        except Exception as e:
-            log("err", f"GMGN trend scan loop: {e}", "GMGN")
-        time.sleep(GMGN_TREND_SCAN_INTERVAL)
 
 # ── USDC PROFIT LOCK ─────────────────────────────────────────────
 def lock_profit_to_usdc(profit_usd):
@@ -1380,68 +1139,7 @@ def lock_profit_to_usdc(profit_usd):
         log("warn", f"USDC lock error: {e}", "USDC")
 
 # ── TRADE EXECUTION ──────────────────────────────────────────────
-def _sign_and_send(raw_tx_b64, symbol):
-    """Decode a base64 transaction, sign with WALLET_PRIVATE_KEY, broadcast."""
-    import base64
-    tx_bytes = base64.b64decode(raw_tx_b64)
-    keypair  = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
-    tx       = VersionedTransaction(VersionedTransaction.from_bytes(tx_bytes).message, [keypair])
-    client   = Client(SOL_RPC)
-    result   = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True, preflight_commitment="confirmed"))
-    sig      = str(result.value)
-    if sig and len(sig) > 10:
-        log("ok", f"https://solscan.io/tx/{sig}", symbol)
-        return sig
-    return None
-
-def _gmgn_swap(token_in, token_out, in_amount, symbol, slippage=15):
-    """Route a swap through GMGN. Returns sig or None."""
-    try:
-        res = _session.get(
-            GMGN_ROUTE,
-            params={"token_in_address": token_in, "token_out_address": token_out,
-                    "in_amount": in_amount, "from_address": WALLET, "slippage": slippage},
-            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://gmgn.ai/"},
-            timeout=12,
-        )
-        if res.status_code != 200:
-            log("warn", f"GMGN route {res.status_code}: {res.text[:80]}", symbol)
-            return None
-        raw_tx = res.json().get("data", {}).get("raw_tx", {}).get("swapTransaction", "")
-        if not raw_tx:
-            log("warn", "GMGN returned no transaction", symbol)
-            return None
-        return _sign_and_send(raw_tx, symbol)
-    except Exception as e:
-        log("warn", f"GMGN swap error: {e}", symbol)
-        return None
-
-def _pumpportal_swap(action, mint, amount_or_tokens, symbol, pool="pump-swap"):
-    """Fallback: PumpPortal for bonding-curve tokens not yet routable via GMGN."""
-    try:
-        res = _session.post(
-            PUMPPORTAL,
-            headers={"Content-Type": "application/json"},
-            json={"publicKey": WALLET, "action": action, "mint": mint,
-                  "denominatedInSol": "true" if action == "buy" else "false",
-                  "amount": amount_or_tokens,
-                  "slippage": 20, "priorityFee": 0.001, "pool": pool},
-            timeout=15,
-        )
-        if res.status_code != 200:
-            log("err", f"PumpPortal {action} {res.status_code}: {res.text[:80]}", symbol)
-            return None
-        keypair = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
-        tx      = VersionedTransaction(VersionedTransaction.from_bytes(res.content).message, [keypair])
-        client  = Client(SOL_RPC)
-        result  = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True, preflight_commitment="confirmed"))
-        sig     = str(result.value)
-        return sig if sig and len(sig) > 10 else None
-    except Exception as e:
-        log("err", f"PumpPortal {action} error: {e}", symbol)
-        return None
-
-def execute_buy(mint, symbol, amount, pool="pump-swap"):
+def execute_buy(mint, symbol, amount, pump_swap=False, raydium=False):
     if PAPER_MODE:
         log("ok", f"[PAPER] Buy ${amount:.2f} -> {symbol}", symbol)
         return "PAPER_TX"
@@ -1450,43 +1148,77 @@ def execute_buy(mint, symbol, amount, pool="pump-swap"):
         if not sol_price:
             log("err", "Cannot get SOL price — buy aborted", symbol)
             return None
-        lamports = int((amount / sol_price) * 1_000_000_000)
-        sig = _gmgn_swap(WSOL_MINT, mint, lamports, symbol)
-        if sig:
-            log("ok", f"Bought via GMGN! sig={sig[:20]}...", symbol)
+        sol_amount = round(amount / sol_price, 6)
+        if raydium:
+            pool = "raydium"
+        elif pump_swap:
+            pool = "pump-swap"
+        else:
+            pool = "pump"
+
+        res = _session.post(
+            PUMPPORTAL,
+            headers={"Content-Type": "application/json"},
+            json={"publicKey": WALLET, "action": "buy", "mint": mint,
+                  "denominatedInSol": "true", "amount": sol_amount,
+                  "slippage": 20, "priorityFee": 0.001, "pool": pool},
+            timeout=15
+        )
+        if res.status_code != 200:
+            log("err", f"PumpPortal buy {res.status_code}: {res.text[:80]}", symbol)
+            return None
+
+        keypair = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+        tx      = VersionedTransaction(VersionedTransaction.from_bytes(res.content).message, [keypair])
+        client  = Client(SOL_RPC)
+        result  = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True, preflight_commitment="confirmed"))
+        sig     = str(result.value)
+        if sig and len(sig) > 10:
+            log("ok", f"Bought! sig={sig[:20]}...", symbol)
+            log("ok", f"https://solscan.io/tx/{sig}", symbol)
             return sig
-        # Fallback for pre-graduation bonding curve tokens
-        log("warn", "GMGN route failed — trying PumpPortal", symbol)
-        sig = _pumpportal_swap("buy", mint, round(amount / sol_price, 6), symbol, pool)
-        if sig:
-            log("ok", f"Bought via PumpPortal! sig={sig[:20]}...", symbol)
-        return sig
+        return None
     except Exception as e:
         log("err", f"Buy error: {e}", symbol)
         return None
 
-def execute_sell(tokens, mint, symbol, pool="pump-swap"):
+def execute_sell(tokens, mint, symbol, pump_swap=False, raydium=False):
     if PAPER_MODE:
         log("ok", f"[PAPER] Sell {symbol}", symbol)
         return "PAPER_TX"
     try:
-        token_units = int(tokens * 1_000_000)  # PumpFun tokens = 6 decimals
-        sig = _gmgn_swap(mint, WSOL_MINT, token_units, symbol)
-        if sig:
-            log("ok", f"Sold via GMGN! sig={sig[:20]}...", symbol)
+        if raydium:
+            pool = "raydium"
+        elif pump_swap:
+            pool = "pump-swap"
+        else:
+            pool = "pump"
+        res = _session.post(
+            PUMPPORTAL,
+            headers={"Content-Type": "application/json"},
+            json={"publicKey": WALLET, "action": "sell", "mint": mint,
+                  "denominatedInSol": "false", "amount": tokens,
+                  "slippage": 20, "priorityFee": 0.001, "pool": pool},
+            timeout=15
+        )
+        if res.status_code != 200:
+            log("err", f"PumpPortal sell {res.status_code}: {res.text[:80]}", symbol)
+            return None
+        keypair = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+        tx      = VersionedTransaction(VersionedTransaction.from_bytes(res.content).message, [keypair])
+        client  = Client(SOL_RPC)
+        result  = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True, preflight_commitment="confirmed"))
+        sig     = str(result.value)
+        if sig and len(sig) > 10:
+            log("ok", f"Sold! sig={sig[:20]}...", symbol)
             return sig
-        # Fallback for bonding curve tokens
-        log("warn", "GMGN route failed — trying PumpPortal", symbol)
-        sig = _pumpportal_swap("sell", mint, tokens, symbol, pool)
-        if sig:
-            log("ok", f"Sold via PumpPortal! sig={sig[:20]}...", symbol)
-        return sig
+        return None
     except Exception as e:
         log("err", f"Sell error: {e}", symbol)
         return None
 
 # ── ENTER / EXIT ─────────────────────────────────────────────────
-def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, replies=0, pool="pump-swap"):
+def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, replies=0, pump_swap=False, raydium=False):
     global capital, _daily_trades
     if daily_limit_reached():
         return False
@@ -1501,16 +1233,16 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
     with capital_lock:
         if capital < amount:
             return False
-        capital -= amount  # reserve immediately so concurrent enters can't double-spend
 
-    tx = execute_buy(mint, symbol, amount, pool)
+    tx = execute_buy(mint, symbol, amount, pump_swap=pump_swap, raydium=raydium)
     if not tx:
-        with capital_lock:
-            capital += amount  # refund reservation on buy failure
         return False
 
     with _daily_lock:
         _daily_trades += 1
+
+    with capital_lock:
+        capital -= amount
 
     with trades_lock:
         open_trades[mint] = {
@@ -1528,10 +1260,11 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
             "bond_slip_start":   None,
             "price_high":        entry_price,   # trailing SL tracks peak price
             "replies":           replies,
-            "pool":              pool,
+            "pump_swap":         pump_swap,
+            "raydium":           raydium,
         }
 
-    log("ok", f"ENTER [{strategy.upper()}] ${amount:.2f} | bond={bond_entry:.1f}% | pool={pool}", symbol)
+    log("ok", f"ENTER [{strategy.upper()}] ${amount:.2f} | bond={bond_entry:.1f}%", symbol)
     notify(f"🟢 BUY {symbol}",
            f"Strategy: {strategy.upper()}\nAmount: ${amount:.2f}\nBond: {bond_entry:.1f}%\nReplies: {replies}")
     return True
@@ -1548,22 +1281,18 @@ def exit_trade(mint, price, reason, bond=0):
     pnl    = max(-amount, min(pnl, amount * 5))
     hold_m = (time.time() - trade["opened_at"]) / 60
 
-    sig = execute_sell(trade["tokens"], mint, trade["symbol"], trade.get("pool", "pump"))
     with capital_lock:
-        if sig:
-            capital += amount + pnl
-        else:
-            capital += amount  # sell failed — return stake only, no PnL credit
-            log("err", f"Sell tx failed — stake returned, PnL not credited. Check wallet.", trade["symbol"])
-        cap_after = capital  # snapshot under lock for use below
+        capital += amount + pnl
 
     sign = "+" if pnl >= 0 else ""
     log("ok" if pnl >= 0 else "err",
-        f"{'WIN' if pnl>=0 else 'LOSS'} {reason} | {sign}${pnl:.4f} | {hold_m:.1f}m | cap=${cap_after:.2f}",
+        f"{'WIN' if pnl>=0 else 'LOSS'} {reason} | {sign}${pnl:.4f} | {hold_m:.1f}m | cap=${capital:.2f}",
         trade["symbol"])
     emoji = "✅" if pnl >= 0 else "❌"
     notify(f"{emoji} {'WIN' if pnl>=0 else 'LOSS'} {trade['symbol']}",
-           f"Reason: {reason}\nPnL: {sign}${pnl:.4f}\nHeld: {hold_m:.1f} min\nCapital: ${cap_after:.2f}")
+           f"Reason: {reason}\nPnL: {sign}${pnl:.4f}\nHeld: {hold_m:.1f} min\nCapital: ${capital:.2f}")
+
+    execute_sell(trade["tokens"], mint, trade["symbol"], pump_swap=trade.get("pump_swap", False), raydium=trade.get("raydium", False))
     with _copy_lock:
         _sold_mints[mint] = time.time()  # 30 min cooldown before re-buying
     record_daily_trade(won=(pnl > 0))
@@ -1591,8 +1320,7 @@ def exit_trade(mint, price, reason, bond=0):
         "date":       time.strftime("%Y-%m-%d"),
         "time":       time.strftime("%H:%M:%S"),
     }
-    with log_lock:
-        completed_trades.append(rec)
+    completed_trades.append(rec)
     record_trade(rec)
     check_milestones()
     _save_daily_state()
@@ -1604,7 +1332,7 @@ def exit_trade(mint, price, reason, bond=0):
         if cap_now >= USDC_LOCK_THRESHOLD:
             threading.Thread(target=lock_profit_to_usdc, args=(pnl,), daemon=True).start()
 
-    if cap_after < 2:
+    if capital < 2:
         global scan_active
         scan_active = False
         log("err", "Capital below $2 — scanner halted", "HALT")
@@ -1612,170 +1340,175 @@ def exit_trade(mint, price, reason, bond=0):
 # ── MONITOR LOOP ────────────────────────────────────────────────
 def monitor_loop():
     while True:
-        try:
-            time.sleep(3)
+        time.sleep(3)
+        with trades_lock:
+            mints = list(open_trades.keys())
+        for mint in mints:
             with trades_lock:
-                mints = list(open_trades.keys())
-            for mint in mints:
+                if mint not in open_trades:
+                    continue
+                trade = dict(open_trades[mint])
+            symbol   = trade["symbol"]
+            strategy = trade["strategy"]
+            elapsed  = time.time() - trade["opened_at"]
+
+            details = get_bonding_details(mint)
+            bond    = details["bond_pct"] if details else 0
+            market  = get_market_data(mint)
+            price   = market["price"] if market and market["price"] > 0 else trade["entry"]
+
+            # Paper mode: simulate price from bond % movement when DexScreener has no data
+            if PAPER_MODE and price == trade["entry"] and bond > 0 and trade.get("bond_entry", 0) > 0:
+                bond_move = bond - trade["bond_entry"]
+                price = trade["entry"] * (1 + bond_move / 100)
+
+            with trades_lock:
+                if mint not in open_trades:
+                    continue
+                if bond > open_trades[mint]["bond_high"]:
+                    open_trades[mint]["bond_high"]      = bond
+                    open_trades[mint]["bond_last_moved"] = time.time()
+                if price > open_trades[mint]["price_high"]:
+                    open_trades[mint]["price_high"] = price
+                bond_high       = open_trades[mint]["bond_high"]
+                bond_prev       = open_trades[mint]["bond_prev"]
+                bond_last_moved = open_trades[mint].get("bond_last_moved", time.time())
+                slip_start      = open_trades[mint]["bond_slip_start"]
+                price_high      = open_trades[mint]["price_high"]
+                open_trades[mint]["bond_prev"] = bond
+
+            bond_drop = bond - bond_prev
+
+            # Instant exit: sharp bond drop of 4%+ while near graduation
+            if bond_high >= SLIP_TRIGGER and bond_drop <= -SHARP_DROP_PCT:
+                log("warn", f"SHARP DROP bond={bond:.1f}% drop={bond_drop:.1f}%", symbol)
+                exit_trade(mint, price, "SHARP_DROP", bond)
+                continue
+
+            # Gradual slip: bond was >=90% and fell to <=85%, wait 6s for retrace
+            if bond_high >= SLIP_TRIGGER and bond <= SLIP_DROP_TO:
                 with trades_lock:
                     if mint not in open_trades:
                         continue
-                    trade = dict(open_trades[mint])
-                symbol   = trade["symbol"]
-                strategy = trade["strategy"]
-                elapsed  = time.time() - trade["opened_at"]
-
-                details = get_bonding_details(mint)
-                market  = get_market_data(mint)
-                price   = market["price"] if market and market["price"] > 0 else trade["entry"]
-                bond    = trade.get("bond_prev", 0)  # initial value; overwritten under lock below
-
-                # Paper mode: simulate price from bond % movement when DexScreener has no data
-                if PAPER_MODE and price == trade["entry"] and bond > 0 and trade.get("bond_entry", 0) > 0:
-                    bond_move = bond - trade["bond_entry"]
-                    price = trade["entry"] * (1 + bond_move / 100)
-                # Paper mode fallback: if no price after 60s, use tiny random walk so exits still fire
-                elif PAPER_MODE and price == trade["entry"] and elapsed > 60:
-                    price = trade["entry"] * (1 + random.uniform(-0.03, 0.05))
-
+                    if open_trades[mint]["bond_slip_start"] is None:
+                        open_trades[mint]["bond_slip_start"] = time.time()
+                        log("warn", f"Bond slip {bond:.1f}% — watching {SLIP_WAIT_SECS}s", symbol)
+                    elif time.time() - open_trades[mint]["bond_slip_start"] >= SLIP_WAIT_SECS:
+                        exit_trade(mint, price, "BOND_SLIP", bond)
+                        continue
+            else:
                 with trades_lock:
-                    if mint not in open_trades:
-                        continue
-                    bond_prev_raw = open_trades[mint]["bond_prev"]
-                    bond = details["bond_pct"] if details else bond_prev_raw  # keep last known on fetch failure
-                    if bond > open_trades[mint]["bond_high"]:
-                        open_trades[mint]["bond_high"]      = bond
-                        open_trades[mint]["bond_last_moved"] = time.time()
-                    if price > open_trades[mint]["price_high"]:
-                        open_trades[mint]["price_high"] = price
-                    bond_high       = open_trades[mint]["bond_high"]
-                    bond_prev       = open_trades[mint]["bond_prev"]
-                    bond_last_moved = open_trades[mint].get("bond_last_moved", time.time())
-                    slip_start      = open_trades[mint]["bond_slip_start"]
-                    price_high      = open_trades[mint]["price_high"]
-                    open_trades[mint]["bond_prev"] = bond
+                    if mint in open_trades:
+                        open_trades[mint]["bond_slip_start"] = None
 
-                bond_drop = bond - bond_prev
+            # Bundle ride exit
+            if strategy == "bundle" and bond >= BUNDLE_RIDE_TP:
+                exit_trade(mint, price, "BUNDLE_TP", bond)
+                continue
 
-                # Instant exit: sharp bond drop of 4%+ while near graduation
-                if bond_high >= SLIP_TRIGGER and bond_drop <= -SHARP_DROP_PCT:
-                    log("warn", f"SHARP DROP bond={bond:.1f}% drop={bond_drop:.1f}%", symbol)
-                    exit_trade(mint, price, "SHARP_DROP", bond)
+            # Stale exit: bond hasn't moved in BOND_STALE_SECS — momentum dead
+            stale_secs = time.time() - bond_last_moved
+            if strategy in ("bond", "bundle") and elapsed > 30 and stale_secs >= BOND_STALE_SECS:
+                log("warn", f"Bond stale {stale_secs:.0f}s — exiting", symbol)
+                exit_trade(mint, price, "STALE", bond)
+                continue
+
+            # Compute trailing SL level for all strategies
+            # Once trade is up TSL_ACTIVATE_PCT, stop trails below price_high
+            entry_gain_pct = ((price_high - trade["entry"]) / trade["entry"]) * 100
+            if entry_gain_pct >= TSL_ACTIVATE_PCT:
+                tsl_price = price_high * (1 - BOND_SL_PCT / 100)
+            else:
+                tsl_price = trade["entry"] * (1 - BOND_SL_PCT / 100)
+
+            # Graduation follow-through: bond position graduated — ride on Raydium via migrate rules
+            if strategy == "bond" and GRAD_THROUGH and details and details.get("complete"):
+                with trades_lock:
+                    if mint in open_trades:
+                        open_trades[mint]["strategy"]       = "migrate"
+                        open_trades[mint]["raydium"]        = True
+                        open_trades[mint]["grad_opened_at"] = time.time()
+                strategy = "migrate"
+                log("ok", f"GRADUATED → riding on Raydium (bond={bond:.1f}%)", symbol)
+
+            # Bond Runner exits
+            if strategy == "bond":
+                if bond >= BOND_TP:
+                    exit_trade(mint, price, "BOND_TP", bond)
+                    continue
+                if price <= tsl_price:
+                    reason = "BOND_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "BOND_SL"
+                    exit_trade(mint, price, reason, bond)
+                    continue
+                if elapsed >= BOND_MAX_SECS:
+                    exit_trade(mint, price, "BOND_TIME", bond)
                     continue
 
-                # Gradual slip: bond was >=90% and fell to <=85%, wait 6s for retrace
-                if bond_high >= SLIP_TRIGGER and bond <= SLIP_DROP_TO:
-                    with trades_lock:
-                        if mint not in open_trades:
-                            continue
-                        if open_trades[mint]["bond_slip_start"] is None:
-                            open_trades[mint]["bond_slip_start"] = time.time()
-                            log("warn", f"Bond slip {bond:.1f}% — watching {SLIP_WAIT_SECS}s", symbol)
-                        elif time.time() - open_trades[mint]["bond_slip_start"] >= SLIP_WAIT_SECS:
-                            exit_trade(mint, price, "BOND_SLIP", bond)
-                            continue
-                else:
-                    with trades_lock:
-                        if mint in open_trades:
-                            open_trades[mint]["bond_slip_start"] = None
-
-                # Bundle ride exit
-                if strategy == "bundle" and bond >= BUNDLE_RIDE_TP:
-                    exit_trade(mint, price, "BUNDLE_TP", bond)
+            # Spike exits
+            if strategy == "spike":
+                move = ((price - trade["entry"]) / trade["entry"]) * 100
+                if move >= SPIKE_TP_PCT:
+                    exit_trade(mint, price, "SPIKE_TP", bond)
+                    continue
+                if price <= tsl_price:
+                    reason = "SPIKE_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "SPIKE_SL"
+                    exit_trade(mint, price, reason, bond)
+                    continue
+                if elapsed >= SPIKE_MAX_SECS:
+                    exit_trade(mint, price, "SPIKE_TIME", bond)
                     continue
 
-                # Stale exit: bond hasn't moved in BOND_STALE_SECS — momentum dead
-                stale_secs = time.time() - bond_last_moved
-                if strategy in ("bond", "bundle") and elapsed > 30 and stale_secs >= BOND_STALE_SECS:
-                    log("warn", f"Bond stale {stale_secs:.0f}s — exiting", symbol)
-                    exit_trade(mint, price, "STALE", bond)
+            # Copy trade exits
+            if strategy == "copy":
+                move = ((price - trade["entry"]) / trade["entry"]) * 100
+                if move >= COPY_TP_PCT:
+                    exit_trade(mint, price, "COPY_TP", bond)
+                    continue
+                if price <= tsl_price:
+                    reason = "COPY_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "COPY_SL"
+                    exit_trade(mint, price, reason, bond)
+                    continue
+                if elapsed >= COPY_MAX_SECS:
+                    exit_trade(mint, price, "COPY_TIME", bond)
                     continue
 
-                # Compute trailing SL level for all strategies
-                # Once trade is up TSL_ACTIVATE_PCT, stop trails below price_high
-                entry_gain_pct = ((price_high - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
-                if entry_gain_pct >= TSL_ACTIVATE_PCT:
-                    tsl_price = price_high * (1 - BOND_SL_PCT / 100)
-                else:
-                    tsl_price = trade["entry"] * (1 - BOND_SL_PCT / 100)
+            # Trench exits — near-graduation play, very fast window
+            if strategy == "trench":
+                move = ((price - trade["entry"]) / trade["entry"]) * 100
+                if bond >= 99:
+                    # Coin graduated while we held — exit before Raydium migration confusion
+                    exit_trade(mint, price, "TRENCH_GRAD", bond)
+                    continue
+                if move >= TRENCH_TP_PCT:
+                    exit_trade(mint, price, "TRENCH_TP", bond)
+                    continue
+                if price <= tsl_price:
+                    reason = "TRENCH_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "TRENCH_SL"
+                    exit_trade(mint, price, reason, bond)
+                    continue
+                if elapsed >= TRENCH_MAX_SECS:
+                    exit_trade(mint, price, "TRENCH_TIME", bond)
+                    continue
 
-                # Bond Runner exits
-                if strategy == "bond":
-                    if bond >= BOND_TP:
-                        exit_trade(mint, price, "BOND_TP", bond)
-                        continue
-                    if price <= tsl_price:
-                        reason = "BOND_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "BOND_SL"
-                        exit_trade(mint, price, reason, bond)
-                        continue
-                    if elapsed >= BOND_MAX_SECS:
-                        exit_trade(mint, price, "BOND_TIME", bond)
-                        continue
+            # Migration bounce exits — Raydium momentum after graduation
+            if strategy == "migrate":
+                # grad_opened_at resets the clock at graduation so full MIGRATE_MAX_SECS applies
+                migrate_elapsed = time.time() - trade.get("grad_opened_at", trade["opened_at"])
+                move = ((price - trade["entry"]) / trade["entry"]) * 100
+                if move >= MIGRATE_TP_PCT:
+                    exit_trade(mint, price, "MIGRATE_TP", bond)
+                    continue
+                if price <= tsl_price:
+                    reason = "MIGRATE_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "MIGRATE_SL"
+                    exit_trade(mint, price, reason, bond)
+                    continue
+                if migrate_elapsed >= MIGRATE_MAX_SECS:
+                    exit_trade(mint, price, "MIGRATE_TIME", bond)
+                    continue
 
-                # Spike exits
-                if strategy == "spike":
-                    move = ((price - trade["entry"]) / trade["entry"]) * 100
-                    if move >= SPIKE_TP_PCT:
-                        exit_trade(mint, price, "SPIKE_TP", bond)
-                        continue
-                    if price <= tsl_price:
-                        reason = "SPIKE_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "SPIKE_SL"
-                        exit_trade(mint, price, reason, bond)
-                        continue
-                    if elapsed >= SPIKE_MAX_SECS:
-                        exit_trade(mint, price, "SPIKE_TIME", bond)
-                        continue
-
-                # Copy trade exits
-                if strategy == "copy":
-                    move = ((price - trade["entry"]) / trade["entry"]) * 100
-                    if move >= COPY_TP_PCT:
-                        exit_trade(mint, price, "COPY_TP", bond)
-                        continue
-                    if price <= tsl_price:
-                        reason = "COPY_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "COPY_SL"
-                        exit_trade(mint, price, reason, bond)
-                        continue
-                    if elapsed >= COPY_MAX_SECS:
-                        exit_trade(mint, price, "COPY_TIME", bond)
-                        continue
-
-                # Hype scalp exits — fast TP/SL, 2min max hold
-                if strategy == "hype":
-                    move = ((price - trade["entry"]) / trade["entry"]) * 100
-                    hype_sl = trade["entry"] * (1 - HYPE_SL_PCT / 100)
-                    hype_tsl = price_high * (1 - HYPE_SL_PCT / 100) if entry_gain_pct >= TSL_ACTIVATE_PCT else hype_sl
-                    if move >= HYPE_TP_PCT:
-                        exit_trade(mint, price, "HYPE_TP", bond)
-                        continue
-                    if price <= hype_tsl:
-                        reason = "HYPE_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "HYPE_SL"
-                        exit_trade(mint, price, reason, bond)
-                        continue
-                    if elapsed >= HYPE_MAX_SECS:
-                        exit_trade(mint, price, "HYPE_TIME", bond)
-                        continue
-
-                # Raydium Runner exits (graduated tokens)
-                if strategy == "grad":
-                    grad_tsl = price_high * (1 - GRAD_SL_PCT / 100) if entry_gain_pct >= TSL_ACTIVATE_PCT else trade["entry"] * (1 - GRAD_SL_PCT / 100)
-                    move = ((price - trade["entry"]) / trade["entry"]) * 100
-                    if move >= GRAD_TP_PCT:
-                        exit_trade(mint, price, "GRAD_TP", bond)
-                        continue
-                    if price <= grad_tsl:
-                        reason = "GRAD_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "GRAD_SL"
-                        exit_trade(mint, price, reason, bond)
-                        continue
-                    if elapsed >= GRAD_MAX_SECS:
-                        exit_trade(mint, price, "GRAD_TIME", bond)
-                        continue
-
-                pct = ((price - trade["entry"]) / trade["entry"]) * 100
-                tsl_info = f" TSL@{tsl_price:.6f}" if entry_gain_pct >= TSL_ACTIVATE_PCT else ""
-                log("info", f"[{strategy}] bond={bond:.1f}% price={pct:+.1f}% peak={entry_gain_pct:+.1f}%{tsl_info} {elapsed/60:.1f}m", symbol)
-        except Exception as e:
-            log("err", f"monitor_loop error: {e}")
+            pct = ((price - trade["entry"]) / trade["entry"]) * 100
+            tsl_info = f" TSL@{tsl_price:.6f}" if entry_gain_pct >= TSL_ACTIVATE_PCT else ""
+            log("info", f"[{strategy}] bond={bond:.1f}% price={pct:+.1f}% peak={entry_gain_pct:+.1f}%{tsl_info} {elapsed/60:.1f}m", symbol)
 
 # ── COPY TRADING ─────────────────────────────────────────────────
 def fetch_smart_wallets():
@@ -1799,8 +1532,8 @@ def fetch_smart_wallets():
             timeout=12
         )
         if res.status_code == 403:
-            _gmgn_backoff = time.time() + 3600  # back off 1 hour on 403
-            log("warn", "GMGN rank blocked (403) — copy trading paused 1h", "COPY")
+            _gmgn_backoff = time.time() + 600   # back off 10 min on 403 (Railway IPs rotate)
+            log("warn", "GMGN rank blocked (403) — will retry in 10min", "COPY")
             return
         if res.status_code != 200:
             log("warn", f"GMGN rank {res.status_code}", "COPY")
@@ -1811,108 +1544,17 @@ def fetch_smart_wallets():
             wr_raw = float(w.get("winrate", 0) or 0)
             wr     = wr_raw * 100 if wr_raw <= 1 else wr_raw  # handle 0-1 or 0-100 format
             addr   = w.get("address", "")
-            if not addr or not (COPY_WINRATE_MIN <= wr < COPY_WINRATE_MAX):
-                continue
-            # Require minimum trade history — single-hit flukes not useful
-            total_trades = int(w.get("txs_count", 0) or w.get("buy_count", 0) or 0)
-            if total_trades < 15:  # also rejects 0 — no verifiable history
-                continue
-            # Prefer realized profit over paper gains (research finding)
-            realized   = float(w.get("realized_profit", 0) or 0)
-            unrealized = float(w.get("unrealized_profit", 0) or 0)
-            total_pnl  = realized + unrealized
-            if total_pnl > 0 and realized / total_pnl < 0.5:
-                continue  # less than 50% of gains are closed — could be bagholding
-            qualified.append({"address": addr, "winrate": round(wr, 1), "realized": round(realized, 2)})
-        # Sort by realized profit (not just winrate) — consistent closers beat lucky holders
-        qualified = sorted(qualified, key=lambda x: x.get("realized", 0), reverse=True)[:COPY_MAX_WALLETS]
-        # Always include pinned wallets (user-specified) — never filtered by GMGN ranking
-        pinned_addrs = {w["address"] for w in qualified}
-        pinned_extra = [{"address": a, "winrate": "pinned"}
-                        for a in COPY_PINNED_WALLETS if a not in pinned_addrs]
-        combined = pinned_extra + qualified
+            if addr and COPY_WINRATE_MIN <= wr < COPY_WINRATE_MAX:
+                qualified.append({"address": addr, "winrate": round(wr, 1)})
+        qualified = sorted(qualified, key=lambda x: x["winrate"], reverse=True)[:COPY_MAX_WALLETS]
         with _copy_lock:
-            _copy_wallets     = combined
+            _copy_wallets     = qualified
             _copy_wallet_time = time.time()
-        log("ok", f"Tracking {len(combined)} wallets ({len(pinned_extra)} pinned + {len(qualified)} GMGN) | WR {COPY_WINRATE_MIN}-{COPY_WINRATE_MAX}%", "COPY")
-        for w in combined:
+        log("ok", f"Tracking {len(qualified)} wallets | WR {COPY_WINRATE_MIN}-{COPY_WINRATE_MAX}%", "COPY")
+        for w in qualified:
             log("info", f"  {w['address'][:8]}... WR:{w['winrate']}%", "COPY")
     except Exception as e:
         log("warn", f"fetch_smart_wallets: {e}", "COPY")
-
-_GMGN_WALLET_STATS = "https://gmgn.ai/defi/quotation/v1/smartmoney/sol/walletNew"
-
-def fetch_pinned_wallet_stats():
-    """
-    Fetch 7-day performance stats for every pinned wallet from GMGN.
-    Returns list of dicts with address, winrate, realized_profit, trades, last_active.
-    """
-    if not COPY_PINNED_WALLETS:
-        return []
-    hdrs = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept":     "application/json",
-        "Referer":    "https://gmgn.ai/",
-        "Origin":     "https://gmgn.ai",
-    }
-    if GMGN_API_KEY:
-        hdrs["Authorization"] = f"Bearer {GMGN_API_KEY}"
-    results = []
-    for addr in COPY_PINNED_WALLETS:
-        try:
-            r = _session.get(
-                f"{_GMGN_WALLET_STATS}/{addr}",
-                params={"period": "7d"},
-                headers=hdrs,
-                timeout=10
-            )
-            if r.status_code != 200:
-                results.append({"address": addr, "error": r.status_code})
-                continue
-            d = r.json().get("data", {})
-            wr_raw = float(d.get("winrate", 0) or 0)
-            wr     = wr_raw * 100 if wr_raw <= 1 else wr_raw
-            realized   = float(d.get("realized_profit",   0) or 0)
-            unrealized = float(d.get("unrealized_profit", 0) or 0)
-            trades     = int(d.get("buy_30d", 0) or d.get("txs_count", 0) or 0)
-            last_ts    = int(d.get("last_active_timestamp", 0) or 0)
-            last_active = time.strftime("%m/%d %H:%M", time.localtime(last_ts)) if last_ts else "unknown"
-            results.append({
-                "address":    addr,
-                "winrate":    round(wr, 1),
-                "realized":   round(realized, 2),
-                "unrealized": round(unrealized, 2),
-                "trades":     trades,
-                "last_active": last_active,
-            })
-            time.sleep(0.5)  # avoid hammering GMGN
-        except Exception as e:
-            results.append({"address": addr, "error": str(e)})
-    return results
-
-def _send_wallet_report():
-    """Send daily Telegram report ranking the pinned wallets by 7d realized profit."""
-    stats = fetch_pinned_wallet_stats()
-    if not stats:
-        return
-    # Sort by realized profit descending; errors go to bottom
-    stats.sort(key=lambda x: x.get("realized", -999999), reverse=True)
-    lines = ["📊 *Wallet Watch — 7d Report*\n"]
-    for i, w in enumerate(stats, 1):
-        addr  = w["address"]
-        short = f"`{addr[:6]}...{addr[-4:]}`"
-        if "error" in w:
-            lines.append(f"{i}. {short}\n   ⚠️ No data ({w['error']})")
-        else:
-            pnl_sign = "+" if w["realized"] >= 0 else ""
-            lines.append(
-                f"{i}. {short}\n"
-                f"   WR: {w['winrate']}% | PnL: {pnl_sign}${w['realized']:,.0f} | Trades: {w['trades']}\n"
-                f"   Last active: {w['last_active']}"
-            )
-    notify("📊 Wallet Rankings", "\n".join(lines))
-    log("ok", f"Sent daily wallet report for {len(stats)} pinned wallets", "COPY")
-
 
 def copy_trade_loop():
     time.sleep(15)
@@ -1933,12 +1575,18 @@ def copy_trade_loop():
                 for m in expired:
                     _copied_mints.pop(m, None)
 
+            # Always include manually tracked wallets (from TRACKED_WALLETS env var)
+            tracked_addrs = {w["address"] for w in wallets}
+            for addr in TRACKED_WALLETS:
+                if addr not in tracked_addrs:
+                    wallets.append({"address": addr, "winrate": 100.0})
+
             if not wallets:
                 time.sleep(60)
                 continue
 
             for w in wallets:
-                if not scan_active or daily_limit_reached():
+                if daily_limit_reached():
                     break
                 addr = w["address"]
                 try:
@@ -2009,11 +1657,12 @@ def copy_trade_loop():
 # ── SCANNER LOOP ─────────────────────────────────────────────────
 def scanner_loop():
     log("ok", "=" * 55)
-    log("ok", "GMGN Sniper — Bond Runner + Dormant Spike + Raydium Runner")
+    log("ok", "PumpFun Sniper — Bond Runner + Dormant Spike")
     log("ok", f"Bond entry: {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% | TP: {BOND_TP}%")
     log("ok", f"Spike: {SPIKE_MIN_AGE_H}h+ dormant, {SPIKE_MIN_1H}%+ 1h move")
-    log("ok", f"Raydium Runner: {'ON' if GRAD_MODE else 'OFF'} | liq>${GRAD_MIN_LIQ/1000:.0f}k | 1h>{GRAD_MIN_1H_PCT:.0f}%")
-    log("ok", f"Trade size: min ${MIN_TRADE} max ${MAX_TRADE}")
+    with capital_lock:
+        _sp, _ = _cap_tier(capital)
+    log("ok", f"Trade size: ~{_sp*100:.0f}% of capital (min ${MIN_TRADE} max ${MAX_TRADE})")
     log("ok", f"Mode: {'PAPER' if PAPER_MODE else 'LIVE'}")
     log("ok", "=" * 55)
 
@@ -2026,12 +1675,11 @@ def scanner_loop():
                 continue
 
             log("info", f"--- Scan | Open:{num_open}/{MAX_OPEN} | Size:${trade_size():.2f} ---")
-            coins, grad_coins = get_gmgn_coins()
-            if not coins and not grad_coins:
-                log("warn", "No coins fetched from GMGN")
+            coins = get_pumpfun_coins()
+            if not coins:
+                log("warn", "No coins fetched")
                 time.sleep(30)
                 continue
-            _scan_sol_price = get_sol_price() or 0
 
             # Scan summary counters for diagnostics
             n_social = n_replies = n_bond_range = n_spike_range = 0
@@ -2040,8 +1688,10 @@ def scanner_loop():
                 with trades_lock:
                     if len(open_trades) >= MAX_OPEN:
                         break
-                mint   = coin["mint"]
-                symbol = coin["symbol"]
+                mint      = coin["mint"]
+                symbol    = coin["symbol"]
+                _bond_pre = coin.get("bond_pct", 0)
+                _sig_pre  = sum([bool(coin.get("twitter")), bool(coin.get("telegram")), bool(coin.get("website"))])
 
                 if mint in blacklisted_mints:
                     continue
@@ -2049,19 +1699,21 @@ def scanner_loop():
                     if mint in open_trades:
                         continue
 
-                # Social is a bonus signal, not a hard gate
-                if coin.get("twitter") or coin.get("telegram"):
-                    n_social += 1
-
-                # Active trading: skip if last trade timestamp known and stale
-                # If timestamp is 0/unknown (established tokens from trending feed), skip this
-                # check and rely on DexScreener change5m filter further down instead.
-                last_trade = coin.get("last_trade", 0)
-                secs_since = (time.time() - last_trade / 1000) if last_trade > 0 else 0
-                if last_trade > 0 and secs_since > 600:
-                    log("info", f"SKIP stale: last trade {secs_since:.0f}s ago bond={coin.get('bond_pct',0):.0f}%", symbol)
+                # Require Twitter, Telegram, or Website (at least one social signal)
+                if not coin.get("twitter") and not coin.get("telegram") and not coin.get("website"):
+                    _log_scan(symbol, mint, _bond_pre, 0, "social", 0, "NO SOCIAL LINKS")
                     continue
-                n_replies += 1  # recently active or timestamp unknown
+                n_social += 1
+
+                # Active trading: last trade within 15 minutes
+                # If last_trade==0 (field missing/changed), don't gate — coins already sorted by recency
+                last_trade = coin.get("last_trade", 0)
+                if last_trade > 0:
+                    secs_since = time.time() - last_trade / 1000
+                    if secs_since > 900:
+                        _log_scan(symbol, mint, _bond_pre, _sig_pre, "active", 1, "LAST TRADE >15MIN")
+                        continue
+                n_replies += 1  # reuse counter — now means "recently active"
 
                 bond = coin.get("bond_pct", 0)
                 if BOND_ENTRY_MIN <= bond <= BOND_ENTRY_MAX:
@@ -2071,28 +1723,6 @@ def scanner_loop():
                 age_h = (time.time() - created_at / 1000) / 3600 if created_at > 0 else 0
                 if age_h >= SPIKE_MIN_AGE_H:
                     n_spike_range += 1
-
-                # ── Hype Scalp — multi-feed GMGN presence + momentum ──
-                hype = coin.get("hype_score", 1)
-                has_social = bool(coin.get("twitter") or coin.get("telegram"))
-                if hype >= HYPE_MIN_FEEDS:
-                    market = get_market_data(mint)
-                    if (market and market["price"] > 0
-                            and market["liq"] >= HYPE_MIN_LIQ
-                            and market["change5m"] > 0):   # still climbing right now
-                        sig_score = gmgn_signal_score(mint)
-                        if not gmgn_smart_money_selling(mint):
-                            amt    = trade_size()
-                            feeds  = "+".join(coin["_sources"])
-                            log("ok",
-                                f"HYPE SCALP | feeds={hype}({feeds}) social=✓ "
-                                f"5m={market['change5m']:+.1f}% liq=${market['liq']:.0f} sig={sig_score}", symbol)
-                            notify(f"🔥 HYPE {symbol}",
-                                   f"Feeds: {feeds}\n5m: {market['change5m']:+.1f}%\n"
-                                   f"Liq: ${market['liq']:.0f}\nSig: {sig_score}")
-                            enter_trade(mint, symbol, market["price"], amt, "hype", bond, 0, "pump-swap")
-                            time.sleep(0.5)
-                            continue
 
                 # ── Bundle ride ────────────────────────────────────────
                 if BUNDLE_MODE == "ride" and 0 < bond < 75:
@@ -2115,7 +1745,7 @@ def scanner_loop():
                         if market and market["price"] > 0 and market["liq"] >= MIN_LIQ:
                             amt = trade_size()
                             log("ok", f"BUNDLE RIDE | bond={bond:.1f}% | sig={sig_score}", symbol)
-                            enter_trade(mint, symbol, market["price"], amt, "bundle", bond, 0)
+                            enter_trade(mint, symbol, market["price"], amt, "bundle", bond, 0, pump_swap=coin.get("pump_swap", False))
                             time.sleep(0.5)
                             continue
 
@@ -2126,27 +1756,33 @@ def scanner_loop():
                         bond = details["bond_pct"]
                         if details.get("complete"):
                             log("info", f"BOND SKIP: already graduated bond={bond:.1f}%", symbol)
+                            _log_scan(symbol, mint, bond, _sig_pre, "bond", 2, "ALREADY GRADUATED")
                             continue
                     if not (BOND_ENTRY_MIN <= bond <= BOND_ENTRY_MAX):
                         log("info", f"BOND SKIP: bond moved to {bond:.1f}% (range {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%)", symbol)
+                        _log_scan(symbol, mint, bond, _sig_pre, "bond", 2, f"BOND {bond:.0f}% MOVED")
                         continue
 
                     rug = run_rugcheck(mint)
                     if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
                         log("warn", f"BOND SKIP: mint/freeze auth rug={rug}", symbol)
                         blacklisted_mints.add(mint)
+                        _log_scan(symbol, mint, bond, _sig_pre, "rug", 3, "RUG · MINT/FREEZE AUTH")
                         continue
                     if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
                         log("warn", f"BOND SKIP: bundled", symbol)
+                        _log_scan(symbol, mint, bond, _sig_pre, "rug", 3, "BUNDLED TOKEN")
                         continue
                     holder_ok, holder_reason = check_holder_concentration(mint)
                     if not holder_ok:
                         log("warn", f"SKIP: {holder_reason}", symbol)
+                        _log_scan(symbol, mint, bond, _sig_pre, "holder", 4, holder_reason[:18].upper())
                         continue
                     dev_wallet = coin.get("creator", "") or coin.get("dev", "")
                     dev_ok, dev_reason = check_dev_history(dev_wallet)
                     if not dev_ok:
                         log("warn", f"SKIP: {dev_reason}", symbol)
+                        _log_scan(symbol, mint, bond, _sig_pre, "dev", 5, dev_reason[:18].upper())
                         continue
                     if gmgn_smart_money_selling(mint):
                         log("warn", "SKIP: smart money selling", symbol)
@@ -2154,21 +1790,51 @@ def scanner_loop():
                     sig_score = gmgn_signal_score(mint)
 
                     market = get_market_data(mint)
+                    # Fallback: price from bonding curve when DexScreener hasn't indexed yet
                     if not market or market["price"] <= 0:
-                        # DexScreener hasn't indexed yet — derive price from pump.fun reserves
-                        if details and details.get("price_sol", 0) > 0 and _scan_sol_price > 0:
-                            fallback_usd = details["price_sol"] * _scan_sol_price
-                            if fallback_usd > 0:
-                                log("info", f"DexScreener cold — pump.fun price ${fallback_usd:.8f}", symbol)
-                                market = {"price": fallback_usd, "liq": 0, "change1h": 0, "age_h": 0}
-                    if not market or market["price"] <= 0:
-                        log("info", f"BOND SKIP: no price data", symbol)
-                        continue
+                        _vsol = coin.get("vsol", 0)
+                        _vtok = coin.get("vtok", 0)
+                        _sp   = get_sol_price()
+                        if _vsol > 0 and _vtok > 0 and _sp:
+                            bc_price = (_vsol / _vtok) * _sp
+                            market = {"price": bc_price, "liq": 0, "change1h": 0, "age_h": 0}
+                            log("info", f"BOND: using bonding curve price ${bc_price:.8f}", symbol)
+                        else:
+                            continue
                     # Skip liquidity check for bond runner — bonding curve IS the liquidity
 
                     amt = trade_size()
                     log("ok", f"BOND RUNNER | bond={bond:.1f}% | sig={sig_score}", symbol)
-                    enter_trade(mint, symbol, market["price"], amt, "bond", bond, 0)
+                    _log_scan(symbol, mint, bond, _sig_pre, "pass", -1, f"TRADE ENTERED · ${amt:.2f}")
+                    enter_trade(mint, symbol, market["price"], amt, "bond", bond, 0, pump_swap=coin.get("pump_swap", False))
+                    time.sleep(0.5)
+                    continue
+
+                # ── Trench (near-graduation) ────────────────────────────
+                # Coins 85-97% bonded are about to migrate — pre-graduation pump
+                if TRENCH_ENTRY_MIN <= bond <= TRENCH_ENTRY_MAX:
+                    rug = run_rugcheck(mint)
+                    if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
+                        blacklisted_mints.add(mint)
+                        continue
+                    if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
+                        continue
+                    if gmgn_smart_money_selling(mint):
+                        continue
+                    sig_score = gmgn_signal_score(mint)
+                    market = get_market_data(mint)
+                    if not market or market["price"] <= 0:
+                        _vsol = coin.get("vsol", 0)
+                        _vtok = coin.get("vtok", 0)
+                        _sp   = get_sol_price()
+                        if _vsol > 0 and _vtok > 0 and _sp:
+                            bc_price = (_vsol / _vtok) * _sp
+                            market = {"price": bc_price, "liq": 0, "change1h": 0, "age_h": 0}
+                        else:
+                            continue
+                    amt = trade_size()
+                    log("ok", f"TRENCH | bond={bond:.1f}% | sig={sig_score}", symbol)
+                    enter_trade(mint, symbol, market["price"], amt, "trench", bond, 0, pump_swap=coin.get("pump_swap", False))
                     time.sleep(0.5)
                     continue
 
@@ -2204,109 +1870,101 @@ def scanner_loop():
                         sig_score = gmgn_signal_score(mint)
                         amt = trade_size()
                         log("ok", f"DORMANT SPIKE | age={age_h:.1f}h 1h={market['change1h']:+.0f}% | sig={sig_score}", symbol)
-                        enter_trade(mint, symbol, market["price"], amt, "spike", bond, 0)
+                        enter_trade(mint, symbol, market["price"], amt, "spike", bond, 0, pump_swap=coin.get("pump_swap", False))
                         time.sleep(0.5)
-                    else:
-                        log("info", f"NO STRATEGY: bond={bond:.0f}% age={age_h:.1f}h active={secs_since:.0f}s", symbol)
 
                 time.sleep(0.2)
 
             log("info",
                 f"Filter summary: {len(coins)} coins | "
-                f"{n_social} have-social | {n_replies} active<30m | "
+                f"{n_social} have-social | {n_replies} active<5m | "
                 f"{n_bond_range} in bond range | {n_spike_range} dormant")
             if n_social == 0:
                 log("warn", "0 coins have Twitter or Telegram — market may be slow")
             elif n_replies == 0:
-                log("warn", f"{n_social} coins have socials but none traded in last 30 min")
+                log("warn", f"{n_social} coins have socials but none traded in last 5 min")
 
-            # ── Raydium Runner — graduated tokens ──────────────────
-            if GRAD_MODE:
+            # ── Migration Bounce Scan ────────────────────────────────
+            # Coins that just graduated to Raydium — enter in the first 2 min window
+            grad_coins = get_recently_graduated()
+            for gc in grad_coins:
+                gmint = gc["mint"]
                 with trades_lock:
-                    num_open = len(open_trades)
-                if num_open < MAX_OPEN:
-                    n_grad = 0
-                    for coin in grad_coins:
-                        with trades_lock:
-                            if len(open_trades) >= MAX_OPEN:
-                                break
-                        mint   = coin["mint"]
-                        symbol = coin["symbol"]
+                    if len(open_trades) >= MAX_OPEN:
+                        break
+                    if gmint in open_trades:
+                        continue
+                with _copy_lock:
+                    if gmint in _copied_mints:
+                        continue
+                if gmint in blacklisted_mints or daily_limit_reached():
+                    continue
+                market = get_market_data(gmint)
+                if not market or market["price"] <= 0 or market["liq"] < MIN_LIQ:
+                    continue
+                rug = run_rugcheck(gmint)
+                if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
+                    blacklisted_mints.add(gmint)
+                    continue
+                if gmgn_smart_money_selling(gmint):
+                    continue
+                dev_ok, dev_reason = check_dev_history(gc.get("dev", ""))
+                if not dev_ok:
+                    log("warn", f"SKIP: {dev_reason}", gc["symbol"])
+                    continue
+                with _copy_lock:
+                    _copied_mints[gmint] = time.time()
+                sig_score = gmgn_signal_score(gmint)
+                amt = trade_size()
+                log("ok", f"MIGRATION | {gc['grad_age']}s ago | liq=${market['liq']:.0f} | sig={sig_score}", gc["symbol"])
+                notify(f"🚀 MIGRATION {gc['symbol']}",
+                       f"Just graduated to Raydium!\nAge: {gc['grad_age']}s\nLiq: ${market['liq']:.0f}\nAmount: ${amt:.2f}")
+                enter_trade(gmint, gc["symbol"], market["price"], amt, "migrate", 0, 0, raydium=True)
+                time.sleep(0.5)
 
-                        if mint in blacklisted_mints:
-                            continue
-                        with trades_lock:
-                            if mint in open_trades:
-                                continue
-                        with _copy_lock:
-                            if _sold_mints.get(mint, 0) and time.time() - _sold_mints[mint] < 1800:
-                                continue
-
-                        # Age filter: only tokens graduated in last GRAD_MAX_AGE_H hours
-                        created_at = coin.get("created_at", 0)
-                        age_h = (time.time() - created_at / 1000) / 3600 if created_at > 0 else 9999
-                        if age_h > GRAD_MAX_AGE_H:
-                            continue
-
-                        # DexScreener for Raydium pair data (price, liq, volume)
-                        market = get_market_data(mint)
-                        if not market or market["price"] <= 0:
-                            continue
-                        if market["liq"] < GRAD_MIN_LIQ:
-                            continue
-                        if market["change1h"] < GRAD_MIN_1H_PCT:
-                            continue
-                        # 5-minute momentum: reject if actively dumping right now
-                        if market["change5m"] < GRAD_MIN_5M_PCT:
-                            log("info", f"SKIP stale: 5m={market['change5m']:+.1f}% (dumping)", symbol)
-                            continue
-                        # 24h volume: reject coins with near-zero real trading activity
-                        if market["vol_h24"] < GRAD_MIN_VOL_24H:
-                            log("info", f"SKIP stale: vol24h=${market['vol_h24']:.0f} < ${GRAD_MIN_VOL_24H:.0f}", symbol)
-                            continue
-                        # Volume/liquidity ratio (avoids thin illiquid pairs)
-                        if market["liq"] > 0 and (market["vol_h24"] / market["liq"]) < GRAD_MIN_VOL_LIQ:
-                            log("info", f"SKIP thin: vol/liq={market['vol_h24']/market['liq']:.2f}", symbol)
-                            continue
-
-                        if gmgn_smart_money_selling(mint):
-                            log("warn", "SKIP: smart money selling", symbol)
-                            continue
-
-                        rug = run_rugcheck(mint)
-                        if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
-                            log("warn", "Mint/freeze auth — skip", symbol)
-                            blacklisted_mints.add(mint)
-                            continue
-
-                        holder_ok, holder_reason = check_holder_concentration(mint)
-                        if not holder_ok:
-                            log("warn", f"SKIP: {holder_reason}", symbol)
-                            continue
-
-                        sig_score = gmgn_signal_score(mint)
-
-                        # SMC alignment: EMA(21), VWAP, bullish FVG
-                        if GRAD_SMC_MIN > 0:
-                            candles  = get_candles(market.get("pair_address", ""))
-                            sc, sc_detail = smc_score(candles, market["price"])
-                            if sc < GRAD_SMC_MIN:
-                                log("info",
-                                    f"GRAD SMC SKIP {sc}/{GRAD_SMC_MIN} | {sc_detail}", symbol)
-                                continue
-                        else:
-                            sc, sc_detail = 0, "smc_off"
-
-                        amt = trade_size()
-                        log("ok",
-                            f"GRAD RUNNER | age={age_h:.1f}h liq=${market['liq']/1000:.0f}k "
-                            f"1h={market['change1h']:+.0f}% | smc={sc}/3 {sc_detail} "
-                            f"| pool={GRAD_POOL} | sig={sig_score}", symbol)
-                        enter_trade(mint, symbol, market["price"], amt, "grad", 100, 0, pool=GRAD_POOL)
-                        n_grad += 1
-                        time.sleep(0.5)
-                    if n_grad:
-                        log("info", f"Raydium Runner: {n_grad} entries this scan")
+            # ── GMGN Signal Scan ─────────────────────────────────────
+            # Enter coins GMGN flags as hot (trending, hot search, SM buy, KOL)
+            # even if they aren't in pump.fun's live top-50
+            with _signal_lock:
+                signal_mints = list(
+                    (_gmgn_sm_signal_mints | _gmgn_surge_mints | _gmgn_kol_mints
+                     | _gmgn_trending_mints | _gmgn_hot_mints) - blacklisted_mints
+                )
+            n_signal_entered = 0
+            for sig_mint in signal_mints:
+                with trades_lock:
+                    if len(open_trades) >= MAX_OPEN:
+                        break
+                    if sig_mint in open_trades:
+                        continue
+                with _copy_lock:
+                    if sig_mint in _copied_mints:
+                        continue
+                if daily_limit_reached():
+                    break
+                market = get_market_data(sig_mint)
+                if not market or market["price"] <= 0 or market["liq"] < MIN_LIQ:
+                    continue
+                rug = run_rugcheck(sig_mint)
+                if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
+                    blacklisted_mints.add(sig_mint)
+                    continue
+                if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
+                    continue
+                if gmgn_smart_money_selling(sig_mint):
+                    continue
+                with _copy_lock:
+                    _copied_mints[sig_mint] = time.time()
+                sig_score = gmgn_signal_score(sig_mint)
+                sig_sym   = sig_mint[:8]
+                amt       = trade_size()
+                log("ok", f"GMGN SIGNAL | liq=${market['liq']:.0f} | sig={sig_score}", sig_sym)
+                notify(f"📡 SIGNAL {sig_sym}", f"GMGN signal entry\nLiq: ${market['liq']:.0f}\nSig score: {sig_score}\nAmount: ${amt:.2f}")
+                enter_trade(sig_mint, sig_sym, market["price"], amt, "copy", 0, 0)
+                n_signal_entered += 1
+                time.sleep(0.5)
+            if n_signal_entered:
+                log("info", f"GMGN signal scan: entered {n_signal_entered} | pool={len(signal_mints)}")
 
         except Exception as e:
             log("err", f"Scanner: {e}")
@@ -2327,7 +1985,7 @@ _CURSOR = """<style>
   .wrap{z-index:auto!important}
   *{cursor:none!important}
   #dora-cur{position:fixed;pointer-events:none;z-index:99999;
-    width:34px;height:48px;image-rendering:pixelated;
+    width:69px;height:96px;image-rendering:pixelated;
     top:-200px;left:-200px}
 }
 </style>
@@ -2336,9 +1994,9 @@ _CURSOR = """<style>
   var c=document.createElement('img');
   c.id='dora-cur';
   c.src='/static/doraemon_walk.gif';
-  c.style.cssText='position:fixed;pointer-events:none;z-index:99999;width:34px;height:48px;image-rendering:pixelated;top:-200px;left:-200px;display:none';
+  c.style.cssText='position:fixed;pointer-events:none;z-index:99999;width:69px;height:96px;image-rendering:pixelated;top:-200px;left:-200px;display:none';
   document.body.appendChild(c);
-  function move(x,y){c.style.display='block';c.style.left=(x-17)+'px';c.style.top=(y-48)+'px';}
+  function move(x,y){c.style.display='block';c.style.left=(x-34)+'px';c.style.top=(y-96)+'px';}
   document.addEventListener('mousemove',function(e){move(e.clientX,e.clientY);});
   document.addEventListener('touchmove',function(e){
     var t=e.touches[0];move(t.clientX,t.clientY);
@@ -2357,32 +2015,10 @@ def _inject_cursor(resp):
             resp.set_data(html.replace('</body>', _CURSOR + '</body>', 1))
     return resp
 
-_DRIFT_PORT = int(os.environ.get("DRIFT_PORT", "5001"))
-
-@app.route("/drift", defaults={"path": ""}, methods=["GET","POST","PUT","DELETE","PATCH"])
-@app.route("/drift/<path:path>",             methods=["GET","POST","PUT","DELETE","PATCH"])
-def drift_proxy(path):
-    import requests as _preq
-    try:
-        url = f"http://localhost:{_DRIFT_PORT}/{path}"
-        resp = _preq.request(
-            method=flask_request.method,
-            url=url,
-            headers={k: v for k, v in flask_request.headers if k.lower() != "host"},
-            data=flask_request.get_data(),
-            params=flask_request.args,
-            allow_redirects=False,
-            timeout=10,
-        )
-        skip = {"content-encoding", "content-length", "transfer-encoding", "connection"}
-        headers = [(k, v) for k, v in resp.headers.items() if k.lower() not in skip]
-        return Response(resp.content, resp.status_code, headers)
-    except Exception as e:
-        return f"<h2>Drift bot starting up…</h2><p>{e}</p><p><a href='/drift'>Retry</a></p>", 503
-
 @app.route("/", methods=["GET"])
 def home():
-    theme = flask_request.args.get("theme", "classic")
+    from flask import request as _req
+    theme = _req.args.get("theme", "classic")
     with capital_lock:
         cap = capital
     with trades_lock:
@@ -2638,9 +2274,9 @@ def home():
   <div class="section">
     <div class="section-hdr">
       <h2>🏆 Milestone Progress</h2>
-      <span style="font-size:.72rem;color:var(--muted)">${cap:.2f} → {'$'+f'{next_m:,}' if next_m else 'GOAL HIT'}</span>
+      <span style="font-size:.72rem;color:var(--muted)">${cap:.2f} → ${next_m:,}</span>
     </div>
-    <div class="prog-labels"><span>${cap:.2f}</span><span>{'$'+f'{next_m:,}' if next_m else 'GOAL HIT'}</span></div>
+    <div class="prog-labels"><span>${cap:.2f}</span><span>${next_m:,}</span></div>
     <div class="prog-track"><div class="prog-fill"></div></div>
     <div class="milestones">
       {''.join(f'<span class="ms{" hit" if cap >= m else ""}">${m:,}</span>' for m in MILESTONES)}
@@ -2864,7 +2500,7 @@ def _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
     </div>
     <div class="stat">
       <div class="lbl">Next Target</div>
-      <div class="val pink">{'$'+f'{next_m:,}' if next_m else 'GOAL HIT'}</div>
+      <div class="val pink">${next_m:,}</div>
       <div class="sub">{progress_pct}% there</div>
     </div>
   </div>
@@ -2931,15 +2567,11 @@ new Chart(document.getElementById('capChart'),{{
 
 @app.route("/status/api", methods=["GET"])
 def status_api():
-    with log_lock:
-        ct_snap = list(completed_trades)
+    wins  = [t for t in completed_trades if t["pnl"] > 0]
+    total = len(completed_trades)
+    pnl   = sum(t["pnl"] for t in completed_trades)
     with capital_lock:
         cap = capital
-    with _daily_lock:
-        d_trades = _daily_trades; d_wins = _daily_wins; d_losses = _daily_losses
-    wins  = [t for t in ct_snap if t["pnl"] > 0]
-    total = len(ct_snap)
-    pnl   = sum(t["pnl"] for t in ct_snap)
     sol_price = get_sol_price()
     next_tune_in = ANALYZE_EVERY - (total % ANALYZE_EVERY) if total > 0 else ANALYZE_EVERY
     return jsonify({
@@ -2950,18 +2582,16 @@ def status_api():
         "total_pnl": round(pnl, 4),
         "sol_price": round(sol_price, 2) if sol_price else None,
         "next_tune_in": next_tune_in,
-        "today": {"trades": d_trades, "wins": d_wins, "losses": d_losses,
+        "today": {"trades": _daily_trades, "wins": _daily_wins, "losses": _daily_losses,
                   "paused_until": time.strftime("%H:%M", time.localtime(_pause_until)) if _pause_until > time.time() else None},
     })
 
 @app.route("/status", methods=["GET"])
 def status():
-    with log_lock:
-        ct_snap = list(completed_trades)
-    wins   = [t for t in ct_snap if t["pnl"] > 0]
-    losses = [t for t in ct_snap if t["pnl"] <= 0]
-    total  = len(ct_snap)
-    pnl    = sum(t["pnl"] for t in ct_snap)
+    wins   = [t for t in completed_trades if t["pnl"] > 0]
+    losses = [t for t in completed_trades if t["pnl"] <= 0]
+    total  = len(completed_trades)
+    pnl    = sum(t["pnl"] for t in completed_trades)
     with capital_lock:
         cap = capital
     wr = round(len(wins) / max(total, 1) * 100, 1)
@@ -3113,7 +2743,7 @@ def status():
   </div>
 
   <div class="section">
-    <div class="section-hdr">MILESTONE PROGRESS — next {'$'+f'{next_m:,}' if next_m else 'GOAL HIT'} ({progress_pct}%)</div>
+    <div class="section-hdr">MILESTONE PROGRESS — next ${next_m:,} ({progress_pct}%)</div>
     <div class="prog-track"><div class="prog-fill"></div></div>
     <div class="milestones">
       {''.join(f'<span class="ms{" hit" if cap >= m else ""}">${m:,}</span>' for m in MILESTONES)}
@@ -3175,9 +2805,7 @@ def trades_api():
         open_list = [{k: v for k, v in t.items()
                       if k not in ("opened_at", "bond_slip_start")}
                      for t in open_trades.values()]
-    with log_lock:
-        ct_snap = list(completed_trades[-50:])
-    return jsonify({"open": open_list, "completed": ct_snap})
+    return jsonify({"open": open_list, "completed": completed_trades[-50:]})
 
 @app.route("/trades", methods=["GET"])
 def trades():
@@ -3185,14 +2813,12 @@ def trades():
         open_list = list(open_trades.values())
     with capital_lock:
         cap = capital
-    with log_lock:
-        ct_snap = list(completed_trades)
 
-    wins   = [t for t in ct_snap if t["pnl"] > 0]
-    losses = [t for t in ct_snap if t["pnl"] <= 0]
-    total  = len(ct_snap)
+    wins   = [t for t in completed_trades if t["pnl"] > 0]
+    losses = [t for t in completed_trades if t["pnl"] <= 0]
+    total  = len(completed_trades)
     wr     = round(len(wins) / max(total, 1) * 100, 1)
-    total_pnl = round(sum(t["pnl"] for t in ct_snap), 4)
+    total_pnl = round(sum(t["pnl"] for t in completed_trades), 4)
     avg_win   = round(sum(t["pnl"] for t in wins)   / max(len(wins),   1), 4)
     avg_loss  = round(sum(t["pnl"] for t in losses) / max(len(losses), 1), 4)
     best      = max(completed_trades, key=lambda t: t["pnl"], default=None)
@@ -3472,74 +3098,6 @@ document.addEventListener('keydown', e => {{ if(e.key==='Escape') closeModal(); 
 def get_log():
     return jsonify({"logs": trade_log[-100:]})
 
-@app.route("/scan-debug", methods=["GET"])
-def scan_debug():
-    coins, _ = get_gmgn_coins()
-    if not coins:
-        return jsonify({"error": "GMGN returned no coins", "fetched": 0})
-    results = []
-    counters = {"stale": 0, "no_strategy": 0, "rug": 0, "holders": 0, "dev": 0, "sm_sell": 0, "no_price": 0, "ready": 0}
-    for coin in coins[:30]:
-        mint       = coin["mint"]
-        symbol     = coin["symbol"]
-        bond       = coin.get("bond_pct", 0)
-        has_social = bool(coin.get("twitter") or coin.get("telegram"))
-        last_trade = coin.get("last_trade", 0)
-        secs_since = round((time.time() - last_trade / 1000)) if last_trade > 0 else 9999
-        created_at = coin.get("created_at", 0)
-        age_h      = round((time.time() - created_at / 1000) / 3600, 1) if created_at > 0 else 0
-        in_bond    = BOND_ENTRY_MIN <= bond <= BOND_ENTRY_MAX
-        is_spike   = age_h >= SPIKE_MIN_AGE_H
-
-        entry = {"symbol": symbol, "bond": bond, "age_h": age_h,
-                 "social": has_social, "secs_since": secs_since,
-                 "in_bond_range": in_bond, "kill": None}
-
-        if secs_since > 1800:
-            entry["kill"] = f"stale ({secs_since//60}m ago)"
-            counters["stale"] += 1
-        elif not in_bond and not is_spike:
-            entry["kill"] = f"no strategy: bond={bond:.0f}% age={age_h:.1f}h"
-            counters["no_strategy"] += 1
-        else:
-            rug = run_rugcheck(mint)
-            if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
-                entry["kill"] = "rug: mint/freeze auth"
-                counters["rug"] += 1
-            elif rug and rug.get("is_bundled"):
-                entry["kill"] = "rug: bundled"
-                counters["rug"] += 1
-            else:
-                ok, reason = check_holder_concentration(mint)
-                if not ok:
-                    entry["kill"] = f"holders: {reason}"
-                    counters["holders"] += 1
-                elif gmgn_smart_money_selling(mint):
-                    entry["kill"] = "sm_sell"
-                    counters["sm_sell"] += 1
-                else:
-                    market = get_market_data(mint)
-                    if not market or market["price"] <= 0:
-                        entry["kill"] = "no price data"
-                        counters["no_price"] += 1
-                    else:
-                        entry["kill"] = None
-                        entry["price"] = market["price"]
-                        entry["liq"]   = market["liq"]
-                        entry["1h_pct"]= market["change1h"]
-                        counters["ready"] += 1
-
-        results.append(entry)
-
-    return jsonify({
-        "fetched":     len(coins),
-        "bond_range":  f"{BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%",
-        "spike_min_1h": SPIKE_MIN_1H,
-        "counters":    counters,
-        "coins":       results,
-    })
-
-
 @app.route("/live/api", methods=["GET"])
 def live_api():
     """Polled every 3s by the live page — returns open trades + recent events."""
@@ -3547,6 +3105,8 @@ def live_api():
         open_now = []
         for t in open_trades.values():
             elapsed = round(time.time() - t["opened_at"], 1)
+            cur_bond = 0
+            pct = 0
             open_now.append({
                 "symbol":     t["symbol"],
                 "mint":       t["mint"],
@@ -3561,10 +3121,9 @@ def live_api():
             })
     with capital_lock:
         cap = capital
-    with log_lock:
-        recent_closed = list(reversed(completed_trades[-30:]))
-    with _daily_lock:
-        d_trades = _daily_trades; d_wins = _daily_wins; d_losses = _daily_losses
+    recent_closed = list(reversed(completed_trades[-30:]))
+    with _scan_log_lock:
+        sl = list(scan_log[:20])
     return jsonify({
         "ts":       round(time.time()),
         "capital":  round(cap, 2),
@@ -3572,7 +3131,8 @@ def live_api():
         "closed":   recent_closed,
         "scanning": scan_active,
         "paused":   _pause_until > time.time(),
-        "today":    {"trades": d_trades, "wins": d_wins, "losses": d_losses},
+        "today":    {"trades": _daily_trades, "wins": _daily_wins, "losses": _daily_losses},
+        "scan_log": sl,
     })
 
 @app.route("/live", methods=["GET"])
@@ -3581,245 +3141,541 @@ def live():
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<title>Live Feed — Boogey's Treasure Chest</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Live Feed — __BOT_NAME__</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
-  *{box-sizing:border-box;margin:0;padding:0}
-  :root{--acc:#00f5ff;--bg:#0a0008;--card:#110010;--border:#ffffff15}
-  body{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}
-  .bg-art{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}
-  .wrap{position:relative}
-  nav{display:flex;gap:0;border-bottom:2px solid var(--acc);overflow-x:auto;scrollbar-width:none}
-  nav::-webkit-scrollbar{display:none}
-  nav a{color:#fff;text-decoration:none;font-size:.72rem;font-weight:700;padding:10px 14px;white-space:nowrap;letter-spacing:.06em;text-transform:uppercase;border-right:1px solid var(--border);transition:all .15s}
-  nav a:hover{background:var(--acc);color:#000}
-  nav a.active{background:var(--acc);color:#000}
-  .page-title{font-family:'Bebas Neue',sans-serif;font-size:3rem;color:var(--acc);text-shadow:0 0 24px #00f5ff88;padding:18px 16px 8px;line-height:1;letter-spacing:.04em}
-  .status-bar{display:flex;flex-wrap:wrap;gap:6px;padding:0 12px 12px}
-  .pill{padding:5px 12px;font-size:.68rem;font-weight:700;border:1px solid var(--border);background:var(--card);display:inline-flex;align-items:center;gap:6px;letter-spacing:.04em}
-  .dot{width:7px;height:7px;border-radius:50%}
-  .dot.green{background:#39ff14;box-shadow:0 0 8px #39ff14}
-  .dot.red{background:#ff006e;box-shadow:0 0 8px #ff006e}
-  .dot.cyan{background:var(--acc);box-shadow:0 0 8px var(--acc)}
-  .blink{animation:blink 1s infinite}
-  @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
-  .cap-display{text-align:center;padding:20px 16px;background:var(--card);border-top:2px solid var(--acc);border-bottom:2px solid var(--border);margin-bottom:12px}
-  .cap-display .lbl{font-size:.62rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.15em;margin-bottom:4px}
-  .cap-display .amount{font-family:'Bebas Neue',sans-serif;font-size:4rem;color:var(--acc);text-shadow:0 0 30px #00f5ff66;letter-spacing:.02em;line-height:1}
-  .cap-display .sub{font-size:.68rem;color:#888;margin-top:6px}
-  .section{background:var(--card);border-top:2px solid var(--border);padding:14px;margin:0 12px 12px}
-  .section-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
-  .section-hdr h2{font-size:.62rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em}
-  .count-badge{background:#00f5ff20;color:var(--acc);border:1px solid #00f5ff40;font-size:.62rem;font-weight:700;padding:2px 8px;letter-spacing:.04em}
-  .live-dot{display:inline-block;width:6px;height:6px;background:#39ff14;border-radius:50%;margin-right:4px;animation:blink 1s infinite;box-shadow:0 0 6px #39ff14}
-  .table-wrap{overflow-x:auto;border:1px solid var(--border)}
-  table{width:100%;border-collapse:collapse;font-size:.72rem}
-  th{padding:8px 10px;font-size:.56rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.08em;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap;background:#0d000c}
-  td{padding:9px 10px;border-bottom:1px solid #ffffff05;vertical-align:middle}
-  tr:last-child td{border-bottom:none}
-  tr.new-row{animation:flash .8s ease-out}
-  @keyframes flash{0%{background:#00f5ff18}100%{background:transparent}}
-  .timer{font-family:'JetBrains Mono',monospace;font-size:.8rem;color:var(--acc);font-weight:600}
-  .mono{font-family:'JetBrains Mono',monospace;font-size:.68rem}
-  .sym{font-weight:900;font-size:.8rem}
-  .muted{color:#888}
-  .green{color:#39ff14} .red{color:#ff006e} .cyan{color:var(--acc)}
-  .badge{display:inline-block;padding:2px 6px;font-size:.56rem;font-weight:900;letter-spacing:.06em;border:1px solid}
-  .badge.win{color:#39ff14;border-color:#39ff14;background:#39ff1415}
-  .badge.loss{color:#ff006e;border-color:#ff006e;background:#ff006e15}
-  .badge.strat{color:#00f5ff;border-color:#00f5ff;background:#00f5ff12}
-  .badge.open{color:var(--acc);border-color:var(--acc);background:#00f5ff15}
-  .feed{display:flex;flex-direction:column;gap:6px;max-height:400px;overflow-y:auto}
-  .feed-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--border);background:#0d000c;font-size:.75rem;animation:flash .8s ease-out}
-  .feed-item.buy{border-color:#00f5ff30;background:#00f5ff08}
-  .feed-item.win{border-color:#39ff1430;background:#39ff1408}
-  .feed-item.loss{border-color:#ff006e30;background:#ff006e08}
-  .feed-ts{font-family:'JetBrains Mono',monospace;font-size:.62rem;color:#888;white-space:nowrap;min-width:56px}
-  .feed-icon{font-size:1rem;width:20px;text-align:center}
-  .feed-body{flex:1}
-  .feed-sym{font-weight:900;margin-right:6px}
-  .feed-detail{color:#888;font-size:.68rem;margin-top:1px}
-  .feed-pnl{font-family:'JetBrains Mono',monospace;font-weight:700;white-space:nowrap}
-  .empty{text-align:center;padding:28px;color:#888;font-size:.78rem}
-  #last-update{font-size:.62rem;color:#888}
-  footer{padding:14px 16px;text-align:center;font-size:.6rem;color:#444;border-top:1px solid var(--border)}
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#050a14;--bg2:#080f1e;--bg3:#0d1628;--cyan:#00e5ff;--green:#00ff88;--red:#ff3355;--yellow:#ffee00;--text:#c8d8f0;--muted:#4a6080}
+html,body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-height:100vh;-webkit-user-select:none;user-select:none;overflow-x:hidden}
+body{max-width:430px;margin:0 auto}
+nav{background:rgba(5,10,20,.97);border-bottom:1px solid rgba(0,229,255,.1);display:flex;overflow-x:auto;position:sticky;top:0;z-index:100}
+nav::-webkit-scrollbar{display:none}
+.nav-tab{font-family:'Bebas Neue',sans-serif;font-size:13px;letter-spacing:2px;padding:14px 18px;color:var(--muted);white-space:nowrap;border-bottom:2px solid transparent;flex-shrink:0;text-decoration:none}
+.nav-tab.active{color:var(--cyan);border-bottom-color:var(--cyan)}
+.page-hdr{padding:14px 16px 6px;display:flex;align-items:center;justify-content:space-between}
+.page-title{font-family:'Bebas Neue',sans-serif;font-size:32px;letter-spacing:4px;color:var(--cyan)}
+.status-strip{display:flex;flex-wrap:wrap;gap:5px;padding:0 16px 10px}
+.s-pill{display:flex;align-items:center;gap:5px;padding:4px 9px;border-radius:20px;border:1px solid rgba(255,255,255,.07);background:rgba(255,255,255,.03);font-size:10px;font-family:'JetBrains Mono',monospace}
+.s-dot{width:6px;height:6px;border-radius:50%;background:var(--green);animation:pulse 1.8s ease infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.s-val{color:var(--cyan);font-weight:700}
+.s-open{color:var(--yellow);font-weight:700}
+.pos-section{margin:0 16px 10px;border:1px solid rgba(0,229,255,.12);border-radius:14px;overflow:hidden}
+.sec-hdr{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:var(--bg2);border-bottom:1px solid rgba(0,229,255,.08)}
+.sec-title{font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--text);display:flex;align-items:center;gap:7px}
+.s-dot2{width:6px;height:6px;border-radius:50%;background:var(--green);animation:pulse 1.8s ease infinite}
+.cbadge{font-family:'JetBrains Mono',monospace;font-size:8px;padding:2px 7px;border-radius:10px;font-weight:700;background:rgba(255,238,0,.12);color:var(--yellow);border:1px solid rgba(255,238,0,.25);transition:all .3s}
+.sec-btn{font-family:'JetBrains Mono',monospace;font-size:8px;padding:3px 9px;border:1px solid rgba(0,229,255,.25);border-radius:6px;color:var(--cyan);background:rgba(0,229,255,.07);letter-spacing:1px;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.pos-stack-wrap{position:relative;transition:height .45s cubic-bezier(.22,.8,.36,1);overflow:hidden;background:var(--bg2)}
+.pos-card{position:absolute;left:14px;right:14px;height:100px;border-radius:12px;overflow:hidden;transition:top .45s cubic-bezier(.22,.8,.36,1),transform .45s cubic-bezier(.22,.8,.36,1),opacity .45s,box-shadow .3s;will-change:transform,top,opacity}
+.pos-card.neutral-card{border:1px solid rgba(0,229,255,.2);box-shadow:0 2px 14px rgba(0,229,255,.04)}
+.pc-hide-bg{position:absolute;inset:0;background:linear-gradient(90deg,transparent 25%,rgba(0,80,100,.88));display:flex;align-items:center;justify-content:flex-end;padding-right:18px;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;letter-spacing:1px;color:#fff;opacity:0;pointer-events:none}
+.pc-inner{position:absolute;inset:0;background:var(--bg3);padding:11px 13px;display:flex;flex-direction:column;justify-content:space-between;will-change:transform}
+.pc-row1{display:flex;align-items:baseline;justify-content:space-between}
+.pc-sym{font-family:'Bebas Neue',sans-serif;font-size:26px;letter-spacing:2px;line-height:1;color:var(--cyan)}
+.pc-bond{font-family:'Bebas Neue',sans-serif;font-size:16px;letter-spacing:1px;line-height:1;color:var(--green)}
+.pc-row2{display:flex;align-items:center;justify-content:space-between}
+.pc-bond-bar{flex:1;height:4px;background:rgba(255,255,255,.06);border-radius:2px;margin:0 8px;overflow:hidden}
+.pc-bond-fill{height:4px;border-radius:2px;background:linear-gradient(90deg,var(--cyan),var(--green));transition:width .6s ease}
+.pc-strat{font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--muted)}
+.pc-row3{display:flex;align-items:center;justify-content:space-between}
+.pc-size{font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--muted)}
+.pc-time{font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--muted)}
+.pc-swipe-lbl{font-family:'JetBrains Mono',monospace;font-size:7px;color:rgba(74,96,128,.4);letter-spacing:1px}
+.pos-collapse-hint{background:var(--bg2);border-top:1px solid rgba(0,229,255,.06);padding:8px 14px;text-align:center;font-family:'JetBrains Mono',monospace;font-size:8px;letter-spacing:2px;color:var(--muted);cursor:pointer;-webkit-tap-highlight-color:transparent}
+.scan-section{margin:0 16px 10px;background:var(--bg2);border:1px solid rgba(0,229,255,.12);border-radius:14px;clip-path:inset(0 round 14px)}
+.scan-now-bar{display:flex;align-items:center;gap:8px;padding:7px 14px;border-bottom:1px solid rgba(0,229,255,.08);background:var(--bg2)}
+.sn-pulse{width:7px;height:7px;border-radius:50%;background:var(--cyan);animation:pulse .9s ease infinite;flex-shrink:0}
+.sn-label{font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:2px;color:var(--muted)}
+.sn-coin{font-family:'Bebas Neue',sans-serif;font-size:14px;letter-spacing:2px;color:var(--cyan);margin-left:auto}
+.sn-status{font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;flex-shrink:0}
+.sn-status.scan{color:var(--cyan);animation:blink .6s infinite}
+.sn-status.pass{color:var(--green)}.sn-status.fail{color:var(--red)}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.1}}
+.deck-wrap{position:relative;height:390px;perspective:900px;perspective-origin:50% 50%;touch-action:none}
+.scan-card{position:absolute;left:50%;top:50%;width:284px;margin-left:-142px;background:var(--bg3);border:1px solid rgba(0,229,255,.12);border-radius:14px;padding:11px 13px;will-change:transform,opacity;transition:transform .42s cubic-bezier(.22,.8,.36,1),opacity .42s,box-shadow .35s,border-color .35s;pointer-events:none;transform-origin:center center}
+.scan-card.is-focus{pointer-events:auto;z-index:5!important}
+.scan-card.state-pass{border-color:rgba(0,255,136,.5);box-shadow:0 0 26px rgba(0,255,136,.18)}
+.scan-card.state-fail{border-color:rgba(255,51,85,.45);box-shadow:0 0 26px rgba(255,51,85,.13)}
+.sc-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px}
+.sc-sym{font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:2px;color:var(--cyan);line-height:1}
+.sc-mint{font-family:'JetBrains Mono',monospace;font-size:7px;color:var(--muted);margin-top:2px}
+.sc-right{display:flex;flex-direction:column;align-items:flex-end;gap:3px}
+.sc-badge{font-family:'JetBrains Mono',monospace;font-size:7px;padding:2px 6px;border-radius:4px}
+.b-bond{background:rgba(0,229,255,.1);border:1px solid rgba(0,229,255,.25);color:var(--cyan)}
+.b-sig{background:rgba(255,238,0,.08);border:1px solid rgba(255,238,0,.22);color:var(--yellow)}
+.sc-bar{height:2px;background:rgba(255,255,255,.05);border-radius:1px;margin-bottom:7px}
+.sc-bar-fill{height:2px;border-radius:1px;background:linear-gradient(90deg,var(--cyan),var(--green))}
+.sc-filters{display:grid;grid-template-columns:1fr 1fr;gap:2px 8px;margin-bottom:8px;min-height:48px}
+.frow{display:flex;align-items:center;gap:4px;height:15px;opacity:0;transform:translateX(-5px);transition:opacity .2s,transform .2s}
+.frow.vis{opacity:1;transform:translateX(0)}
+.ficon{font-size:8px;width:11px;flex-shrink:0;text-align:center}
+.fname{font-family:'JetBrains Mono',monospace;font-size:7px;color:var(--muted);flex:1}
+.fval{font-family:'JetBrains Mono',monospace;font-size:7px;font-weight:700;flex-shrink:0}
+.fval.ok{color:var(--green)}.fval.bad{color:var(--red)}.fval.chk{color:var(--cyan);animation:blink .55s infinite}
+.sc-status{height:22px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-family:'Bebas Neue',sans-serif;font-size:11px;letter-spacing:2.5px;border:1px solid rgba(0,229,255,.15);background:rgba(0,229,255,.03);color:var(--muted);transition:all .3s;position:relative;overflow:hidden}
+.sc-status.scanning{color:var(--cyan);border-color:rgba(0,229,255,.35);animation:spulse 1s ease infinite}
+.sc-status.pass{background:rgba(0,255,136,.07);border-color:rgba(0,255,136,.4);color:var(--green)}
+.sc-status.fail{background:rgba(255,51,85,.07);border-color:rgba(255,51,85,.35);color:var(--red)}
+.sc-status.pass::after,.sc-status.fail::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.1),transparent);animation:sweep .65s ease forwards}
+@keyframes sweep{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
+@keyframes spulse{0%,100%{opacity:1}50%{opacity:.5}}
+.sc-fig{position:absolute;bottom:10px;right:10px;width:20px;height:26px;opacity:.35;transition:opacity .3s;pointer-events:none}
+.scan-card.is-focus .sc-fig{opacity:.8}
+.deck-dots{position:absolute;right:5px;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;gap:6px;z-index:20;pointer-events:none}
+.ddot{width:5px;height:5px;border-radius:50%;background:rgba(0,229,255,.12);transition:all .22s}
+.ddot.active{background:var(--cyan);transform:scale(1.6);box-shadow:0 0 5px var(--cyan)}
+.ddot.dp{background:var(--green);opacity:.7}.ddot.df{background:var(--red);opacity:.7}
+.live-btn{position:absolute;top:8px;right:32px;font-family:'JetBrains Mono',monospace;font-size:7px;letter-spacing:1.5px;padding:3px 9px;border-radius:10px;background:rgba(0,229,255,.12);border:1px solid rgba(0,229,255,.4);color:var(--cyan);cursor:pointer;z-index:20;animation:livePulse 1.5s ease infinite;display:none}
+@keyframes livePulse{0%,100%{box-shadow:0 0 4px rgba(0,229,255,.2)}50%{box-shadow:0 0 10px rgba(0,229,255,.5)}}
+.deck-hint{position:absolute;bottom:6px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:4px;opacity:0;transition:opacity .4s;pointer-events:none;z-index:20}
+.deck-hint.show{opacity:.35}
+.dh-u{width:0;height:0;border-left:3px solid transparent;border-right:3px solid transparent;border-bottom:4px solid var(--cyan)}
+.dh-d{width:0;height:0;border-left:3px solid transparent;border-right:3px solid transparent;border-top:4px solid var(--cyan)}
+.dh-lbl{font-family:'JetBrains Mono',monospace;font-size:6px;letter-spacing:1.5px;color:var(--cyan);text-transform:uppercase}
+.scan-stats{border-top:1px solid rgba(0,229,255,.07);padding:7px 14px;display:flex;align-items:center;gap:7px;background:var(--bg2);border-radius:0 0 14px 14px}
+.st-dot{width:5px;height:5px;border-radius:50%;background:var(--cyan);animation:pulse 1s ease infinite;flex-shrink:0}
+.st-counts{display:flex;gap:10px;font-family:'JetBrains Mono',monospace;font-size:8px;margin-left:auto}
+.section2{margin:0 16px 18px}
+.sec2-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.sec2-title{font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;letter-spacing:2px;color:var(--text);text-transform:uppercase}
+.sec2-link{font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--cyan);text-decoration:none}
+.trade-row{display:flex;align-items:flex-start;gap:9px;padding:10px;background:var(--bg2);border:1px solid rgba(255,255,255,.04);border-radius:10px;margin-bottom:6px}
+.tr-time{font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--muted);white-space:nowrap;margin-top:2px}
+.tr-icon{width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;flex-shrink:0}
+.tr-icon.win{background:rgba(0,255,136,.15);color:var(--green)}
+.tr-icon.loss{background:rgba(255,51,85,.12);color:var(--red)}
+.tr-icon.open{background:rgba(0,229,255,.12);color:var(--cyan)}
+.tr-body{flex:1}
+.tr-sym{font-family:'Bebas Neue',sans-serif;font-size:14px;letter-spacing:1.5px;line-height:1;margin-bottom:3px}
+.tr-tags{display:flex;gap:4px;margin-bottom:2px}
+.tag{font-family:'JetBrains Mono',monospace;font-size:7px;padding:2px 5px;border-radius:3px;font-weight:700}
+.tag-win{background:rgba(0,255,136,.2);color:var(--green)}.tag-loss{background:rgba(255,51,85,.18);color:var(--red)}
+.tag-open{background:rgba(0,229,255,.12);color:var(--cyan)}.tag-bond{background:rgba(0,229,255,.1);color:var(--cyan)}
+.tr-detail{font-family:'JetBrains Mono',monospace;font-size:7px;color:var(--muted);line-height:1.5}
+.tr-pnl{font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;white-space:nowrap}
+.tr-pnl.pos{color:var(--green)}.tr-pnl.neg{color:var(--red)}
+.bot-name{text-align:center;font-size:9px;color:rgba(74,96,128,.4);padding-bottom:20px;letter-spacing:1px}
 </style>
 </head>
 <body>
-<img src="/static/tankgirl.png" class="bg-art" alt="">
-<div class="wrap">
-  <nav>
-    <a href="/">HOME</a>
-    <a href="/live" class="active">LIVE</a>
-    <a href="/trades">TRADES</a>
-    <a href="/status">STATUS</a>
-    <a href="/learn">STRATEGY</a>
-    <a href="/setup">SETUP</a>
-  </nav>
-
-  <div class="page-title">LIVE FEED</div>
-
-  <div class="status-bar">
-    <div class="pill"><span class="dot green blink" id="scan-dot"></span><span id="scan-label">Scanning</span></div>
-    <div class="pill">Capital: <strong id="cap-pill" class="cyan">$--</strong></div>
-    <div class="pill">Today: <span id="today-pill">--</span></div>
-    <div class="pill">Open: <span id="open-count" class="cyan">0</span></div>
-  </div>
-
-  <div class="cap-display">
-    <div class="lbl">Current Capital</div>
-    <div class="amount" id="cap-big">$---.--</div>
-    <div class="sub">Started at ${STARTING_CAPITAL:.2f} &nbsp;·&nbsp; Goal: ${PROFIT_GOAL:,.0f}</div>
-  </div>
-
-  <div class="section" id="open-section">
-    <div class="section-hdr">
-      <h2><span class="live-dot"></span>Open Trades</h2>
-      <span class="count-badge" id="open-badge">0 active</span>
-    </div>
-    <div id="open-body">
-      <div class="table-wrap">
-        <table>
-          <thead><tr>
-            <th>Symbol</th><th>Strategy</th><th>Size</th>
-            <th>Bond In</th><th>Bond High</th><th>Elapsed</th>
-          </tr></thead>
-          <tbody id="open-rows"><tr><td colspan="6" class="empty">No open trades — scanning...</td></tr></tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-
-  <div class="section">
-    <div class="section-hdr">
-      <h2>TRADE EVENTS</h2>
-      <a href="/trades" style="font-size:.68rem;color:var(--acc);text-decoration:none;font-weight:700;letter-spacing:.06em">FULL HISTORY →</a>
-    </div>
-    <div class="feed" id="feed">
-      <div class="empty">Waiting for trades...</div>
-    </div>
-  </div>
-
-  <div style="padding:0 12px 8px;text-align:right"><span id="last-update"></span></div>
-  <footer>Boogey's Treasure Chest · Live</footer>
+<nav>
+  <a href="/" class="nav-tab">HOME</a>
+  <a href="/live" class="nav-tab active">LIVE</a>
+  <a href="/trades" class="nav-tab">TRADES</a>
+  <a href="/status" class="nav-tab">STATUS</a>
+  <a href="/learn" class="nav-tab">STRATEGY</a>
+</nav>
+<div class="page-hdr"><div class="page-title">LIVE FEED</div></div>
+<div class="status-strip">
+  <div class="s-pill"><span class="s-dot"></span><span id="scanStatus">Scanning</span></div>
+  <div class="s-pill">Capital: <span class="s-val" id="capVal">--</span></div>
+  <div class="s-pill">Today: <span style="color:var(--text)" id="todayVal">--</span></div>
+  <div class="s-pill">Open: <span class="s-open" id="openCount">0</span></div>
 </div>
+<div class="pos-section">
+  <div class="sec-hdr">
+    <div class="sec-title"><span class="s-dot2"></span>OPEN POSITIONS<span class="cbadge" id="posBadge">0 OPEN</span></div>
+    <div class="sec-btn" id="expandBtn" onclick="toggleExpand()" style="display:none">EXPAND &#x2195;</div>
+  </div>
+  <div class="pos-stack-wrap" id="posStackWrap"></div>
+  <div class="pos-collapse-hint" id="collapseHint" onclick="toggleExpand()" style="display:none">&#x2191; COLLAPSE</div>
+</div>
+<div class="scan-section">
+  <div class="scan-now-bar">
+    <div class="sn-pulse"></div>
+    <div class="sn-label">NOW SCANNING</div>
+    <div class="sn-coin" id="snCoin">&#x2014;</div>
+    <div class="sn-status scan" id="snStatus">WAITING</div>
+  </div>
+  <div class="deck-wrap" id="deckWrap">
+    <div class="live-btn" id="liveBtn" onclick="jumpToLive()">&#x25B6; LIVE</div>
+    <div class="deck-dots" id="deckDots"></div>
+    <div class="deck-hint" id="deckHint">
+      <div class="dh-u"></div><div class="dh-lbl">drag</div><div class="dh-d"></div>
+    </div>
+  </div>
+  <div class="scan-stats">
+    <div class="st-dot"></div>
+    <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--muted)">SCAN HISTORY</span>
+    <div class="st-counts">
+      <span style="color:var(--text)" id="st-n">0 scanned</span>
+      <span style="color:var(--green)" id="st-p">0 &#x2713;</span>
+      <span style="color:var(--red)" id="st-f">0 &#x2717;</span>
+    </div>
+  </div>
+</div>
+<div class="section2">
+  <div class="sec2-hdr">
+    <div class="sec2-title">TRADE EVENTS</div>
+    <a href="/trades" class="sec2-link">FULL HISTORY &#x2192;</a>
+  </div>
+  <div id="eventsWrap"><div style="font-family:monospace;font-size:9px;color:var(--muted);text-align:center;padding:20px">Waiting for events...</div></div>
+</div>
+<div class="bot-name">__BOT_NAME__ &#xB7; Live</div>
 <script>
-let seenIds = new Set();
-let openTimers = {};
-
-function fmt(n, dec=4) { return (n>=0?'+':'')+n.toFixed(dec); }
-function fmtTime(ts) {
-  const d = new Date(ts*1000);
-  return d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+// OPEN POSITIONS — iOS card stack
+const CARD_H=100,PEEK=17,EXP_GAP=10,PAD=13;
+let stackExpanded=false;
+const dismissed=new Set();
+const posCards={};
+const posTimers={};
+const posWrap=document.getElementById('posStackWrap');
+const expandBtn=document.getElementById('expandBtn');
+const badge=document.getElementById('posBadge');
+const colHint=document.getElementById('collapseHint');
+function fmt(s){s=Math.round(s);return s<60?s+'s':Math.floor(s/60)+'m '+String(s%60).padStart(2,'0')+'s';}
+function makePos(t){
+  var mint=t.mint;
+  if(posCards[mint])return;
+  var el=document.createElement('div');
+  el.className='pos-card neutral-card';
+  var bpct=Math.min(100,t.bond_entry||0);
+  el.innerHTML=
+    '<div class="pc-hide-bg">&#x2190; HIDE</div>'+
+    '<div class="pc-inner">'+
+      '<div class="pc-row1">'+
+        '<div class="pc-sym">'+t.symbol+'</div>'+
+        '<div class="pc-bond">'+t.bond_entry.toFixed(1)+'% &#x2192; '+t.bond_high.toFixed(1)+'%</div>'+
+      '</div>'+
+      '<div class="pc-row2">'+
+        '<div class="pc-strat">BOND</div>'+
+        '<div class="pc-bond-bar"><div class="pc-bond-fill" style="width:'+bpct+'%"></div></div>'+
+        '<div class="pc-strat">'+t.strategy.toUpperCase()+'</div>'+
+      '</div>'+
+      '<div class="pc-row3">'+
+        '<div class="pc-size">$'+t.amount.toFixed(2)+'</div>'+
+        '<div class="pc-time" id="pct'+mint+'">'+fmt(t.elapsed_s)+'</div>'+
+        '<div class="pc-swipe-lbl">&#x2190; HIDE</div>'+
+      '</div>'+
+    '</div>';
+  posWrap.appendChild(el);
+  posCards[mint]={card:el,timeEl:document.getElementById('pct'+mint)};
+  posTimers[mint]=t.elapsed_s;
+  initSwipe(el,mint);
 }
-function elapsed(s) {
-  if (s < 60) return s.toFixed(0)+'s';
-  return Math.floor(s/60)+'m '+(s%60).toFixed(0)+'s';
+function visMints(){return Object.keys(posCards).filter(function(m){return !dismissed.has(m)&&posCards[m].card.style.display!=='none';});}
+function updateStack(){
+  var vk=visMints();var n=vk.length;
+  badge.textContent=n+' OPEN';
+  document.getElementById('openCount').textContent=n;
+  if(n===0){posWrap.style.height='0px';colHint.style.display='none';expandBtn.style.display='none';return;}
+  expandBtn.style.display='';
+  colHint.style.display=stackExpanded&&n>1?'':'none';
+  expandBtn.textContent=stackExpanded?'COLLAPSE &#x2195;':'EXPAND &#x2195;';
+  if(stackExpanded){
+    posWrap.style.height=(PAD+n*CARD_H+(n-1)*EXP_GAP+PAD)+'px';
+    vk.forEach(function(m,i){var c=posCards[m].card;c.style.top=(PAD+i*(CARD_H+EXP_GAP))+'px';c.style.transform='scale(1)';c.style.opacity='1';c.style.zIndex=n-i;c.style.pointerEvents='auto';});
+  }else{
+    posWrap.style.height=(PAD+CARD_H+(n-1)*PEEK+PAD)+'px';
+    vk.forEach(function(m,i){var c=posCards[m].card;c.style.top=(PAD+i*PEEK)+'px';c.style.transform='scale('+(1-i*0.03)+')';c.style.opacity=i===0?'1':i===1?'0.78':'0.58';c.style.zIndex=n-i;c.style.pointerEvents='auto';});
+  }
 }
+function toggleExpand(){if(visMints().length<=1)return;stackExpanded=!stackExpanded;updateStack();}
+function initSwipe(card,mint){
+  var inner=card.querySelector('.pc-inner');
+  var bg=card.querySelector('.pc-hide-bg');
+  var sx,sy,isH=null,moved=false;
+  function snap(){inner.style.transition='transform .35s cubic-bezier(.22,.8,.36,1)';inner.style.transform='translateX(0)';bg.style.opacity='0';}
+  card.addEventListener('touchstart',function(e){sx=e.touches[0].clientX;sy=e.touches[0].clientY;isH=null;moved=false;inner.style.transition='none';bg.style.transition='none';},{passive:true});
+  card.addEventListener('touchmove',function(e){
+    var dx=e.touches[0].clientX-sx,dy=e.touches[0].clientY-sy;
+    if(isH===null&&(Math.abs(dx)>6||Math.abs(dy)>6))isH=Math.abs(dx)>Math.abs(dy);
+    if(!isH)return;moved=true;if(dx>8)return;
+    inner.style.transform='translateX('+Math.min(0,dx)+'px)';
+    bg.style.opacity=Math.min(1,Math.abs(Math.min(0,dx))/88);
+    e.preventDefault();
+  },{passive:false});
+  card.addEventListener('touchend',function(e){
+    var dx=e.changedTouches[0].clientX-sx;
+    if(!moved||isH===null){snap();if(!stackExpanded)toggleExpand();return;}
+    if(!isH){snap();return;}
+    if(dx<-80){
+      inner.style.transition='transform .28s ease';inner.style.transform='translateX(-110%)';bg.style.opacity='1';
+      setTimeout(function(){dismissCard(mint);},290);
+    }else snap();
+  },{passive:true});
+}
+function dismissCard(mint){
+  var c=posCards[mint];if(!c)return;
+  var card=c.card;
+  card.style.transition='height .38s ease,opacity .28s ease';
+  var h=card.offsetHeight;void card.offsetHeight;card.style.height=h+'px';
+  requestAnimationFrame(function(){card.style.height='0';card.style.opacity='0';card.style.overflow='hidden';});
+  setTimeout(function(){card.style.display='none';dismissed.add(mint);if(visMints().length<2&&stackExpanded)stackExpanded=false;updateStack();},400);
+}
+setInterval(function(){Object.keys(posTimers).forEach(function(m){if(dismissed.has(m))return;posTimers[m]+=1;var c=posCards[m];if(c&&c.timeEl)c.timeEl.textContent=fmt(posTimers[m]);});},1000);
 
-function tick() {
-  // Update elapsed timers for open trades
-  document.querySelectorAll('.elapsed-cell').forEach(el => {
-    const start = parseInt(el.dataset.start);
-    el.textContent = elapsed(Date.now()/1000 - start);
+// COIN SCANNER — ISO perspective deck + real scan_log
+var FILTERS=[
+  {label:'SOCIAL',icon:'&#x1F517;'},{label:'ACTIVE',icon:'&#x23F1;'},
+  {label:'BOND%', icon:'&#x1F4C8;'},{label:'RUG',   icon:'&#x1F6E1;'},
+  {label:'HOLDER',icon:'&#x1F465;'},{label:'DEV',   icon:'&#x1F50D;'},
+];
+var SLOTS=[
+  {ty:-130,s:0.54,rx:-15,op:0.08,z:1},
+  {ty: -65,s:0.78,rx: -7,op:0.40,z:2},
+  {ty:   0,s:1.00,rx:  0,op:1.00,z:5},
+  {ty:  65,s:0.78,rx:  7,op:0.40,z:2},
+  {ty: 130,s:0.54,rx: 15,op:0.08,z:1},
+];
+var MAX_H=20;
+var scanHistory=[],viewIdx=0,isAtLive=true,nPass=0,nFail=0;
+var seenTs=new Set(),animQueue=[],isAnimating=false,firstPoll=true;
+var deckWrap=document.getElementById('deckWrap');
+var dotsEl=document.getElementById('deckDots');
+var hintEl=document.getElementById('deckHint');
+var liveBtn=document.getElementById('liveBtn');
+function g(id){return document.getElementById(id);}
+function makeCard(ci){
+  var el=document.createElement('div');
+  el.className='scan-card';el.id='card-'+ci;
+  var fHTML=FILTERS.map(function(_,fi){
+    return '<div class="frow" id="fr-'+ci+'-'+fi+'">'+
+      '<div class="ficon" id="fi-'+ci+'-'+fi+'">&#x25FD;</div>'+
+      '<div class="fname">'+FILTERS[fi].label+'</div>'+
+      '<div class="fval" id="fv-'+ci+'-'+fi+'">&#x2014;</div>'+
+    '</div>';
+  }).join('');
+  el.innerHTML=
+    '<div class="sc-top">'+
+      '<div><div class="sc-sym" id="csym-'+ci+'">&#x2014;</div><div class="sc-mint" id="cmint-'+ci+'"></div></div>'+
+      '<div class="sc-right">'+
+        '<div class="sc-badge b-bond" id="cbond-'+ci+'">BOND &#x2014;</div>'+
+        '<div class="sc-badge b-sig" id="csig-'+ci+'">SIG &#x2014;</div>'+
+      '</div>'+
+    '</div>'+
+    '<div class="sc-bar"><div class="sc-bar-fill" id="cbar-'+ci+'" style="width:0%"></div></div>'+
+    '<div class="sc-filters">'+fHTML+'</div>'+
+    '<div class="sc-status" id="csb-'+ci+'">QUEUED</div>'+
+    '<svg class="sc-fig" viewBox="0 0 22 30" fill="none">'+
+      '<circle cx="11" cy="3.5" r="3" stroke="#00e5ff" stroke-width="1.2"/>'+
+      '<line x1="11" y1="6.5" x2="11" y2="19" stroke="#00e5ff" stroke-width="1.2"/>'+
+      '<line x1="11" y1="10" x2="4" y2="15" stroke="#00e5ff" stroke-width="1.2">'+
+        '<animateTransform id="arm-'+ci+'" attributeName="transform" type="rotate"'+
+        ' from="0 11 10" to="-22 11 10" dur="0.5s" repeatCount="indefinite"'+
+        ' calcMode="discrete" begin="indefinite"/>'+
+      '</line>'+
+      '<line x1="11" y1="10" x2="18" y2="15" stroke="#00e5ff" stroke-width="1.2"/>'+
+      '<line x1="11" y1="19" x2="7" y2="28" stroke="#00e5ff" stroke-width="1.2"/>'+
+      '<line x1="11" y1="19" x2="15" y2="28" stroke="#00e5ff" stroke-width="1.2"/>'+
+    '</svg>';
+  deckWrap.insertBefore(el,dotsEl);
+  return el;
+}
+var cardEls=[];
+for(var i=0;i<MAX_H;i++)cardEls.push(makeCard(i));
+var dotEls=[];
+for(var i=0;i<MAX_H;i++){var d=document.createElement('div');d.className='ddot';dotsEl.appendChild(d);dotEls.push(d);}
+function layout(){
+  cardEls.forEach(function(card,ci){
+    var delta=ci-viewIdx,si=delta+2;
+    if(si<0||si>4||ci>=scanHistory.length){
+      card.style.opacity='0';card.style.pointerEvents='none';card.style.zIndex='0';
+      card.style.transform='translateY('+(delta>0?180:-180)+'px) scale(0.4) rotateX('+(delta>0?20:-20)+'deg)';
+    }else{
+      var sl=SLOTS[si];
+      card.style.opacity=sl.op;card.style.zIndex=sl.z;
+      card.style.transform='translateY('+sl.ty+'px) scale('+sl.s+') rotateX('+sl.rx+'deg)';
+      card.style.pointerEvents=si===2?'auto':'none';
+      if(si===2)card.classList.add('is-focus');else card.classList.remove('is-focus');
+    }
   });
+  dotEls.forEach(function(dd,i){
+    if(i>=scanHistory.length){dd.className='ddot';dd.style.display='none';return;}
+    dd.style.display='block';
+    var r=scanHistory[i].result;
+    dd.className='ddot '+(r==='pass'?'dp':r==='fail'?'df':'dq');
+    if(i===viewIdx)dd.classList.add('active');
+  });
+  isAtLive=viewIdx===0;
+  liveBtn.style.display=isAtLive?'none':'block';
+  hintEl.classList.toggle('show',scanHistory.length>1);
 }
-setInterval(tick, 1000);
-
-async function poll() {
-  try {
-    const r = await fetch('/live/api');
-    const d = await r.json();
-
-    // Capital
-    document.getElementById('cap-big').textContent = '$'+d.capital.toFixed(2);
-    document.getElementById('cap-pill').textContent = '$'+d.capital.toFixed(2);
-    document.getElementById('today-pill').textContent =
-      d.today.trades+'T '+d.today.wins+'W '+d.today.losses+'L';
-    document.getElementById('open-count').textContent = d.open.length;
-    document.getElementById('open-badge').textContent = d.open.length+' active';
-
-    // Scan status
-    const dot = document.getElementById('scan-dot');
-    const lbl = document.getElementById('scan-label');
-    if (d.paused) {
-      dot.className='dot red blink'; lbl.textContent='Cooling Down';
-    } else if (d.scanning) {
-      dot.className='dot green blink'; lbl.textContent='Scanning';
-    } else {
-      dot.className='dot red'; lbl.textContent='Halted';
+function entryToCoin(e){
+  return {sym:e.sym,mint:e.mint,bond:e.bond,sig:Math.min(3,e.sig||0),failAt:e.fi,passMsg:e.msg||'',failMsg:e.msg||''};
+}
+function fillCard(ci){
+  if(ci>=scanHistory.length)return;
+  var coin=scanHistory[ci].coin;
+  var cs=g('csym-'+ci);if(cs)cs.textContent=coin.sym;
+  var cm=g('cmint-'+ci);if(cm)cm.textContent=coin.mint;
+  var cb=g('cbond-'+ci);if(cb)cb.textContent='BOND '+coin.bond+'%';
+  var csg=g('csig-'+ci);if(csg)csg.textContent='SIG '+coin.sig+'/3';
+  var cbar=g('cbar-'+ci);if(cbar)cbar.style.width=Math.min(100,coin.bond)+'%';
+  FILTERS.forEach(function(_,fi){
+    var fr=g('fr-'+ci+'-'+fi);if(fr)fr.className='frow';
+    var fic=g('fi-'+ci+'-'+fi);if(fic)fic.innerHTML='&#x25FD;';
+    var fv=g('fv-'+ci+'-'+fi);if(fv){fv.className='fval';fv.innerHTML='&#x2014;';}
+  });
+  var sb=g('csb-'+ci);if(sb){sb.className='sc-status';sb.textContent='QUEUED';}
+  cardEls[ci].className='scan-card';
+}
+function applyFinalState(ci){
+  if(ci>=scanHistory.length)return;
+  var coin=scanHistory[ci].coin,result=scanHistory[ci].result;
+  var showUntil=result==='fail'?coin.failAt:FILTERS.length-1;
+  for(var fi=0;fi<FILTERS.length;fi++){
+    var row=g('fr-'+ci+'-'+fi);if(!row)continue;
+    if(fi>showUntil){row.className='frow';continue;}
+    row.className='frow vis';
+    if(result==='fail'&&fi===coin.failAt){
+      g('fi-'+ci+'-'+fi).innerHTML='&#x1F534;';
+      g('fv-'+ci+'-'+fi).className='fval bad';
+      g('fv-'+ci+'-'+fi).textContent='FAIL';
+    }else{
+      g('fi-'+ci+'-'+fi).innerHTML='&#x2705;';
+      g('fv-'+ci+'-'+fi).className='fval ok';
+      g('fv-'+ci+'-'+fi).textContent='OK';
     }
-
-    // Open trades table
-    const tbody = document.getElementById('open-rows');
-    if (d.open.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="6" class="empty">No open trades — scanning...</td></tr>';
-    } else {
-      tbody.innerHTML = d.open.map(t => `
-        <tr>
-          <td><span class="sym">${t.symbol}</span><br>
-            <span class="muted" style="font-size:.65rem">${t.strategy.toUpperCase()}</span></td>
-          <td><span class="badge strat">${t.strategy.toUpperCase()}</span></td>
-          <td class="mono cyan">$${t.amount.toFixed(2)}</td>
-          <td class="mono">${t.bond_entry.toFixed(1)}%</td>
-          <td class="mono cyan">${t.bond_high.toFixed(1)}%</td>
-          <td class="timer elapsed-cell" data-start="${t.opened_at}">${elapsed(Date.now()/1000 - t.opened_at)}</td>
-        </tr>`).join('');
+  }
+  var sb=g('csb-'+ci);cardEls[ci].className='scan-card';
+  if(result==='pass'){sb.className='sc-status pass';sb.innerHTML='&#x2713; '+(coin.passMsg||'TRADE ENTERED');cardEls[ci].classList.add('state-pass');}
+  else{sb.className='sc-status fail';sb.innerHTML='&#x2717; '+(coin.failMsg||'REJECTED');cardEls[ci].classList.add('state-fail');}
+}
+function animateEntry(ci,onDone){
+  var coin=scanHistory[ci].coin;
+  var sb=g('csb-'+ci),card=cardEls[ci];
+  g('snCoin').textContent=coin.sym;
+  g('snStatus').className='sn-status scan';g('snStatus').textContent='CHECKING';
+  try{g('arm-'+ci).beginElement();}catch(e){}
+  sb.className='sc-status scanning';sb.textContent='SCANNING';
+  var step=0;
+  function tick(){
+    if(step>=FILTERS.length){
+      try{g('arm-'+ci).endElement();}catch(e){}
+      sb.className='sc-status pass';sb.innerHTML='&#x2713; '+(coin.passMsg||'TRADE ENTERED');
+      card.classList.add('state-pass');scanHistory[ci].result='pass';nPass++;
+      g('snStatus').className='sn-status pass';g('snStatus').innerHTML='&#x2713; ENTERED';
+      g('st-n').textContent=(nPass+nFail)+' scanned';g('st-p').innerHTML=nPass+' &#x2713;';
+      setTimeout(onDone,2000);return;
     }
-
-    // Feed — closed trades, newest first
-    const feed = document.getElementById('feed');
-    let added = false;
-    const sorted = [...d.closed].reverse();
-    const newItems = [];
-
-    sorted.forEach(t => {
-      const key = t.id ?? (t.symbol+t.time);
-      if (!seenIds.has(key)) {
-        seenIds.add(key);
-        added = true;
-        const won = t.pnl > 0;
-        const isBuy = false; // closed trades only here
-        const sign = t.pnl >= 0 ? '+' : '';
-        newItems.push(`
-          <div class="feed-item ${won?'win':'loss'}">
-            <span class="feed-ts">${t.time}</span>
-            <span class="feed-icon">${won?'✅':'❌'}</span>
-            <div class="feed-body">
-              <span class="feed-sym">${t.symbol}</span>
-              <span class="badge ${won?'win':'loss'}">${won?'WIN':'LOSS'}</span>
-              &nbsp;<span class="badge strat">${t.strategy.toUpperCase()}</span>
-              <div class="feed-detail">
-                Entry $${t.entry.toFixed(6)} → Exit $${t.exit.toFixed(6)}
-                &nbsp;·&nbsp; ${t.result} &nbsp;·&nbsp; held ${t.hold_m.toFixed(1)}m
-              </div>
-            </div>
-            <span class="feed-pnl ${won?'green':'red'}">${sign}$${t.pnl.toFixed(4)}</span>
-          </div>`);
-      }
-    });
-
-    if (newItems.length > 0) {
-      const existing = feed.innerHTML === '<div class="empty">Waiting for trades...</div>'
-        ? '' : feed.innerHTML;
-      feed.innerHTML = newItems.join('') + existing;
+    var fr=g('fr-'+ci+'-'+step);if(fr)fr.className='frow vis';
+    var fic=g('fi-'+ci+'-'+step);if(fic)fic.innerHTML=FILTERS[step].icon;
+    var fv=g('fv-'+ci+'-'+step);if(fv){fv.className='fval chk';fv.textContent='...';}
+    if(coin.failAt===step){
+      setTimeout(function(){
+        if(fic)fic.innerHTML='&#x1F534;';if(fv){fv.className='fval bad';fv.textContent='FAIL';}
+        setTimeout(function(){
+          try{g('arm-'+ci).endElement();}catch(e){}
+          sb.className='sc-status fail';sb.innerHTML='&#x2717; '+(coin.failMsg||'REJECTED');
+          card.classList.add('state-fail');scanHistory[ci].result='fail';nFail++;
+          g('snStatus').className='sn-status fail';g('snStatus').innerHTML='&#x2717; REJECTED';
+          g('st-n').textContent=(nPass+nFail)+' scanned';g('st-f').innerHTML=nFail+' &#x2717;';
+          setTimeout(onDone,1600);
+        },380);
+      },340);return;
     }
+    setTimeout(function(){
+      if(fic)fic.innerHTML='&#x2705;';if(fv){fv.className='fval ok';fv.textContent='OK';}
+      step++;setTimeout(tick,150);
+    },340);
+  }
+  setTimeout(tick,200);
+}
+function drainQueue(){
+  if(isAnimating||animQueue.length===0)return;
+  isAnimating=true;
+  var entry=animQueue.shift();
+  var coin=entryToCoin(entry);
+  scanHistory.unshift({coin:coin,result:'scanning'});
+  if(scanHistory.length>MAX_H)scanHistory.pop();
+  scanHistory.forEach(function(_,ci){fillCard(ci);});
+  if(isAtLive)viewIdx=0;
+  layout();
+  animateEntry(0,function(){isAnimating=false;drainQueue();});
+}
+function jumpToLive(){viewIdx=0;isAtLive=true;layout();}
+var ty0=0,dacc=0,ddrag=false;
+deckWrap.addEventListener('touchstart',function(e){ty0=e.touches[0].clientY;dacc=0;ddrag=true;},{passive:true});
+deckWrap.addEventListener('touchmove',function(e){if(ddrag)dacc=e.touches[0].clientY-ty0;},{passive:true});
+deckWrap.addEventListener('touchend',function(){if(!ddrag)return;ddrag=false;if(Math.abs(dacc)>40){viewIdx=Math.max(0,Math.min(scanHistory.length-1,viewIdx+(dacc<0?1:-1)));isAtLive=viewIdx===0;layout();}});
+var md=false,my0=0,ma=0;
+deckWrap.addEventListener('mousedown',function(e){md=true;my0=e.clientY;ma=0;});
+deckWrap.addEventListener('mousemove',function(e){if(md)ma=e.clientY-my0;});
+deckWrap.addEventListener('mouseup',function(){if(!md)return;md=false;if(Math.abs(ma)>40){viewIdx=Math.max(0,Math.min(scanHistory.length-1,viewIdx+(ma<0?1:-1)));isAtLive=viewIdx===0;layout();}});
 
-    // Last updated
-    document.getElementById('last-update').textContent =
-      'Updated ' + new Date().toLocaleTimeString();
-
-  } catch(e) { console.error(e); }
+// TRADE EVENTS
+function fmtP(p){if(!p||p===0)return '-';return p<0.0001?p.toFixed(10):p.toFixed(6);}
+function elStr(s){s=Math.round(s||0);if(s<3600)return Math.floor(s/60)+'m '+String(s%60).padStart(2,'0')+'s';return Math.floor(s/3600)+'h '+(Math.floor(s/60)%60)+'m';}
+function renderEvents(d){
+  var wrap=g('eventsWrap');var rows=[];
+  (d.open||[]).forEach(function(t){
+    rows.push(
+      '<div class="trade-row">'+
+      '<div class="tr-time">'+elStr(t.elapsed_s)+'</div>'+
+      '<div class="tr-icon open">&#x2192;</div>'+
+      '<div class="tr-body">'+
+        '<div class="tr-sym">'+t.symbol+'</div>'+
+        '<div class="tr-tags"><span class="tag tag-open">OPEN</span><span class="tag tag-bond">'+t.strategy.toUpperCase()+'</span></div>'+
+        '<div class="tr-detail">$'+t.amount.toFixed(2)+' &#xB7; BOND '+t.bond_entry.toFixed(1)+'%&#x2192;'+t.bond_high.toFixed(1)+'%</div>'+
+      '</div>'+
+      '<div class="tr-pnl" style="color:var(--muted)">OPEN</div>'+
+      '</div>');
+  });
+  (d.closed||[]).slice(0,8).forEach(function(t){
+    var win=(t.pnl||0)>0;
+    rows.push(
+      '<div class="trade-row">'+
+      '<div class="tr-time">'+elStr(t.elapsed_s||0)+'</div>'+
+      '<div class="tr-icon '+(win?'win':'loss')+'">'+(win?'&#x2713;':'&#x2717;')+'</div>'+
+      '<div class="tr-body">'+
+        '<div class="tr-sym">'+t.symbol+'</div>'+
+        '<div class="tr-tags"><span class="tag '+(win?'tag-win':'tag-loss')+'">'+(win?'WIN':'LOSS')+'</span><span class="tag tag-bond">'+(t.strategy||'').toUpperCase()+'</span></div>'+
+        '<div class="tr-detail">'+(t.exit_reason||t.result||'EXIT')+'</div>'+
+      '</div>'+
+      '<div class="tr-pnl '+(win?'pos':'neg')+'">'+(win?'+':'')+' $'+Math.abs(t.pnl||0).toFixed(2)+'</div>'+
+      '</div>');
+  });
+  if(!rows.length)rows.push('<div style="font-family:monospace;font-size:9px;color:var(--muted);text-align:center;padding:20px">No events yet</div>');
+  wrap.innerHTML=rows.join('');
 }
 
+// API POLL
+function poll(){
+  fetch('/live/api').then(function(r){return r.json();}).then(function(d){
+    document.getElementById('capVal').textContent='$'+d.capital.toFixed(2);
+    document.getElementById('todayVal').textContent=d.today.trades+'T '+d.today.wins+'W '+d.today.losses+'L';
+    var sc=g('scanStatus');if(sc)sc.textContent=d.scanning?(d.paused?'Paused':'Scanning'):'Stopped';
+    var mintSet=new Set((d.open||[]).map(function(t){return t.mint;}));
+    (d.open||[]).forEach(function(t){makePos(t);});
+    Object.keys(posCards).forEach(function(m){if(!mintSet.has(m)&&!dismissed.has(m)){var c=posCards[m];if(c&&c.card)c.card.style.display='none';}});
+    (d.open||[]).forEach(function(t){posTimers[t.mint]=t.elapsed_s;});
+    updateStack();
+    var sl=d.scan_log||[];
+    if(firstPoll){
+      firstPoll=false;
+      var seed=sl.slice(0,Math.min(4,sl.length));
+      seed.forEach(function(e){seenTs.add(e.ts);});
+      seed.slice().reverse().forEach(function(e){
+        var coin=entryToCoin(e);
+        scanHistory.unshift({coin:coin,result:e.result==='pass'?'pass':'fail'});
+      });
+      scanHistory.forEach(function(_,ci){fillCard(ci);applyFinalState(ci);});
+      nPass=scanHistory.filter(function(s){return s.result==='pass';}).length;
+      nFail=scanHistory.filter(function(s){return s.result==='fail';}).length;
+      g('st-n').textContent=(nPass+nFail)+' scanned';
+      g('st-p').innerHTML=nPass+' &#x2713;';
+      g('st-f').innerHTML=nFail+' &#x2717;';
+      if(sl.length>0&&sl[0].sym)g('snCoin').textContent=sl[0].sym;
+      sl.forEach(function(e){seenTs.add(e.ts);});
+      layout();
+    }else{
+      var fresh=sl.filter(function(e){return !seenTs.has(e.ts);});
+      fresh.forEach(function(e){seenTs.add(e.ts);});
+      fresh.slice().reverse().forEach(function(e){animQueue.push(e);});
+      drainQueue();
+    }
+    renderEvents(d);
+  }).catch(function(){});
+}
 poll();
-setInterval(poll, 3000);
+setInterval(poll,3000);
 </script>
 </body></html>"""
-    html = html.replace("Boogey's Treasure Chest", BOT_NAME)
+    html = html.replace("__BOT_NAME__", BOT_NAME)
     return html, 200
-
 @app.route("/learn/api", methods=["GET"])
 def learn_api():
     try:
@@ -4481,6 +4337,26 @@ async function testTelegram() {{
 </body></html>"""
     return html
 
+@app.route("/wallets", methods=["GET"])
+def wallets_status():
+    """Shows which wallets are being tracked — use this to confirm TRACKED_WALLETS is set correctly."""
+    with _copy_lock:
+        discovered = list(_copy_wallets)
+    return jsonify({
+        "tracked_wallets": {
+            "count":     len(TRACKED_WALLETS),
+            "addresses": TRACKED_WALLETS,
+            "hint":      "Set TRACKED_WALLETS=addr1,addr2,addr3 in Railway env vars for THIS service (sniper bot)",
+        },
+        "gmgn_discovered": {
+            "count":     len(discovered),
+            "wallets":   [{"address": w["address"], "winrate": w["winrate"]} for w in discovered],
+            "status":    "OK" if discovered else "No wallets fetched yet — GMGN rank may be rate-limited",
+        },
+        "total_watching": len(TRACKED_WALLETS) + len(discovered),
+        "copy_trade_on":  COPY_TRADE,
+    })
+
 @app.route("/blacklist/<mint>", methods=["GET"])
 def blacklist_route(mint):
     blacklisted_mints.add(mint)
@@ -4592,10 +4468,10 @@ def export_all():
 if __name__ == "__main__":
     if not PAPER_MODE:
         if not WALLET or not WALLET_PRIVATE_KEY:
-            log("err", "LIVE mode requires WALLET and WALLET_PRIVATE_KEY env vars.")
+            print("[FATAL] LIVE mode requires WALLET and WALLET_PRIVATE_KEY env vars. Exiting.")
             raise SystemExit(1)
         if not _SOLANA_AVAILABLE:
-            log("err", "LIVE mode requires solders and solana packages — pip install solders solana.")
+            print("[FATAL] LIVE mode requires solders and solana packages.")
             raise SystemExit(1)
     elif _PAPER_ENV != "true" and (not WALLET or not WALLET_PRIVATE_KEY):
         log("warn", "WALLET/WALLET_PRIVATE_KEY not set — PAPER mode")
@@ -4610,7 +4486,6 @@ if __name__ == "__main__":
         threading.Thread(target=copy_trade_loop, daemon=True).start()
     t_signals = threading.Thread(target=run_signal_refresh_loop, daemon=True)
     t_signals.start()
-    threading.Thread(target=gmgn_trending_scan_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
     log("ok", "=" * 55)
     log("ok", f"Mode      : {'PAPER' if PAPER_MODE else 'LIVE'}")
@@ -4623,12 +4498,10 @@ if __name__ == "__main__":
     _pct, _limit = _cap_tier(_cap)
     log("ok", f"Capital: ${_cap:.2f} | Trade size: {_pct*100:.0f}% (${trade_size():.2f}) | Daily cap: {_limit} trades | Max daily loss: {MAX_DAILY_LOSS_PCT:.0f}%")
     log("ok", f"Copy trade: {'ON' if COPY_TRADE else 'OFF'} | WR {COPY_WINRATE_MIN}-{COPY_WINRATE_MAX}% | top {COPY_MAX_WALLETS} wallets")
+    if TRACKED_WALLETS:
+        log("ok", f"Tracked wallets ({len(TRACKED_WALLETS)}): {', '.join(w[:8]+'...' for w in TRACKED_WALLETS)}")
+    else:
+        log("warn", "TRACKED_WALLETS not set — add wallet addresses in Railway env vars")
     log("ok", f"USDC lock : activates at ${USDC_LOCK_THRESHOLD:.0f} capital")
     log("ok", "=" * 55)
-    notify(
-        f"🚀 {BOT_NAME} started",
-        f"Mode: {'PAPER' if PAPER_MODE else 'LIVE'}\n"
-        f"Capital: ${_cap:.2f} | Trade size: ${trade_size():.2f}\n"
-        f"Daily cap: {_limit} trades | Copy trade: {'ON' if COPY_TRADE else 'OFF'}"
-    )
     app.run(host="0.0.0.0", port=port, use_reloader=False)
