@@ -61,9 +61,9 @@ FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "0"))  # 0 = use ti
 
 # Capital tiers per risk level: (min_capital, trade_pct, daily_max_trades)
 _RISK_TIERS = {
-    "conservative": [(5_000,0.12,15),(500,0.10,12),(100,0.08,10),(0,0.05,8)],
-    "standard":     [(5_000,0.18,20),(500,0.15,15),(100,0.12,12),(0,0.08,12)],
-    "aggressive":   [(5_000,0.22,25),(500,0.18,20),(100,0.15,15),(0,0.12,15)],
+    "conservative": [(5_000,0.12,30),(500,0.10,25),(100,0.08,20),(0,0.05,15)],
+    "standard":     [(5_000,0.18,50),(500,0.15,40),(100,0.12,30),(0,0.08,25)],
+    "aggressive":   [(5_000,0.22,60),(500,0.18,50),(100,0.15,40),(0,0.12,30)],
 }
 _CAP_TIERS = _RISK_TIERS.get(RISK_LEVEL, _RISK_TIERS["standard"])
 
