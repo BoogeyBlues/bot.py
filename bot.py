@@ -57,13 +57,13 @@ BOT_NAME          = os.environ.get("BOT_NAME", "Boogey's Treasure Chest")
 # Position sizing — capital-tiered (protects small accounts)
 MIN_TRADE         = float(os.environ.get("MIN_TRADE",   "3"))
 MAX_TRADE         = float(os.environ.get("MAX_TRADE",   "500"))
-FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "0"))  # 0 = use tiered %
+FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "10"))  # 0 = use tiered %
 
 # Capital tiers per risk level: (min_capital, trade_pct, daily_max_trades)
 _RISK_TIERS = {
-    "conservative": [(5_000,0.12,15),(500,0.10,12),(100,0.08,10),(0,0.05,8)],
-    "standard":     [(5_000,0.18,20),(500,0.15,15),(100,0.12,12),(0,0.08,12)],
-    "aggressive":   [(5_000,0.22,25),(500,0.18,20),(100,0.15,15),(0,0.12,15)],
+    "conservative": [(5_000,0.12,6),(500,0.10,6),(100,0.08,6),(0,0.05,6)],
+    "standard":     [(5_000,0.18,6),(500,0.15,6),(100,0.12,6),(0,0.08,6)],
+    "aggressive":   [(5_000,0.22,6),(500,0.18,6),(100,0.15,6),(0,0.12,6)],
 }
 _CAP_TIERS = _RISK_TIERS.get(RISK_LEVEL, _RISK_TIERS["standard"])
 
@@ -171,7 +171,7 @@ REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
 MILESTONES = [100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000]
 
 # ── STATE ────────────────────────────────────────────────────────
-capital           = float(os.environ.get("STARTING_CAPITAL", "39.67"))
+capital           = float(os.environ.get("STARTING_CAPITAL", "100"))
 STARTING_CAPITAL  = capital  # snapshot of configured start, for UI display
 SOL_ALLOCATED     = float(os.environ.get("SOL_ALLOCATED",     "19.67"))  # SOL wallet funded for trading
 capital_lock      = threading.Lock()
