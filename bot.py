@@ -75,8 +75,8 @@ LOSS_COOLDOWN_HRS = float(os.environ.get("LOSS_COOLDOWN_HRS", "0.083")) # 5-min 
 ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # retune every 5 trades for faster learning
 
 # Bond Runner strategy
-BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "50"))
-BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "65"))
+BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "58"))  # was 50 — 58%+ means real momentum
+BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "68"))
 BOND_TP         = float(os.environ.get("BOND_TP",        "85"))
 BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "8"))
 BOND_MAX_SECS   = int(os.environ.get("BOND_MAX_SECS",    "300"))   # 5 min hard cap
@@ -129,7 +129,7 @@ GMGN_ROUTE = "https://gmgn.ai/defi/router/v1/sol/tx/get_swap_route"
 
 # Copy trading via GMGN smart wallets
 COPY_TRADE        = os.environ.get("COPY_TRADE", "true").lower() == "true"
-COPY_WINRATE_MIN  = float(os.environ.get("COPY_WINRATE_MIN",  "60"))
+COPY_WINRATE_MIN  = float(os.environ.get("COPY_WINRATE_MIN",  "65"))  # was 60 — only elite wallets
 COPY_WINRATE_MAX  = float(os.environ.get("COPY_WINRATE_MAX",  "99"))
 COPY_MAX_WALLETS  = int(os.environ.get("COPY_MAX_WALLETS",    "5"))
 COPY_MAX_AGE_SECS = int(os.environ.get("COPY_MAX_AGE_SECS",  "120"))  # ignore trades older than 2 min
@@ -156,8 +156,9 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 NTFY_TOPIC       = os.environ.get("NTFY_TOPIC", "")
 
 # Social / quality gates
-MIN_REPLIES  = int(os.environ.get("MIN_REPLIES",  "10"))
-MIN_LIQ      = float(os.environ.get("MIN_LIQ",    "300"))   # was 75 — low-liq coins can't sustain moves
+MIN_REPLIES  = int(os.environ.get("MIN_REPLIES",  "15"))   # community must actually exist
+MIN_SOCIALS  = int(os.environ.get("MIN_SOCIALS",   "2"))    # require 2 of 3: Twitter + Telegram/Website
+MIN_LIQ      = float(os.environ.get("MIN_LIQ",    "500"))   # was 300 — need real liquidity to sustain moves
 
 # General
 MAX_OPEN      = int(os.environ.get("MAX_OPEN",      "6"))
@@ -992,7 +993,7 @@ def check_holder_concentration(mint) -> tuple:
         data = r.json().get("data") or {}
         holders = data.get("holders") or data if isinstance(data, list) else []
         top10_pct = sum(float(h.get("amount_percentage") or h.get("percent") or 0) for h in holders[:10])
-        if top10_pct > 60:
+        if top10_pct > 50:   # was 60 — 50%+ whale concentration is a rug waiting to happen
             return False, f"top10={top10_pct:.0f}%"
         return True, ""
     except Exception:
@@ -1016,7 +1017,7 @@ def check_dev_history(dev_wallet) -> tuple:
             if float(t.get("token_ath_mc") or 0) > 50_000
             and float(t.get("market_cap") or 0) < float(t.get("token_ath_mc") or 1) * 0.05
         )
-        if rugs >= 2:
+        if rugs >= 1:   # was 2 — zero tolerance for devs with any rug history
             return False, f"dev rugged {rugs}x"
         return True, ""
     except Exception:
@@ -1802,19 +1803,25 @@ def scanner_loop():
                     if mint in open_trades:
                         continue
 
-                # Require Twitter, Telegram, or Website (at least one social signal)
-                if not coin.get("twitter") and not coin.get("telegram") and not coin.get("website"):
-                    _log_scan(symbol, mint, _bond_pre, 0, "social", 0, "NO SOCIAL LINKS")
+                # Require at least MIN_SOCIALS of (Twitter, Telegram, Website)
+                social_count = sum([bool(coin.get("twitter")), bool(coin.get("telegram")), bool(coin.get("website"))])
+                if social_count < MIN_SOCIALS:
+                    _log_scan(symbol, mint, _bond_pre, social_count, "social", 0, f"ONLY {social_count}/2 SOCIALS")
                     continue
                 n_social += 1
 
-                # Active trading: last trade within 15 minutes
-                # If last_trade==0 (field missing/changed), don't gate — coins already sorted by recency
+                # Minimum community engagement — coins with no replies have no following
+                replies = int(coin.get("replies", 0) or 0)
+                if replies < MIN_REPLIES:
+                    _log_scan(symbol, mint, _bond_pre, _sig_pre, "social", 0, f"REPLIES {replies}<{MIN_REPLIES}")
+                    continue
+
+                # Active trading: last trade within 5 minutes (was 15)
                 last_trade = coin.get("last_trade", 0)
                 if last_trade > 0:
                     secs_since = time.time() - last_trade / 1000
-                    if secs_since > 900:
-                        _log_scan(symbol, mint, _bond_pre, _sig_pre, "active", 1, "LAST TRADE >15MIN")
+                    if secs_since > 300:
+                        _log_scan(symbol, mint, _bond_pre, _sig_pre, "active", 1, "LAST TRADE >5MIN")
                         continue
                 n_replies += 1  # reuse counter — now means "recently active"
 
@@ -1929,6 +1936,13 @@ def scanner_loop():
                         _log_scan(symbol, mint, bond, _sig_pre, "sm", 6, "SMART $ SELLING")
                         continue
                     sig_score = gmgn_signal_score(mint)
+                    if sig_score < 1:
+                        _log_scan(symbol, mint, bond, _sig_pre, "sig", 7, "NO GMGN SIGNAL")
+                        continue
+                    holder_ok, holder_reason = check_holder_concentration(mint)
+                    if not holder_ok:
+                        _log_scan(symbol, mint, bond, _sig_pre, "holder", 4, holder_reason[:18].upper())
+                        continue
                     market = get_market_data(mint)
                     if not market or market["price"] <= 0:
                         _vsol = coin.get("vsol", 0)
@@ -1954,7 +1968,7 @@ def scanner_loop():
                     if not market:
                         continue
                     if (market["change1h"] >= SPIKE_MIN_1H and market["liq"] >= MIN_LIQ
-                            and market["price"] > 0 and market.get("vol_m5", 0) >= 500):
+                            and market["price"] > 0 and market.get("vol_m5", 0) >= 1000):  # was 500
                         rug = run_rugcheck(mint)
                         if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
                             log("warn", "Mint/freeze auth — skip", symbol)
@@ -1976,8 +1990,11 @@ def scanner_loop():
                             log("warn", "SKIP: smart money selling", symbol)
                             continue
                         sig_score = gmgn_signal_score(mint)
+                        if sig_score < 1:
+                            log("info", f"SPIKE SKIP: sig={sig_score} (no GMGN backing)", symbol)
+                            continue
                         amt = trade_size()
-                        log("ok", f"DORMANT SPIKE | age={age_h:.1f}h 1h={market['change1h']:+.0f}% | sig={sig_score}", symbol)
+                        log("ok", f"DORMANT SPIKE | age={age_h:.1f}h 1h={market['change1h']:+.0f}% vol5m=${market.get('vol_m5',0):.0f} | sig={sig_score}", symbol)
                         enter_trade(mint, symbol, market["price"], amt, "spike", bond, 0, pump_swap=coin.get("pump_swap", False))
                         time.sleep(0.5)
 
