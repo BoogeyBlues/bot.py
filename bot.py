@@ -85,7 +85,7 @@ BOND_STALE_SECS = int(os.environ.get("BOND_STALE_SECS",  "120"))   # exit if bon
 # Dormant Spike strategy
 SPIKE_MIN_AGE_H = float(os.environ.get("SPIKE_MIN_AGE_H", "12"))
 SPIKE_MIN_1H    = float(os.environ.get("SPIKE_MIN_1H",    "30"))
-SPIKE_TP_PCT    = float(os.environ.get("SPIKE_TP_PCT",    "40"))
+SPIKE_TP_PCT    = float(os.environ.get("SPIKE_TP_PCT",    "120"))  # was 40 — let spikes run
 SPIKE_SL_PCT    = float(os.environ.get("SPIKE_SL_PCT",    "15"))
 SPIKE_MAX_SECS  = int(os.environ.get("SPIKE_MAX_SECS",    "180"))   # 3 min hard cap
 
@@ -98,7 +98,7 @@ TRENCH_MAX_SECS  = int(os.environ.get("TRENCH_MAX_SECS",    "90"))  # 90s — ve
 
 # Migration bounce — coins that just graduated to Raydium (first 2 min momentum)
 MIGRATE_MAX_AGE  = int(os.environ.get("MIGRATE_MAX_AGE",    "120")) # enter within 2 min of graduation
-MIGRATE_TP_PCT   = float(os.environ.get("MIGRATE_TP_PCT",   "100"))
+MIGRATE_TP_PCT   = float(os.environ.get("MIGRATE_TP_PCT",   "400"))  # was 100 — ride Raydium pumps to 5x
 MIGRATE_SL_PCT   = float(os.environ.get("MIGRATE_SL_PCT",   "12"))
 MIGRATE_MAX_SECS = int(os.environ.get("MIGRATE_MAX_SECS",   "300"))
 GRAD_THROUGH     = os.environ.get("GRAD_THROUGH", "true").lower() != "false"  # hold bond positions through graduation to Raydium
@@ -113,9 +113,9 @@ TSL_ACTIVATE_PCT = float(os.environ.get("TSL_ACTIVATE_PCT", "15"))  # lock-in st
 SHARP_DROP_PCT = float(os.environ.get("SHARP_DROP_PCT", "4"))
 
 # Partial take-profit — scale out to lock gains without killing the run
-# TP1: +15% → sell 50%;  TP2: +40% → sell 60% of what's left (~30% of original)
-PARTIAL_TP1_PCT  = float(os.environ.get("PARTIAL_TP1_PCT",  "15"))
-PARTIAL_TP2_PCT  = float(os.environ.get("PARTIAL_TP2_PCT",  "40"))
+# TP1: +50% → sell 40% (locks ~$5 on a $10 trade); TP2: +100% → sell 40% of remaining; final 36% rides with TSL
+PARTIAL_TP1_PCT  = float(os.environ.get("PARTIAL_TP1_PCT",  "50"))
+PARTIAL_TP2_PCT  = float(os.environ.get("PARTIAL_TP2_PCT",  "100"))
 
 # Bundle mode: "avoid" or "ride"
 BUNDLE_MODE    = os.environ.get("BUNDLE_MODE", "avoid").lower()
@@ -136,7 +136,7 @@ COPY_MAX_AGE_SECS = int(os.environ.get("COPY_MAX_AGE_SECS",  "120"))  # ignore t
 # Manually tracked wallets — comma-separated Solana addresses; merged with GMGN auto-discovered wallets
 TRACKED_WALLETS   = [w.strip() for w in os.environ.get("TRACKED_WALLETS", "").split(",") if w.strip()]
 COPY_REFRESH_MINS = int(os.environ.get("COPY_REFRESH_MINS",  "60"))   # refresh wallet list hourly
-COPY_TP_PCT       = float(os.environ.get("COPY_TP_PCT",       "40"))
+COPY_TP_PCT       = float(os.environ.get("COPY_TP_PCT",       "100"))  # was 40 — let copy trades run
 COPY_SL_PCT       = float(os.environ.get("COPY_SL_PCT",       "15"))
 COPY_MAX_SECS     = int(os.environ.get("COPY_MAX_SECS",       "180"))
 GMGN_RANK         = "https://gmgn.ai/defi/quotation/v1/rank/sol/wallets/7d"
@@ -157,7 +157,7 @@ NTFY_TOPIC       = os.environ.get("NTFY_TOPIC", "")
 
 # Social / quality gates
 MIN_REPLIES  = int(os.environ.get("MIN_REPLIES",  "10"))
-MIN_LIQ      = float(os.environ.get("MIN_LIQ",    "75"))
+MIN_LIQ      = float(os.environ.get("MIN_LIQ",    "300"))   # was 75 — low-liq coins can't sustain moves
 
 # General
 MAX_OPEN      = int(os.environ.get("MAX_OPEN",      "6"))
@@ -899,10 +899,17 @@ def get_market_data(mint):
         if not pairs:
             return None
         pair = max(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
+        vol  = pair.get("volume", {})
+        txns = pair.get("txns",   {}).get("m5", {})
         return {
             "price":    float(pair.get("priceUsd", 0) or 0),
             "liq":      float(pair.get("liquidity", {}).get("usd", 0) or 0),
             "change1h": float(pair.get("priceChange", {}).get("h1", 0) or 0),
+            "change5m": float(pair.get("priceChange", {}).get("m5", 0) or 0),
+            "vol_m5":   float(vol.get("m5", 0) or 0),
+            "vol_h1":   float(vol.get("h1", 0) or 0),
+            "buys_m5":  int(txns.get("buys", 0) or 0),
+            "sells_m5": int(txns.get("sells", 0) or 0),
             "age_h":    (time.time() - float(pair.get("pairCreatedAt", time.time() * 1000)) / 1000) / 3600,
         }
     except Exception:
@@ -1482,7 +1489,7 @@ def monitor_loop():
             partial_done = trade.get("partial_tp_done", 0)
 
             if partial_done == 0 and move_pct >= PARTIAL_TP1_PCT:
-                _partial_exit(mint, price, 0.50, "PARTIAL_TP1")
+                _partial_exit(mint, price, 0.40, "PARTIAL_TP1")   # lock 40% of position at +50%
                 with trades_lock:
                     if mint not in open_trades:
                         continue
@@ -1490,7 +1497,7 @@ def monitor_loop():
                 partial_done = 1
 
             if partial_done == 1 and move_pct >= PARTIAL_TP2_PCT:
-                _partial_exit(mint, price, 0.60, "PARTIAL_TP2")
+                _partial_exit(mint, price, 0.40, "PARTIAL_TP2")   # lock 40% of remaining at +100%
                 with trades_lock:
                     if mint not in open_trades:
                         continue
@@ -1857,6 +1864,9 @@ def scanner_loop():
                         _log_scan(symbol, mint, bond, _sig_pre, "sm", 6, "SMART $ SELLING")
                         continue
                     sig_score = gmgn_signal_score(mint)
+                    if sig_score < 1:
+                        _log_scan(symbol, mint, bond, _sig_pre, "sig", 7, "NO GMGN SIGNAL")
+                        continue
 
                     market = get_market_data(mint)
                     # Fallback: price from bonding curve when DexScreener hasn't indexed yet
@@ -1915,7 +1925,8 @@ def scanner_loop():
                     market = get_market_data(mint)
                     if not market:
                         continue
-                    if market["change1h"] >= SPIKE_MIN_1H and market["liq"] >= MIN_LIQ and market["price"] > 0:
+                    if (market["change1h"] >= SPIKE_MIN_1H and market["liq"] >= MIN_LIQ
+                            and market["price"] > 0 and market.get("vol_m5", 0) >= 500):
                         rug = run_rugcheck(mint)
                         if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
                             log("warn", "Mint/freeze auth — skip", symbol)
@@ -1981,9 +1992,12 @@ def scanner_loop():
                 if not dev_ok:
                     log("warn", f"SKIP: {dev_reason}", gc["symbol"])
                     continue
+                sig_score = gmgn_signal_score(gmint)
+                if sig_score < 1:
+                    log("info", f"MIGRATION SKIP: sig={sig_score} (no GMGN backing)", gc["symbol"])
+                    continue
                 with _copy_lock:
                     _copied_mints[gmint] = time.time()
-                sig_score = gmgn_signal_score(gmint)
                 amt = trade_size()
                 log("ok", f"MIGRATION | {gc['grad_age']}s ago | liq=${market['liq']:.0f} | sig={sig_score}", gc["symbol"])
                 notify(f"🚀 MIGRATION {gc['symbol']}",
