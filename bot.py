@@ -112,6 +112,11 @@ SLIP_WAIT_SECS = int(os.environ.get("SLIP_WAIT_SECS",  "6"))
 TSL_ACTIVATE_PCT = float(os.environ.get("TSL_ACTIVATE_PCT", "15"))  # lock-in starts at +15%
 SHARP_DROP_PCT = float(os.environ.get("SHARP_DROP_PCT", "4"))
 
+# Partial take-profit — scale out to lock gains without killing the run
+# TP1: +15% → sell 50%;  TP2: +40% → sell 60% of what's left (~30% of original)
+PARTIAL_TP1_PCT  = float(os.environ.get("PARTIAL_TP1_PCT",  "15"))
+PARTIAL_TP2_PCT  = float(os.environ.get("PARTIAL_TP2_PCT",  "40"))
+
 # Bundle mode: "avoid" or "ride"
 BUNDLE_MODE    = os.environ.get("BUNDLE_MODE", "avoid").lower()
 BUNDLE_RIDE_TP = float(os.environ.get("BUNDLE_RIDE_TP", "88"))
@@ -1217,6 +1222,36 @@ def execute_sell(tokens, mint, symbol, pump_swap=False, raydium=False):
         log("err", f"Sell error: {e}", symbol)
         return None
 
+# ── PARTIAL EXIT ────────────────────────────────────────────────
+def _partial_exit(mint, price, fraction, label):
+    """Sell `fraction` of remaining tokens; updates trade in-place, adds proceeds to capital."""
+    global capital
+    with trades_lock:
+        if mint not in open_trades:
+            return
+        trade = open_trades[mint]
+        tokens_to_sell = trade["tokens"] * fraction
+        if tokens_to_sell <= 0:
+            return
+        entry     = trade["entry"]
+        proceeds  = tokens_to_sell * price
+        trade["tokens"]            -= tokens_to_sell
+        trade["partial_proceeds"]  += proceeds
+        trade["partial_tp_done"]   += 1
+        symbol    = trade["symbol"]
+        pump_swap = trade.get("pump_swap", False)
+        raydium   = trade.get("raydium", False)
+
+    with capital_lock:
+        capital += proceeds
+
+    move_pct = ((price - entry) / max(entry, 1e-12)) * 100
+    pct_sold = int(fraction * 100)
+    log("ok", f"[{label}] Sold {pct_sold}% at +{move_pct:.1f}% → ${proceeds:.4f} locked (cap=${capital:.2f})", symbol)
+    notify(f"📤 {label} {symbol}", f"Sold {pct_sold}% at +{move_pct:.1f}%\nProceeds: +${proceeds:.4f}\nCapital: ${capital:.2f}")
+    execute_sell(tokens_to_sell, mint, symbol, pump_swap=pump_swap, raydium=raydium)
+
+
 # ── ENTER / EXIT ─────────────────────────────────────────────────
 def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, replies=0, pump_swap=False, raydium=False):
     global capital, _daily_trades
@@ -1263,6 +1298,8 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
             "replies":           replies,
             "pump_swap":         pump_swap,
             "raydium":           raydium,
+            "partial_tp_done":   0,
+            "partial_proceeds":  0.0,
         }
 
     log("ok", f"ENTER [{strategy.upper()}] ${amount:.2f} | bond={bond_entry:.1f}%", symbol)
@@ -1278,13 +1315,20 @@ def exit_trade(mint, price, reason, bond=0):
             return
         trade = open_trades.pop(mint)
 
-    amount = trade["amount"]
-    pnl    = ((price - trade["entry"]) / trade["entry"]) * amount if trade["entry"] > 0 else 0
-    pnl    = max(-amount, min(pnl, amount * 5))
+    amount           = trade["amount"]
+    partial_proceeds = trade.get("partial_proceeds", 0.0)
+    remaining_tokens = trade["tokens"]   # already reduced by any _partial_exit calls
     hold_m = (time.time() - trade["opened_at"]) / 60
 
+    # Value of the remaining tokens at exit price
+    final_value = remaining_tokens * price if price > 0 else 0
+
+    # Total PnL across the whole position (partials already returned to capital)
+    pnl = (partial_proceeds + final_value) - amount
+    pnl = max(-amount, min(pnl, amount * 5))
+
     with capital_lock:
-        capital += amount + pnl
+        capital += final_value   # partial_proceeds were already added during _partial_exit
 
     sign = "+" if pnl >= 0 else ""
     log("ok" if pnl >= 0 else "err",
@@ -1299,7 +1343,7 @@ def exit_trade(mint, price, reason, bond=0):
         _sold_mints[mint] = time.time()  # 30 min cooldown before re-buying
     record_daily_trade(won=(pnl > 0))
 
-    pnl_pct = round((price - trade["entry"]) / max(trade["entry"], 1e-12) * 100, 2)
+    pnl_pct = round(pnl / max(amount, 1e-12) * 100, 2)
     rec = {
         "id":         len(completed_trades) + 1,
         "symbol":     trade["symbol"],
@@ -1432,6 +1476,25 @@ def monitor_loop():
                         open_trades[mint]["grad_opened_at"] = time.time()
                 strategy = "migrate"
                 log("ok", f"GRADUATED → riding on Raydium (bond={bond:.1f}%)", symbol)
+
+            # ── Partial take-profit (all strategies) ──────────────────────────
+            move_pct     = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
+            partial_done = trade.get("partial_tp_done", 0)
+
+            if partial_done == 0 and move_pct >= PARTIAL_TP1_PCT:
+                _partial_exit(mint, price, 0.50, "PARTIAL_TP1")
+                with trades_lock:
+                    if mint not in open_trades:
+                        continue
+                    trade        = dict(open_trades[mint])
+                partial_done = 1
+
+            if partial_done == 1 and move_pct >= PARTIAL_TP2_PCT:
+                _partial_exit(mint, price, 0.60, "PARTIAL_TP2")
+                with trades_lock:
+                    if mint not in open_trades:
+                        continue
+                    trade = dict(open_trades[mint])
 
             # Bond Runner exits
             if strategy == "bond":
