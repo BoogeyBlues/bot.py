@@ -931,18 +931,65 @@ def get_market_data(mint):
         vol  = pair.get("volume", {})
         txns = pair.get("txns",   {}).get("m5", {})
         return {
-            "price":    float(pair.get("priceUsd", 0) or 0),
-            "liq":      float(pair.get("liquidity", {}).get("usd", 0) or 0),
-            "change1h": float(pair.get("priceChange", {}).get("h1", 0) or 0),
-            "change5m": float(pair.get("priceChange", {}).get("m5", 0) or 0),
-            "vol_m5":   float(vol.get("m5", 0) or 0),
-            "vol_h1":   float(vol.get("h1", 0) or 0),
-            "buys_m5":  int(txns.get("buys", 0) or 0),
-            "sells_m5": int(txns.get("sells", 0) or 0),
-            "age_h":    (time.time() - float(pair.get("pairCreatedAt", time.time() * 1000)) / 1000) / 3600,
+            "price":        float(pair.get("priceUsd", 0) or 0),
+            "liq":          float(pair.get("liquidity", {}).get("usd", 0) or 0),
+            "change1h":     float(pair.get("priceChange", {}).get("h1", 0) or 0),
+            "change5m":     float(pair.get("priceChange", {}).get("m5", 0) or 0),
+            "vol_m5":       float(vol.get("m5", 0) or 0),
+            "vol_h1":       float(vol.get("h1", 0) or 0),
+            "buys_m5":      int(txns.get("buys", 0) or 0),
+            "sells_m5":     int(txns.get("sells", 0) or 0),
+            "pair_address": pair.get("pairAddress", ""),
+            "age_h":        (time.time() - float(pair.get("pairCreatedAt", time.time() * 1000)) / 1000) / 3600,
         }
     except Exception:
         return None
+
+def get_1m_candles(pair_address, count=6):
+    """Fetch the last `count` 1-minute candles from DexScreener for a pair."""
+    if not pair_address:
+        return []
+    try:
+        now     = int(time.time())
+        from_ms = (now - count * 90) * 1000   # a bit more than count minutes of buffer
+        to_ms   = now * 1000
+        res = _session.get(
+            f"https://api.dexscreener.com/latest/dex/candles/solana/{pair_address}",
+            params={"from": from_ms, "to": to_ms, "resolution": 1},
+            timeout=8
+        )
+        if res.status_code != 200:
+            return []
+        raw = res.json()
+        candles = raw.get("candles", raw) if isinstance(raw, dict) else raw
+        return candles[-count:] if isinstance(candles, list) else []
+    except Exception:
+        return []
+
+def is_1m_trending_up(pair_address) -> bool:
+    """
+    Returns True if 1-min chart shows clear upward momentum:
+      - Most recent closed candle is green (close >= open)
+      - Price now is >= price 3 candles ago (not making lower lows)
+      - Fails open when data is unavailable — don't block on API downtime
+    """
+    candles = get_1m_candles(pair_address, count=6)
+    if not candles or len(candles) < 3:
+        return True   # no data → don't block entry
+    try:
+        last   = candles[-1]
+        c3_ago = candles[-3]
+        close      = float(last.get("close",   0) or 0)
+        open_      = float(last.get("open",    0) or 0)
+        close_3ago = float(c3_ago.get("close", 0) or 0)
+        if close <= 0 or open_ <= 0 or close_3ago <= 0:
+            return True
+        green_candle = close >= open_            # last candle closed up
+        not_lower    = close >= close_3ago * 0.98  # within 2% of where we were 3 min ago
+        return green_candle and not_lower
+    except Exception:
+        return True
+
 
 def get_sol_price():
     try:
@@ -1741,10 +1788,13 @@ def copy_trade_loop():
                         market = get_market_data(mint)
                         if not market or market["price"] <= 0 or market["liq"] < MIN_LIQ:
                             continue
+                        if not is_1m_trending_up(market.get("pair_address", "")):
+                            log("info", f"COPY SKIP: 1m not trending up", symbol)
+                            continue
                         with _copy_lock:
                             _copied_mints[mint] = time.time()
                         amt = trade_size()
-                        log("ok", f"COPY {addr[:8]}... WR:{w['winrate']}% | ${amt:.2f} | sig={sig_score}", symbol)
+                        log("ok", f"COPY {addr[:8]}... WR:{w['winrate']}% 5m={market.get('change5m',0):+.1f}% | ${amt:.2f} | sig={sig_score}", symbol)
                         notify(f"📋 COPY {symbol}",
                                f"Wallet: {addr[:8]}...\nWin rate: {w['winrate']}%\nAmount: ${amt:.2f}")
                         enter_trade(mint, symbol, market["price"], amt, "copy", 0, 0)
@@ -1911,14 +1961,19 @@ def scanner_loop():
                         _sp   = get_sol_price()
                         if _vsol > 0 and _vtok > 0 and _sp:
                             bc_price = (_vsol / _vtok) * _sp
-                            market = {"price": bc_price, "liq": 0, "change1h": 0, "age_h": 0}
+                            market = {"price": bc_price, "liq": 0, "change1h": 0, "age_h": 0, "change5m": 0}
                             log("info", f"BOND: using bonding curve price ${bc_price:.8f}", symbol)
                         else:
                             continue
                     # Skip liquidity check for bond runner — bonding curve IS the liquidity
 
+                    # 5-min direction: if DexScreener has real data, price must be going up
+                    if market.get("change5m", 0) < 0 and market.get("pair_address", ""):
+                        _log_scan(symbol, mint, bond, _sig_pre, "mom", 8, f"5M DOWN {market['change5m']:.1f}%")
+                        continue
+
                     amt = trade_size()
-                    log("ok", f"BOND RUNNER | bond={bond:.1f}% | sig={sig_score}", symbol)
+                    log("ok", f"BOND RUNNER | bond={bond:.1f}% 5m={market.get('change5m',0):+.1f}% | sig={sig_score}", symbol)
                     enter_trade(mint, symbol, market["price"], amt, "bond", bond, 0, pump_swap=coin.get("pump_swap", False))
                     time.sleep(0.5)
                     continue
@@ -1993,8 +2048,11 @@ def scanner_loop():
                         if sig_score < 1:
                             log("info", f"SPIKE SKIP: sig={sig_score} (no GMGN backing)", symbol)
                             continue
+                        if not is_1m_trending_up(market.get("pair_address", "")):
+                            log("info", f"SPIKE SKIP: 1m chart not trending up", symbol)
+                            continue
                         amt = trade_size()
-                        log("ok", f"DORMANT SPIKE | age={age_h:.1f}h 1h={market['change1h']:+.0f}% vol5m=${market.get('vol_m5',0):.0f} | sig={sig_score}", symbol)
+                        log("ok", f"DORMANT SPIKE | age={age_h:.1f}h 1h={market['change1h']:+.0f}% 5m={market.get('change5m',0):+.1f}% | sig={sig_score}", symbol)
                         enter_trade(mint, symbol, market["price"], amt, "spike", bond, 0, pump_swap=coin.get("pump_swap", False))
                         time.sleep(0.5)
 
@@ -2041,10 +2099,13 @@ def scanner_loop():
                 if sig_score < 1:
                     log("info", f"MIGRATION SKIP: sig={sig_score} (no GMGN backing)", gc["symbol"])
                     continue
+                if not is_1m_trending_up(market.get("pair_address", "")):
+                    log("info", f"MIGRATION SKIP: 1m not trending up", gc["symbol"])
+                    continue
                 with _copy_lock:
                     _copied_mints[gmint] = time.time()
                 amt = trade_size()
-                log("ok", f"MIGRATION | {gc['grad_age']}s ago | liq=${market['liq']:.0f} | sig={sig_score}", gc["symbol"])
+                log("ok", f"MIGRATION | {gc['grad_age']}s ago | liq=${market['liq']:.0f} 5m={market.get('change5m',0):+.1f}% | sig={sig_score}", gc["symbol"])
                 notify(f"🚀 MIGRATION {gc['symbol']}",
                        f"Just graduated to Raydium!\nAge: {gc['grad_age']}s\nLiq: ${market['liq']:.0f}\nAmount: ${amt:.2f}")
                 enter_trade(gmint, gc["symbol"], market["price"], amt, "migrate", 0, 0, raydium=True)
@@ -2081,12 +2142,15 @@ def scanner_loop():
                     continue
                 if gmgn_smart_money_selling(sig_mint):
                     continue
+                if not is_1m_trending_up(market.get("pair_address", "")):
+                    log("info", f"SIGNAL SKIP: 1m not trending up", sig_mint[:8])
+                    continue
                 with _copy_lock:
                     _copied_mints[sig_mint] = time.time()
                 sig_score = gmgn_signal_score(sig_mint)
                 sig_sym   = sig_mint[:8]
                 amt       = trade_size()
-                log("ok", f"GMGN SIGNAL | liq=${market['liq']:.0f} | sig={sig_score}", sig_sym)
+                log("ok", f"GMGN SIGNAL | liq=${market['liq']:.0f} 5m={market.get('change5m',0):+.1f}% | sig={sig_score}", sig_sym)
                 notify(f"📡 SIGNAL {sig_sym}", f"GMGN signal entry\nLiq: ${market['liq']:.0f}\nSig score: {sig_score}\nAmount: ${amt:.2f}")
                 enter_trade(sig_mint, sig_sym, market["price"], amt, "copy", 0, 0)
                 n_signal_entered += 1
