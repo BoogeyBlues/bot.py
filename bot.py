@@ -4681,6 +4681,441 @@ def export_all():
     return Response(buf.getvalue(), mimetype="text/csv",
                     headers={"Content-Disposition": f"attachment; filename={filename}"})
 
+# ── PROFIT PROJECTOR / CHART ─────────────────────────────────────
+
+@app.route("/chart/api", methods=["GET"])
+def chart_api():
+    mint = request.args.get("mint", "").strip()
+    resolution = int(request.args.get("resolution", "5"))  # minutes
+    if not mint:
+        return jsonify({"error": "mint required"}), 400
+    try:
+        # Get pair address + market snapshot
+        market = get_market_data(mint)
+        pair_address = (market or {}).get("pair_address", "")
+
+        # Try bonding curve details for pre-grad coins
+        bond_info = get_bonding_details(mint)
+
+        # Fetch candles
+        candles = []
+        if pair_address:
+            now     = int(time.time())
+            from_ms = (now - 300 * resolution * 60) * 1000  # last 300 candles
+            to_ms   = now * 1000
+            try:
+                r = _session.get(
+                    f"https://api.dexscreener.com/latest/dex/candles/solana/{pair_address}",
+                    params={"from": from_ms, "to": to_ms, "resolution": resolution},
+                    timeout=10
+                )
+                if r.status_code == 200:
+                    raw = r.json()
+                    raw_candles = raw.get("candles", raw) if isinstance(raw, dict) else raw
+                    for c in (raw_candles or []):
+                        ts = c.get("time") or c.get("timestamp") or c.get("t") or 0
+                        if ts > 1e12:
+                            ts = int(ts / 1000)
+                        candles.append({
+                            "time":   int(ts),
+                            "open":   float(c.get("open",  c.get("o", 0)) or 0),
+                            "high":   float(c.get("high",  c.get("h", 0)) or 0),
+                            "low":    float(c.get("low",   c.get("l", 0)) or 0),
+                            "close":  float(c.get("close", c.get("c", 0)) or 0),
+                            "volume": float(c.get("volume",c.get("v", 0)) or 0),
+                        })
+                    candles = [c for c in candles if c["close"] > 0]
+                    candles.sort(key=lambda c: c["time"])
+            except Exception as e:
+                log("warn", f"Chart candles: {e}", "CHART")
+
+        sig_score  = gmgn_signal_score(mint)
+        sm_selling = gmgn_smart_money_selling(mint)
+
+        with trades_lock:
+            open_trade = dict(open_trades.get(mint, {}))
+
+        return jsonify({
+            "mint":         mint,
+            "market":       market,
+            "bond":         bond_info,
+            "candles":      candles,
+            "sig_score":    sig_score,
+            "sm_selling":   sm_selling,
+            "open_trade":   open_trade,
+            "tp1_pct":      PARTIAL_TP1_PCT,
+            "tp2_pct":      PARTIAL_TP2_PCT,
+            "full_tp_pct":  MIGRATE_TP_PCT,
+            "sl_pct":       BOND_SL_PCT,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/chart", methods=["GET"])
+def chart_page():
+    mint = request.args.get("mint", "")
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Profit Projector · Boogey Sniper</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:#050a14;color:#e0e8ff;font-family:'Inter',sans-serif;min-height:100vh}}
+.nav{{position:fixed;top:0;left:0;right:0;height:52px;background:rgba(5,10,20,.95);
+  border-bottom:1px solid rgba(0,229,255,.15);display:flex;align-items:center;
+  padding:0 16px;gap:12px;z-index:100}}
+.nav a{{color:#00e5ff;text-decoration:none;font-size:.8rem;font-weight:600}}
+.nav-title{{color:#fff;font-family:'Bebas Neue',sans-serif;font-size:1.2rem;letter-spacing:.05em}}
+.wrap{{padding-top:60px;max-width:1100px;margin:0 auto;padding-left:12px;padding-right:12px}}
+h1{{font-family:'Bebas Neue',sans-serif;font-size:1.8rem;color:#00e5ff;letter-spacing:.05em;
+    padding:16px 0 12px}}
+.search-row{{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}}
+.search-row input{{flex:1;min-width:220px;background:#0d1829;border:1px solid rgba(0,229,255,.3);
+  border-radius:8px;padding:10px 14px;color:#fff;font-family:'JetBrains Mono',monospace;
+  font-size:.8rem;outline:none}}
+.search-row input:focus{{border-color:#00e5ff}}
+.search-row select{{background:#0d1829;border:1px solid rgba(0,229,255,.3);border-radius:8px;
+  padding:10px 12px;color:#00e5ff;font-size:.8rem;outline:none;cursor:pointer}}
+.btn-cyan{{background:linear-gradient(135deg,#00b4cc,#00e5ff);color:#050a14;border:none;
+  border-radius:8px;padding:10px 20px;font-weight:700;font-size:.85rem;cursor:pointer}}
+.btn-cyan:hover{{opacity:.85}}
+.signal-bar{{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;min-height:24px}}
+.badge{{padding:3px 10px;border-radius:20px;font-size:.7rem;font-weight:700;letter-spacing:.04em}}
+.badge-green{{background:rgba(0,255,136,.15);color:#00ff88;border:1px solid rgba(0,255,136,.3)}}
+.badge-red{{background:rgba(255,51,85,.15);color:#ff3355;border:1px solid rgba(255,51,85,.3)}}
+.badge-cyan{{background:rgba(0,229,255,.15);color:#00e5ff;border:1px solid rgba(0,229,255,.3)}}
+.badge-yellow{{background:rgba(255,238,0,.15);color:#ffee00;border:1px solid rgba(255,238,0,.3)}}
+.badge-gray{{background:rgba(255,255,255,.08);color:#888;border:1px solid rgba(255,255,255,.1)}}
+.chart-wrap{{background:#0a1525;border:1px solid rgba(0,229,255,.12);border-radius:12px;
+  overflow:hidden;margin-bottom:12px}}
+#chart{{width:100%;height:360px}}
+#rsi-chart{{width:100%;height:100px;border-top:1px solid rgba(0,229,255,.08)}}
+.panels{{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px}}
+@media(max-width:600px){{.panels{{grid-template-columns:1fr}}}}
+.panel{{background:#0a1525;border:1px solid rgba(0,229,255,.12);border-radius:12px;padding:16px}}
+.panel h3{{font-family:'Bebas Neue',sans-serif;font-size:1rem;color:#00e5ff;
+  letter-spacing:.05em;margin-bottom:12px}}
+.proj-row{{display:flex;justify-content:space-between;align-items:center;
+  padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05)}}
+.proj-row:last-child{{border-bottom:none}}
+.proj-label{{font-size:.75rem;color:#8899bb}}
+.proj-val{{font-size:.85rem;font-weight:700}}
+.proj-val.green{{color:#00ff88}}
+.proj-val.red{{color:#ff3355}}
+.proj-val.yellow{{color:#ffee00}}
+.proj-val.cyan{{color:#00e5ff}}
+.amt-row{{display:flex;gap:8px;margin-bottom:12px;align-items:center}}
+.amt-row label{{font-size:.75rem;color:#8899bb;white-space:nowrap}}
+.amt-row input{{flex:1;background:#050a14;border:1px solid rgba(0,229,255,.2);
+  border-radius:6px;padding:6px 10px;color:#fff;font-size:.85rem;outline:none;
+  font-family:'JetBrains Mono',monospace}}
+.stat-grid{{display:grid;grid-template-columns:1fr 1fr;gap:8px}}
+.stat-box{{background:#050a14;border-radius:8px;padding:10px;text-align:center}}
+.stat-box .val{{font-family:'JetBrains Mono',monospace;font-size:.9rem;font-weight:700;color:#00e5ff}}
+.stat-box .lbl{{font-size:.65rem;color:#556;margin-top:2px}}
+#no-data{{display:none;text-align:center;padding:60px 20px;color:#556;font-size:.9rem}}
+.open-trade-banner{{background:rgba(0,255,136,.08);border:1px solid rgba(0,255,136,.25);
+  border-radius:10px;padding:12px 16px;margin-bottom:12px;display:none}}
+.open-trade-banner .ot-title{{color:#00ff88;font-weight:700;font-size:.85rem;margin-bottom:4px}}
+.open-trade-banner .ot-row{{display:flex;gap:16px;flex-wrap:wrap;font-size:.75rem;color:#8899bb}}
+.open-trade-banner .ot-row span{{color:#e0e8ff}}
+</style>
+</head>
+<body>
+<nav class="nav">
+  <a href="/">← Home</a>
+  <div class="nav-title">Profit Projector</div>
+</nav>
+
+<div class="wrap">
+  <h1>📈 Profit Projector</h1>
+
+  <div class="search-row">
+    <input id="mint-input" placeholder="Paste token mint address…" value="{mint}" autocomplete="off" spellcheck="false">
+    <select id="res-select">
+      <option value="1">1m</option>
+      <option value="5" selected>5m</option>
+      <option value="15">15m</option>
+      <option value="60">1h</option>
+    </select>
+    <button class="btn-cyan" onclick="loadChart()">Load Chart</button>
+  </div>
+
+  <div class="signal-bar" id="signal-bar"></div>
+  <div class="open-trade-banner" id="ot-banner">
+    <div class="ot-title">🟢 Bot has an open position on this coin</div>
+    <div class="ot-row" id="ot-details"></div>
+  </div>
+
+  <div class="chart-wrap">
+    <div id="chart"></div>
+    <div id="rsi-chart"></div>
+    <div id="no-data">No chart data — coin may not be listed on Raydium yet.</div>
+  </div>
+
+  <div class="panels">
+    <div class="panel">
+      <h3>💰 Profit Projector</h3>
+      <div class="amt-row">
+        <label>Investment $</label>
+        <input id="inv-input" type="number" value="10" min="1" max="10000" oninput="updateProjection()">
+      </div>
+      <div id="proj-rows"></div>
+    </div>
+    <div class="panel">
+      <h3>📊 Market Snapshot</h3>
+      <div class="stat-grid" id="stat-grid"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+let mainChart, candleSeries, ema9Series, ema21Series, vol9Series;
+let rsiChart, rsiSeries, rsiOb, rsiOs;
+let lastData = null;
+
+function initCharts() {{
+  const chartOpts = {{
+    layout: {{ background: {{ color: '#0a1525' }}, textColor: '#8899bb' }},
+    grid: {{ vertLines: {{ color: 'rgba(0,229,255,.06)' }}, horzLines: {{ color: 'rgba(0,229,255,.06)' }} }},
+    crosshair: {{ mode: 1 }},
+    rightPriceScale: {{ borderColor: 'rgba(0,229,255,.15)' }},
+    timeScale: {{ borderColor: 'rgba(0,229,255,.15)', timeVisible: true, secondsVisible: false }},
+    handleScroll: true, handleScale: true,
+  }};
+
+  mainChart = LightweightCharts.createChart(document.getElementById('chart'), {{ ...chartOpts, height: 360 }});
+  candleSeries = mainChart.addCandlestickSeries({{
+    upColor: '#00ff88', downColor: '#ff3355',
+    borderUpColor: '#00ff88', borderDownColor: '#ff3355',
+    wickUpColor: '#00ff88', wickDownColor: '#ff3355',
+  }});
+  ema9Series  = mainChart.addLineSeries({{ color: '#ffee00', lineWidth: 1, priceLineVisible: false, lastValueVisible: false }});
+  ema21Series = mainChart.addLineSeries({{ color: '#aa77ff', lineWidth: 1, priceLineVisible: false, lastValueVisible: false }});
+  vol9Series  = mainChart.addHistogramSeries({{
+    color: '#26a69a', priceFormat: {{ type: 'volume' }},
+    priceScaleId: 'vol', scaleMargins: {{ top: 0.85, bottom: 0 }},
+  }});
+
+  rsiChart = LightweightCharts.createChart(document.getElementById('rsi-chart'), {{
+    ...chartOpts, height: 100,
+    rightPriceScale: {{ borderColor: 'rgba(0,229,255,.15)', scaleMargins: {{ top: 0.1, bottom: 0.1 }} }},
+  }});
+  rsiSeries = rsiChart.addLineSeries({{ color: '#00e5ff', lineWidth: 1, priceLineVisible: false, lastValueVisible: true }});
+  rsiOb = rsiChart.addLineSeries({{ color: 'rgba(255,51,85,.4)', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }});
+  rsiOs = rsiChart.addLineSeries({{ color: 'rgba(0,255,136,.4)', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false }});
+
+  mainChart.timeScale().subscribeVisibleLogicalRangeChange(range => {{
+    if (range) rsiChart.timeScale().setVisibleLogicalRange(range);
+  }});
+  rsiChart.timeScale().subscribeVisibleLogicalRangeChange(range => {{
+    if (range) mainChart.timeScale().setVisibleLogicalRange(range);
+  }});
+}}
+
+function calcEMA(candles, period) {{
+  const k = 2 / (period + 1);
+  const out = [];
+  let ema = 0, started = false;
+  for (let i = 0; i < candles.length; i++) {{
+    if (i < period - 1) continue;
+    if (!started) {{ ema = candles.slice(0, period).reduce((s,c)=>s+c.close,0)/period; started=true; }}
+    else {{ ema = candles[i].close * k + ema * (1-k); }}
+    out.push({{ time: candles[i].time, value: ema }});
+  }}
+  return out;
+}}
+
+function calcRSI(candles, period=14) {{
+  if (candles.length < period+1) return [];
+  let avgG=0, avgL=0;
+  for (let i=1; i<=period; i++) {{
+    const d = candles[i].close - candles[i-1].close;
+    avgG += Math.max(d,0); avgL += Math.max(-d,0);
+  }}
+  avgG /= period; avgL /= period;
+  const out = [];
+  for (let i=period; i<candles.length; i++) {{
+    if (i>period) {{
+      const d = candles[i].close - candles[i-1].close;
+      avgG = (avgG*(period-1)+Math.max(d,0))/period;
+      avgL = (avgL*(period-1)+Math.max(-d,0))/period;
+    }}
+    const rs = avgL===0 ? 100 : avgG/avgL;
+    out.push({{ time: candles[i].time, value: 100-100/(1+rs) }});
+  }}
+  return out;
+}}
+
+function detectEntries(candles, ema9, ema21) {{
+  const markers = [];
+  const ema9map = {{}}, ema21map = {{}};
+  ema9.forEach(e=>ema9map[e.time]=e.value);
+  ema21.forEach(e=>ema21map[e.time]=e.value);
+  for (let i=1; i<candles.length; i++) {{
+    const t = candles[i].time, tp = candles[i-1].time;
+    const e9=ema9map[t], e21=ema21map[t], e9p=ema9map[tp], e21p=ema21map[tp];
+    if (e9&&e21&&e9p&&e21p && e9p<e21p && e9>=e21) {{
+      markers.push({{ time:t, position:'belowBar', color:'#00ff88', shape:'arrowUp', text:'BUY' }});
+    }}
+  }}
+  return markers;
+}}
+
+function updateProjection() {{
+  if (!lastData) return;
+  const inv = parseFloat(document.getElementById('inv-input').value) || 10;
+  const tp1  = lastData.tp1_pct  || 50;
+  const tp2  = lastData.tp2_pct  || 100;
+  const full = lastData.full_tp_pct || 400;
+  const sl   = lastData.sl_pct   || 8;
+
+  // partial exit logic: sell 40% at TP1, 40% of remaining at TP2, rest at full TP
+  const tok   = inv;  // normalise tokens to $inv
+  const p1val = tok * 0.40 * (1 + tp1/100);
+  const rem1  = tok * 0.60;
+  const p2val = rem1 * 0.40 * (1 + tp2/100);
+  const rem2  = rem1 * 0.60;
+  const pfull = rem2 * (1 + full/100);
+  const slVal = -inv * (sl/100);
+
+  const rows = [
+    {{ label: `TP1 +${{tp1}}% (sell 40%)`,    val: `+$${{(p1val-tok*0.40).toFixed(2)}}`, cls:'green' }},
+    {{ label: `TP2 +${{tp2}}% (sell 40% more)`, val: `+$${{(p2val-rem1*0.40).toFixed(2)}}`, cls:'yellow' }},
+    {{ label: `Full exit +${{full}}%`,           val: `+$${{(pfull-rem2).toFixed(2)}}`, cls:'cyan' }},
+    {{ label: `Total if all TPs hit`,            val: `+$${{(p1val+p2val+pfull-inv).toFixed(2)}}`, cls:'green' }},
+    {{ label: `Stop loss -${{sl}}%`,             val: `$${{slVal.toFixed(2)}}`, cls:'red' }},
+    {{ label: `Risk : Reward`,                   val: `1 : ${{((p1val+p2val+pfull-inv)/Math.abs(slVal)).toFixed(1)}}`, cls:'cyan' }},
+  ];
+  document.getElementById('proj-rows').innerHTML = rows.map(r=>
+    `<div class="proj-row"><span class="proj-label">${{r.label}}</span><span class="proj-val ${{r.cls}}">${{r.val}}</span></div>`
+  ).join('');
+}}
+
+function renderSignals(d) {{
+  const bar = document.getElementById('signal-bar');
+  const badges = [];
+  if (d.market) {{
+    const m = d.market;
+    const c5 = m.change5m || 0;
+    const c1h = m.change1h || 0;
+    badges.push(`<span class="badge ${{c5>=0?'badge-green':'badge-red'}}">5m ${{c5>=0?'+':''}}${{c5.toFixed(1)}}%</span>`);
+    badges.push(`<span class="badge ${{c1h>=0?'badge-green':'badge-red'}}">1h ${{c1h>=0?'+':''}}${{c1h.toFixed(1)}}%</span>`);
+    badges.push(`<span class="badge badge-cyan">Liq $${{(m.liq||0).toLocaleString(undefined,{{maximumFractionDigits:0}})}}</span>`);
+    const ratio = (m.buys_m5||0) + (m.sells_m5||0);
+    if (ratio > 0) badges.push(`<span class="badge ${{m.buys_m5>m.sells_m5?'badge-green':'badge-red'}}">Buys ${{m.buys_m5}} / Sells ${{m.sells_m5}}</span>`);
+  }}
+  if (d.sig_score > 0) badges.push(`<span class="badge badge-yellow">⚡ GMGN sig=${{d.sig_score}}</span>`);
+  if (d.sm_selling) badges.push(`<span class="badge badge-red">⚠️ Smart $ Selling</span>`);
+  if (d.bond) badges.push(`<span class="badge badge-cyan">Bond ${{d.bond.bond_pct}}%</span>`);
+  bar.innerHTML = badges.join('');
+
+  // stat grid
+  const m = d.market || {{}};
+  const p = parseFloat(m.price) || 0;
+  document.getElementById('stat-grid').innerHTML = [
+    {{ v: p > 0 ? '$'+p.toFixed(8) : '—', l: 'Price' }},
+    {{ v: '$'+(m.liq||0).toLocaleString(undefined,{{maximumFractionDigits:0}}), l: 'Liquidity' }},
+    {{ v: (m.vol_m5||0).toLocaleString(undefined,{{maximumFractionDigits:0}})+' USD', l: '5m Volume' }},
+    {{ v: (m.vol_h1||0).toLocaleString(undefined,{{maximumFractionDigits:0}})+' USD', l: '1h Volume' }},
+    {{ v: (m.buys_m5||0)+' / '+(m.sells_m5||0), l: 'Buys / Sells (5m)' }},
+    {{ v: d.sig_score || '0', l: 'GMGN Score' }},
+  ].map(s=>`<div class="stat-box"><div class="val">${{s.v}}</div><div class="lbl">${{s.l}}</div></div>`).join('');
+
+  // open trade banner
+  const ot = d.open_trade;
+  const ban = document.getElementById('ot-banner');
+  if (ot && ot.entry) {{
+    ban.style.display = 'block';
+    const move = m.price ? ((parseFloat(m.price)-ot.entry)/ot.entry*100).toFixed(1) : '?';
+    document.getElementById('ot-details').innerHTML =
+      `<span>Entry: <span>$${{ot.entry?.toFixed(8)}}</span></span>
+       <span>Size: <span>$${{ot.amount?.toFixed(2)}}</span></span>
+       <span>Strategy: <span>${{(ot.strategy||'').toUpperCase()}}</span></span>
+       <span>P&L: <span style="color:${{parseFloat(move)>=0?'#00ff88':'#ff3355'}}">${{move}}%</span></span>`;
+  }} else {{ ban.style.display = 'none'; }}
+}}
+
+async function loadChart() {{
+  const mint = document.getElementById('mint-input').value.trim();
+  const res  = document.getElementById('res-select').value;
+  if (!mint) return;
+  if (window.location.search.indexOf('mint=') === -1) {{
+    history.replaceState(null,'','/chart?mint='+encodeURIComponent(mint));
+  }}
+
+  const r = await fetch(`/chart/api?mint=${{encodeURIComponent(mint)}}&resolution=${{res}}`);
+  const d = await r.json();
+  if (d.error) {{ alert(d.error); return; }}
+  lastData = d;
+
+  const candles = d.candles || [];
+  const noData  = document.getElementById('no-data');
+
+  if (!candles.length) {{
+    noData.style.display = 'block';
+    document.getElementById('chart').style.display = 'none';
+    document.getElementById('rsi-chart').style.display = 'none';
+  }} else {{
+    noData.style.display = 'none';
+    document.getElementById('chart').style.display = 'block';
+    document.getElementById('rsi-chart').style.display = 'block';
+
+    candleSeries.setData(candles);
+    ema9Series.setData(calcEMA(candles, 9));
+    ema21Series.setData(calcEMA(candles, 21));
+
+    const volData = candles.map(c=>({ time:c.time, value:c.volume, color:c.close>=c.open?'rgba(0,255,136,.4)':'rgba(255,51,85,.4)' }));
+    vol9Series.setData(volData);
+
+    const ema9  = calcEMA(candles, 9);
+    const ema21 = calcEMA(candles, 21);
+    const markers = detectEntries(candles, ema9, ema21);
+    candleSeries.setMarkers(markers);
+
+    const rsiData = calcRSI(candles);
+    rsiSeries.setData(rsiData);
+    if (rsiData.length) {{
+      const times = rsiData.map(r=>r.time);
+      rsiOb.setData(times.map(t=>({{time:t,value:70}})));
+      rsiOs.setData(times.map(t=>({{time:t,value:30}})));
+    }}
+
+    // TP / SL price lines on main chart
+    const lastPrice = candles[candles.length-1].close;
+    const tp1p = lastPrice*(1+d.tp1_pct/100);
+    const tp2p = lastPrice*(1+d.tp2_pct/100);
+    const slp  = lastPrice*(1-d.sl_pct/100);
+    candleSeries.createPriceLine({{price:tp1p,color:'#ffee00',lineWidth:1,lineStyle:2,axisLabelVisible:true,title:`TP1 +${{d.tp1_pct}}%`}});
+    candleSeries.createPriceLine({{price:tp2p,color:'#00e5ff',lineWidth:1,lineStyle:2,axisLabelVisible:true,title:`TP2 +${{d.tp2_pct}}%`}});
+    candleSeries.createPriceLine({{price:slp, color:'#ff3355',lineWidth:1,lineStyle:2,axisLabelVisible:true,title:`SL -${{d.sl_pct}}%`}});
+
+    mainChart.timeScale().fitContent();
+    rsiChart.timeScale().fitContent();
+  }}
+
+  renderSignals(d);
+  updateProjection();
+}}
+
+initCharts();
+window.addEventListener('resize', () => {{
+  if (mainChart) mainChart.applyOptions({{ width: document.getElementById('chart').clientWidth }});
+  if (rsiChart)  rsiChart.applyOptions({{ width: document.getElementById('rsi-chart').clientWidth }});
+}});
+
+// Auto-load if mint in URL
+const urlMint = new URLSearchParams(window.location.search).get('mint');
+if (urlMint) {{ document.getElementById('mint-input').value = urlMint; loadChart(); }}
+</script>
+</body>
+</html>"""
+
+
 if __name__ == "__main__":
     if not PAPER_MODE:
         if not WALLET or not WALLET_PRIVATE_KEY:
