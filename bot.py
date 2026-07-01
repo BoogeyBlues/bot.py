@@ -4144,9 +4144,9 @@ def learn():
         <div class="p-desc">Hours old</div>
       </div>
       <div class="param-card">
-        <div class="p-lbl">Min 1h Volume</div>
-        <div class="p-val" id="p-spike-vol">--</div>
-        <div class="p-desc">SOL in 1 hour</div>
+        <div class="p-lbl">Min 1h Change</div>
+        <div class="p-val" id="p-spike-vol">--%</div>
+        <div class="p-desc">Price change in 1h</div>
       </div>
       <div class="param-card highlight">
         <div class="p-lbl">Take Profit</div>
@@ -4199,8 +4199,8 @@ def learn():
         <span style="font-size:.75rem;font-weight:700">Spike Detector</span>
       </div>
       <div class="strat-card-body">
-        Targets tokens older than <strong id="desc-spike-age">--</strong>h with sudden 1h volume above
-        <strong id="desc-spike-vol">--</strong> SOL. Scalps the momentum burst. High TP, tighter timeout.
+        Targets tokens older than <strong id="desc-spike-age">--</strong>h with a 1h price surge above
+        <strong id="desc-spike-vol">--</strong>%. Scalps the momentum burst. High TP, tighter timeout.
       </div>
     </div>
 
