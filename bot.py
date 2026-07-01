@@ -192,8 +192,8 @@ _milestone_lock   = threading.Lock()
 usdc_locked       = 0.0
 usdc_lock         = threading.Lock()
 # Daily trading window — all hours in UTC
-TRADE_START_HOUR = int(os.environ.get("TRADE_START_HOUR", "14"))  # 9am ET = 14:00 UTC
-TRADE_END_HOUR   = int(os.environ.get("TRADE_END_HOUR",   "23"))  # 6pm ET = 23:00 UTC
+TRADE_START_HOUR = int(os.environ.get("TRADE_START_HOUR", "14"))  # 9am ET  = 14:00 UTC
+TRADE_END_HOUR   = int(os.environ.get("TRADE_END_HOUR",    "1"))  # 8pm ET  = 01:00 UTC next day
 
 # Daily tracking — resets at TRADE_START_HOUR
 _daily_date       = ""
@@ -428,9 +428,14 @@ def _reset_daily_if_needed():
 def daily_limit_reached():
     global _daily_cap_notified
     _reset_daily_if_needed()
-    # Trading-hours gate: only scan between TRADE_START_HOUR and TRADE_END_HOUR (UTC)
+    # Trading-hours gate: only scan between TRADE_START_HOUR and TRADE_END_HOUR (UTC).
+    # Handles windows that wrap past midnight (e.g. 14:00–01:00).
     utc_hour = time.gmtime().tm_hour
-    if not (TRADE_START_HOUR <= utc_hour < TRADE_END_HOUR):
+    if TRADE_START_HOUR <= TRADE_END_HOUR:
+        in_window = TRADE_START_HOUR <= utc_hour < TRADE_END_HOUR
+    else:  # wraps midnight
+        in_window = utc_hour >= TRADE_START_HOUR or utc_hour < TRADE_END_HOUR
+    if not in_window:
         next_open = time.strftime("%H:%M UTC", time.gmtime(
             time.time() + ((TRADE_START_HOUR - utc_hour) % 24) * 3600
         ))
