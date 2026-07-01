@@ -62,7 +62,7 @@ FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "10"))  # 0 = use t
 # Capital tiers per risk level: (min_capital, trade_pct, daily_max_trades)
 _RISK_TIERS = {
     "conservative": [(5_000,0.12,6),(500,0.10,6),(100,0.08,6),(0,0.05,6)],
-    "standard":     [(5_000,0.18,6),(500,0.15,6),(100,0.12,6),(0,0.08,6)],
+    "standard":     [(5_000,0.18,10),(500,0.15,10),(100,0.12,10),(0,0.08,10)],
     "aggressive":   [(5_000,0.22,6),(500,0.18,6),(100,0.15,6),(0,0.12,6)],
 }
 _CAP_TIERS = _RISK_TIERS.get(RISK_LEVEL, _RISK_TIERS["standard"])
@@ -76,10 +76,10 @@ ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # retune every
 
 # Bond Runner strategy
 BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "50"))
-BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "80"))
-BOND_TP         = float(os.environ.get("BOND_TP",        "67"))
-BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "10"))
-BOND_MAX_SECS   = int(os.environ.get("BOND_MAX_SECS",    "240"))   # 4 min hard cap
+BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "65"))
+BOND_TP         = float(os.environ.get("BOND_TP",        "85"))
+BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "8"))
+BOND_MAX_SECS   = int(os.environ.get("BOND_MAX_SECS",    "300"))   # 5 min hard cap
 BOND_STALE_SECS = int(os.environ.get("BOND_STALE_SECS",  "120"))   # exit if bond hasn't moved in 2 min
 
 # Dormant Spike strategy
