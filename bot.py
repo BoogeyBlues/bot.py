@@ -2419,6 +2419,7 @@ def home():
     <a href="/trades">📋 All Trades</a>
     <a href="/status">📊 Status</a>
     <a href="/learn">🧠 Strategy</a>
+    <a href="/chart">📈 Chart</a>
     <a href="/setup">⚙️ Setup</a>
     <a href="https://pump.fun" target="_blank">🚀 Pump.fun</a>
     <a href="https://solscan.io" target="_blank">🔍 Solscan</a>
@@ -2652,6 +2653,7 @@ def _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
     <a href="/trades">📋 TRADES</a>
     <a href="/status">📊 STATUS</a>
     <a href="/learn">🧠 STRAT</a>
+    <a href="/chart">📈 CHART</a>
     <a href="/setup">⚙️ SETUP</a>
     <a href="https://pump.fun" target="_blank">🚀 PUMP</a>
     <a href="https://solscan.io" target="_blank">🔍 SCAN</a>
@@ -3132,6 +3134,7 @@ def trades():
     <a href="/trades" class="active">TRADES</a>
     <a href="/status">STATUS</a>
     <a href="/learn">STRATEGY</a>
+    <a href="/chart">CHART</a>
     <a href="/setup">SETUP</a>
   </nav>
 
@@ -3482,6 +3485,7 @@ nav::-webkit-scrollbar{display:none}
   <a href="/trades" class="nav-tab">TRADES</a>
   <a href="/status" class="nav-tab">STATUS</a>
   <a href="/learn" class="nav-tab">STRATEGY</a>
+  <a href="/chart" class="nav-tab">CHART</a>
 </nav>
 <div class="page-hdr"><div class="page-title">LIVE FEED</div></div>
 <div class="status-strip">
@@ -4034,6 +4038,7 @@ def learn():
     <a href="/trades">TRADES</a>
     <a href="/status">STATUS</a>
     <a href="/learn" class="active">STRATEGY</a>
+    <a href="/chart">CHART</a>
     <a href="/setup">SETUP</a>
   </nav>
 
@@ -4381,6 +4386,7 @@ def setup():
     <a href="/trades">TRADES</a>
     <a href="/status">STATUS</a>
     <a href="/learn">STRATEGY</a>
+    <a href="/chart">CHART</a>
     <a href="/setup" class="active">SETUP</a>
   </nav>
 
