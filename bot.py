@@ -191,7 +191,11 @@ _milestones_hit   = set()
 _milestone_lock   = threading.Lock()
 usdc_locked       = 0.0
 usdc_lock         = threading.Lock()
-# Daily tracking — resets at midnight
+# Daily trading window — all hours in UTC
+TRADE_START_HOUR = int(os.environ.get("TRADE_START_HOUR", "14"))  # 9am ET = 14:00 UTC
+TRADE_END_HOUR   = int(os.environ.get("TRADE_END_HOUR",   "23"))  # 6pm ET = 23:00 UTC
+
+# Daily tracking — resets at TRADE_START_HOUR
 _daily_date       = ""
 _daily_trades     = 0
 _daily_wins       = 0
@@ -378,7 +382,16 @@ def _load_daily_state():
 def _reset_daily_if_needed():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses, _pause_until
     global _week_start_date, _week_day_logs, _day_start_cap
-    today = time.strftime("%Y-%m-%d")
+    # Rollover key = "YYYY-MM-DD@HH" where HH is TRADE_START_HOUR.
+    # This means the "trading day" starts at TRADE_START_HOUR (not midnight).
+    now = time.gmtime()
+    if now.tm_hour >= TRADE_START_HOUR:
+        day_key = time.strftime("%Y-%m-%d", now) + f"@{TRADE_START_HOUR:02d}"
+    else:
+        # Before today's start hour — still the previous trading day
+        prev = time.gmtime(time.time() - 86400)
+        day_key = time.strftime("%Y-%m-%d", prev) + f"@{TRADE_START_HOUR:02d}"
+    today = day_key   # reuse variable name so the block below works unchanged
     with _daily_lock:
         if _daily_date != today:
             if _daily_date:
@@ -415,6 +428,14 @@ def _reset_daily_if_needed():
 def daily_limit_reached():
     global _daily_cap_notified
     _reset_daily_if_needed()
+    # Trading-hours gate: only scan between TRADE_START_HOUR and TRADE_END_HOUR (UTC)
+    utc_hour = time.gmtime().tm_hour
+    if not (TRADE_START_HOUR <= utc_hour < TRADE_END_HOUR):
+        next_open = time.strftime("%H:%M UTC", time.gmtime(
+            time.time() + ((TRADE_START_HOUR - utc_hour) % 24) * 3600
+        ))
+        log("info", f"Outside trading window (UTC {TRADE_START_HOUR:02d}–{TRADE_END_HOUR:02d}) — resumes {next_open}")
+        return True
     with _daily_lock:
         if _pause_until > time.time():
             resume = time.strftime("%H:%M", time.localtime(_pause_until))
@@ -622,11 +643,13 @@ def _send_weekly_report():
         log("warn", f"Weekly report error: {e}", "WEEK")
 
 def daily_summary_loop():
-    """Sends midnight summary every day. Sends deep weekly report every 7 days."""
+    """Sends end-of-trading-day summary at TRADE_END_HOUR UTC. Weekly report every 7 days."""
     while True:
-        now = time.localtime()
-        secs_to_midnight = (23 - now.tm_hour) * 3600 + (59 - now.tm_min) * 60 + (60 - now.tm_sec)
-        time.sleep(secs_to_midnight + 5)
+        now = time.gmtime()
+        secs_to_end = ((TRADE_END_HOUR - now.tm_hour) % 24) * 3600 - now.tm_min * 60 - now.tm_sec
+        if secs_to_end <= 0:
+            secs_to_end += 86400
+        time.sleep(secs_to_end + 5)
         _send_daily_summary()
         # Weekly deep report every 7 days — then keeps running
         if len(_week_day_logs) % 7 == 6:
