@@ -1952,9 +1952,8 @@ def scanner_loop():
                         _log_scan(symbol, mint, bond, _sig_pre, "sm", 6, "SMART $ SELLING")
                         continue
                     sig_score = gmgn_signal_score(mint)
-                    if sig_score < 1:
-                        _log_scan(symbol, mint, bond, _sig_pre, "sig", 7, "NO GMGN SIGNAL")
-                        continue
+                    # Note: sig_score will be 0 for pre-graduation coins — GMGN only tracks Raydium tokens.
+                    # We still compute it for logging but don't gate on it here.
 
                     market = get_market_data(mint)
                     # Fallback: price from bonding curve when DexScreener hasn't indexed yet
@@ -1994,9 +1993,7 @@ def scanner_loop():
                         _log_scan(symbol, mint, bond, _sig_pre, "sm", 6, "SMART $ SELLING")
                         continue
                     sig_score = gmgn_signal_score(mint)
-                    if sig_score < 1:
-                        _log_scan(symbol, mint, bond, _sig_pre, "sig", 7, "NO GMGN SIGNAL")
-                        continue
+                    # sig_score will be 0 for most pre-graduation trench coins — GMGN tracks Raydium only
                     holder_ok, holder_reason = check_holder_concentration(mint)
                     if not holder_ok:
                         _log_scan(symbol, mint, bond, _sig_pre, "holder", 4, holder_reason[:18].upper())
