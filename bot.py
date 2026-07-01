@@ -75,12 +75,12 @@ LOSS_COOLDOWN_HRS = float(os.environ.get("LOSS_COOLDOWN_HRS", "0.083")) # 5-min 
 ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # retune every 5 trades for faster learning
 
 # Bond Runner strategy
-BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "58"))  # was 50 — 58%+ means real momentum
-BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "68"))
-BOND_TP         = float(os.environ.get("BOND_TP",        "85"))
+BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "42"))  # earlier entry = more upside to graduation
+BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "60"))
+BOND_TP         = float(os.environ.get("BOND_TP",        "93"))  # closer to graduation spike
 BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "8"))
-BOND_MAX_SECS   = int(os.environ.get("BOND_MAX_SECS",    "300"))   # 5 min hard cap
-BOND_STALE_SECS = int(os.environ.get("BOND_STALE_SECS",  "120"))   # exit if bond hasn't moved in 2 min
+BOND_MAX_SECS   = int(os.environ.get("BOND_MAX_SECS",    "600"))  # 10 min — early runners need time
+BOND_STALE_SECS = int(os.environ.get("BOND_STALE_SECS",  "180")) # 3 min — allow brief consolidations
 
 # Dormant Spike strategy
 SPIKE_MIN_AGE_H = float(os.environ.get("SPIKE_MIN_AGE_H", "12"))
@@ -1969,8 +1969,8 @@ def scanner_loop():
                             continue
                     # Skip liquidity check for bond runner — bonding curve IS the liquidity
 
-                    # 5-min direction: if DexScreener has real data, price must be going up
-                    if market.get("change5m", 0) < 0 and market.get("pair_address", ""):
+                    # 5-min direction: allow small consolidation dips (-3%) but reject hard dumps
+                    if market.get("change5m", 0) < -3 and market.get("pair_address", ""):
                         _log_scan(symbol, mint, bond, _sig_pre, "mom", 8, f"5M DOWN {market['change5m']:.1f}%")
                         continue
 
