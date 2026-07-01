@@ -352,13 +352,16 @@ def _load_daily_state():
             s = {}
     if s:
         try:
+            # Capital is always restored — it accumulates across days and must survive redeploys
+            saved_cap = s.get("capital", None)
+            if saved_cap is not None and float(saved_cap) > 0:
+                capital = float(saved_cap)
             if s.get("date") == today:
                 _daily_date   = s["date"]
                 _daily_trades = s.get("trades",      0)
                 _daily_wins   = s.get("wins",        0)
                 _daily_losses = s.get("losses",      0)
                 _pause_until  = s.get("pause_until", 0.0)
-                capital       = s.get("capital",     capital)
             _week_start_date = s.get("week_start", "")
             _week_day_logs   = s.get("week_logs",  [])
             paused_msg = f" | paused until {time.strftime('%H:%M', time.localtime(_pause_until))}" if _pause_until > time.time() else ""
@@ -4693,6 +4696,9 @@ if __name__ == "__main__":
         log("warn", "WALLET/WALLET_PRIVATE_KEY not set — PAPER mode")
 
     _load_daily_state()
+    if not REDIS_URL or not REDIS_TOKEN:
+        log("warn", "⚠️  No Redis configured — capital saved to /tmp only (wiped on redeploy). "
+            "Set UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN in Railway for safe persistence.")
 
     threading.Thread(target=_notify_worker,    daemon=True).start()
     threading.Thread(target=monitor_loop,      daemon=True).start()
