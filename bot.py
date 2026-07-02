@@ -2206,9 +2206,10 @@ def _home_inner():
     mode  = "PAPER" if PAPER_MODE else "LIVE"
     pct, limit = _cap_tier(cap)
     next_m = next((m for m in MILESTONES if m > cap), None)
+    next_m_str = f"{next_m:,}" if next_m else "MAX"
     progress_pct = min(round(cap / max(next_m, 1) * 100, 1), 100) if next_m else 100
 
-    cap_points = [{"day": d["date"][-5:], "cap": round(d["capital"], 2)} for d in _week_day_logs[-14:]]
+    cap_points = [{"day": d.get("date","")[-5:], "cap": round(d.get("capital", 0) or 0, 2)} for d in _week_day_logs[-14:]]
     cap_points.append({"day": "Today", "cap": round(cap, 2)})
     cap_json = json.dumps(cap_points)
 
@@ -2451,9 +2452,9 @@ def _home_inner():
   <div class="section">
     <div class="section-hdr">
       <h2>🏆 Milestone Progress</h2>
-      <span style="font-size:.72rem;color:var(--muted)">${cap:.2f} → ${next_m:,}</span>
+      <span style="font-size:.72rem;color:var(--muted)">${cap:.2f} → ${next_m_str}</span>
     </div>
-    <div class="prog-labels"><span>${cap:.2f}</span><span>${next_m:,}</span></div>
+    <div class="prog-labels"><span>${cap:.2f}</span><span>${next_m_str}</span></div>
     <div class="prog-track"><div class="prog-fill"></div></div>
     <div class="milestones">
       {''.join(f'<span class="ms{" hit" if cap >= m else ""}">${m:,}</span>' for m in MILESTONES)}
@@ -2536,6 +2537,7 @@ def _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
     pnl_color = "#39ff14" if pnl >= 0 else "#ff006e"
     wr_color  = "#39ff14" if wr >= 50 else ("#ffee00" if wr >= 35 else "#ff006e")
     mode_color= "#ffee00" if mode == "PAPER" else "#39ff14"
+    next_m_str = f"{next_m:,}" if next_m else "MAX"
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2678,7 +2680,7 @@ def _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
     </div>
     <div class="stat">
       <div class="lbl">Next Target</div>
-      <div class="val pink">${next_m:,}</div>
+      <div class="val pink">${next_m_str}</div>
       <div class="sub">{progress_pct}% there</div>
     </div>
   </div>
@@ -2775,6 +2777,7 @@ def status():
     wr = round(len(wins) / max(total, 1) * 100, 1)
     pct, limit = _cap_tier(cap)
     next_m = next((m for m in MILESTONES if m > cap), None)
+    next_m_str = f"{next_m:,}" if next_m else "MAX"
     progress_pct = min(round(cap / max(next_m, 1) * 100, 1), 100) if next_m else 100
     paused = _pause_until > time.time()
     daily_loss_pct = round((_day_start_cap - cap) / max(_day_start_cap, 1) * 100, 1) if _day_start_cap > 0 else 0
@@ -2921,7 +2924,7 @@ def status():
   </div>
 
   <div class="section">
-    <div class="section-hdr">MILESTONE PROGRESS — next ${next_m:,} ({progress_pct}%)</div>
+    <div class="section-hdr">MILESTONE PROGRESS — next ${next_m_str} ({progress_pct}%)</div>
     <div class="prog-track"><div class="prog-fill"></div></div>
     <div class="milestones">
       {''.join(f'<span class="ms{" hit" if cap >= m else ""}">${m:,}</span>' for m in MILESTONES)}
