@@ -1,4 +1,5 @@
 import os, time, threading, requests, json, re, csv, io
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, jsonify, Response, request
 from collections import defaultdict
 
@@ -92,7 +93,7 @@ SPIKE_MAX_SECS  = int(os.environ.get("SPIKE_MAX_SECS",    "180"))   # 3 min hard
 # Trench strategy — coins 85-97% bonded, about to graduate (fast pump at migration)
 TRENCH_ENTRY_MIN = float(os.environ.get("TRENCH_ENTRY_MIN", "85"))
 TRENCH_ENTRY_MAX = float(os.environ.get("TRENCH_ENTRY_MAX", "97"))
-TRENCH_TP_PCT    = float(os.environ.get("TRENCH_TP_PCT",    "25"))
+TRENCH_TP_PCT    = float(os.environ.get("TRENCH_TP_PCT",    "35"))
 TRENCH_SL_PCT    = float(os.environ.get("TRENCH_SL_PCT",    "12"))
 TRENCH_MAX_SECS  = int(os.environ.get("TRENCH_MAX_SECS",    "90"))  # 90s — very fast
 
@@ -156,13 +157,13 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 NTFY_TOPIC       = os.environ.get("NTFY_TOPIC", "")
 
 # Social / quality gates
-MIN_REPLIES  = int(os.environ.get("MIN_REPLIES",  "15"))   # community must actually exist
-MIN_SOCIALS  = int(os.environ.get("MIN_SOCIALS",   "2"))    # require 2 of 3: Twitter + Telegram/Website
+MIN_REPLIES  = int(os.environ.get("MIN_REPLIES",  "8"))    # be earlier — 8 replies is enough signal
+MIN_SOCIALS  = int(os.environ.get("MIN_SOCIALS",   "1"))    # Twitter alone is enough — Telegram/website follows
 MIN_LIQ      = float(os.environ.get("MIN_LIQ",    "500"))   # was 300 — need real liquidity to sustain moves
 
 # General
-MAX_OPEN      = int(os.environ.get("MAX_OPEN",      "6"))
-SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "5"))
+MAX_OPEN      = int(os.environ.get("MAX_OPEN",      "10"))
+SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "2"))
 
 SOL_RPC     = "https://api.mainnet-beta.solana.com"
 PUMPPORTAL  = "https://pumpportal.fun/api/trade-local"
@@ -716,8 +717,8 @@ def auto_tune(history):
         # Tune bond entry range toward what's winning
         if bond_wins:
             avg_win_entry = sum(t.get("bond_entry", BOND_ENTRY_MIN) for t in bond_wins) / len(bond_wins)
-            BOND_ENTRY_MIN = round(min(max(avg_win_entry - 2, 50), 72), 1)
-            BOND_ENTRY_MAX = round(min(BOND_ENTRY_MIN + 6, 78), 1)
+            BOND_ENTRY_MIN = round(min(max(avg_win_entry - 2, 38), 65), 1)
+            BOND_ENTRY_MAX = round(min(BOND_ENTRY_MIN + 6, 70), 1)
         elif bond_wr < 0.35 and len(bond_all) >= 5:
             # Poor win rate — tighten entry, look for higher momentum
             BOND_ENTRY_MIN = round(min(BOND_ENTRY_MIN + 1.5, 68), 1)
@@ -1020,32 +1021,48 @@ def get_sol_price():
     return None
 
 # ── RUGCHECK ────────────────────────────────────────────────────
+_rug_cache    = {}  # mint -> (timestamp, result)
+_holder_cache = {}  # mint -> (timestamp, result)
+_CACHE_TTL    = 90  # seconds — rug/holder data doesn't change in 90s
+
 def run_rugcheck(mint):
+    now = time.time()
+    hit = _rug_cache.get(mint)
+    if hit and now - hit[0] < _CACHE_TTL:
+        return hit[1]
     try:
         res   = _session.get(f"https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary", timeout=10)
         data  = res.json()
         risks = [r.get("name", "").lower() for r in data.get("risks", [])]
-        return {
+        result = {
             "has_mint_auth":   any("mint" in r for r in risks),
             "has_freeze_auth": any("freeze" in r for r in risks),
             "is_bundled":      any("insider" in r or "bundle" in r for r in risks),
         }
+        _rug_cache[mint] = (now, result)
+        return result
     except Exception:
         return None
 
 def check_holder_concentration(mint) -> tuple:
-    """(ok, reason) — ok=False if top-10 wallets hold >60% of supply."""
+    """(ok, reason) — ok=False if top-10 wallets hold >50% of supply."""
+    now = time.time()
+    hit = _holder_cache.get(mint)
+    if hit and now - hit[0] < _CACHE_TTL:
+        return hit[1]
     try:
         hdrs = {"User-Agent":"Mozilla/5.0","Referer":"https://gmgn.ai/","Origin":"https://gmgn.ai"}
         r = _session.get(f"{GMGN_TOP_HOLDERS}/{mint}", headers=hdrs, params={"limit":10}, timeout=8)
         if r.status_code != 200:
-            return True, ""
+            result = (True, "")
+            _holder_cache[mint] = (now, result)
+            return result
         data = r.json().get("data") or {}
         holders = data.get("holders") or data if isinstance(data, list) else []
         top10_pct = sum(float(h.get("amount_percentage") or h.get("percent") or 0) for h in holders[:10])
-        if top10_pct > 50:   # was 60 — 50%+ whale concentration is a rug waiting to happen
-            return False, f"top10={top10_pct:.0f}%"
-        return True, ""
+        result = (False, f"top10={top10_pct:.0f}%") if top10_pct > 50 else (True, "")
+        _holder_cache[mint] = (now, result)
+        return result
     except Exception:
         return True, ""
 
@@ -1808,6 +1825,115 @@ def copy_trade_loop():
             log("err", f"Copy loop: {e}", "COPY")
         time.sleep(15)
 
+# ── COIN EVALUATOR (runs in thread pool) ─────────────────────────
+def _eval_coin(coin):
+    """Evaluate one coin for all strategies. All blocking I/O runs here in a thread.
+    Returns a trade action dict or None. Never calls enter_trade."""
+    mint   = coin["mint"]
+    symbol = coin["symbol"]
+    bond   = coin.get("bond_pct", 0)
+    _sig_pre = sum([bool(coin.get("twitter")), bool(coin.get("telegram")), bool(coin.get("website"))])
+
+    # Bond Runner
+    if BOND_ENTRY_MIN <= bond <= BOND_ENTRY_MAX:
+        details = get_bonding_details(mint)
+        if details:
+            bond = details["bond_pct"]
+            if details.get("complete"):
+                return None
+        if not (BOND_ENTRY_MIN <= bond <= BOND_ENTRY_MAX):
+            return None
+        rug = run_rugcheck(mint)
+        if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
+            return {"action": "blacklist", "mint": mint}
+        if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
+            return None
+        holder_ok, holder_reason = check_holder_concentration(mint)
+        if not holder_ok:
+            _log_scan(symbol, mint, bond, _sig_pre, "holder", 4, holder_reason[:18].upper())
+            return None
+        dev_wallet = coin.get("creator", "") or coin.get("dev", "")
+        dev_ok, dev_reason = check_dev_history(dev_wallet)
+        if not dev_ok:
+            _log_scan(symbol, mint, bond, _sig_pre, "dev", 5, dev_reason[:18].upper())
+            return None
+        if gmgn_smart_money_selling(mint):
+            _log_scan(symbol, mint, bond, _sig_pre, "sm", 6, "SMART $ SELLING")
+            return None
+        sig_score = gmgn_signal_score(mint)
+        market = get_market_data(mint)
+        if not market or market["price"] <= 0:
+            _vsol = coin.get("vsol", 0); _vtok = coin.get("vtok", 0); _sp = get_sol_price()
+            if _vsol > 0 and _vtok > 0 and _sp:
+                market = {"price": (_vsol / _vtok) * _sp, "liq": 0, "change1h": 0, "age_h": 0, "change5m": 0}
+            else:
+                return None
+        if market.get("change5m", 0) < -3 and market.get("pair_address", ""):
+            _log_scan(symbol, mint, bond, _sig_pre, "mom", 8, f"5M DOWN {market['change5m']:.1f}%")
+            return None
+        return {"action": "trade", "strategy": "bond", "mint": mint, "symbol": symbol,
+                "price": market["price"], "bond": bond, "sig_score": sig_score,
+                "pump_swap": coin.get("pump_swap", False), "market": market}
+
+    # Trench Runner
+    if TRENCH_ENTRY_MIN <= bond <= TRENCH_ENTRY_MAX:
+        rug = run_rugcheck(mint)
+        if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
+            return {"action": "blacklist", "mint": mint}
+        if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
+            return None
+        if gmgn_smart_money_selling(mint):
+            _log_scan(symbol, mint, bond, _sig_pre, "sm", 6, "SMART $ SELLING")
+            return None
+        holder_ok, holder_reason = check_holder_concentration(mint)
+        if not holder_ok:
+            _log_scan(symbol, mint, bond, _sig_pre, "holder", 4, holder_reason[:18].upper())
+            return None
+        sig_score = gmgn_signal_score(mint)
+        market = get_market_data(mint)
+        if not market or market["price"] <= 0:
+            _vsol = coin.get("vsol", 0); _vtok = coin.get("vtok", 0); _sp = get_sol_price()
+            if _vsol > 0 and _vtok > 0 and _sp:
+                market = {"price": (_vsol / _vtok) * _sp, "liq": 0, "change1h": 0, "age_h": 0}
+            else:
+                return None
+        return {"action": "trade", "strategy": "trench", "mint": mint, "symbol": symbol,
+                "price": market["price"], "bond": bond, "sig_score": sig_score,
+                "pump_swap": coin.get("pump_swap", False), "market": market}
+
+    # Dormant Spike
+    created_at = coin.get("created_at", 0)
+    age_h = (time.time() - created_at / 1000) / 3600 if created_at > 0 else 0
+    if age_h >= SPIKE_MIN_AGE_H:
+        market = get_market_data(mint)
+        if not market:
+            return None
+        if (market["change1h"] >= SPIKE_MIN_1H and market["liq"] >= MIN_LIQ
+                and market["price"] > 0 and market.get("vol_m5", 0) >= 1000):
+            rug = run_rugcheck(mint)
+            if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
+                return {"action": "blacklist", "mint": mint}
+            if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
+                return None
+            holder_ok, holder_reason = check_holder_concentration(mint)
+            if not holder_ok:
+                return None
+            dev_wallet = coin.get("creator", "") or coin.get("dev", "")
+            dev_ok, _ = check_dev_history(dev_wallet)
+            if not dev_ok:
+                return None
+            if gmgn_smart_money_selling(mint):
+                return None
+            sig_score = gmgn_signal_score(mint)
+            if sig_score < 1:
+                return None
+            if not is_1m_trending_up(market.get("pair_address", "")):
+                return None
+            return {"action": "trade", "strategy": "spike", "mint": mint, "symbol": symbol,
+                    "price": market["price"], "bond": bond, "sig_score": sig_score,
+                    "pump_swap": coin.get("pump_swap", False), "market": market}
+    return None
+
 # ── SCANNER LOOP ─────────────────────────────────────────────────
 def scanner_loop():
     log("ok", "=" * 55)
@@ -1838,56 +1964,35 @@ def scanner_loop():
             # Scan summary counters for diagnostics
             n_social = n_replies = n_bond_range = n_spike_range = 0
 
+            # ── Phase 1: cheap pre-filter (no I/O) ────────────────────
+            with trades_lock:
+                _open_snap = set(open_trades.keys())
+            _black_snap = set(blacklisted_mints)
+            candidates = []
             for coin in coins:
-                with trades_lock:
-                    if len(open_trades) >= MAX_OPEN:
-                        break
                 if daily_limit_reached():
-                    _log_scan(coin.get("symbol","?"), coin.get("mint",""), coin.get("bond_pct",0), 0, "cap", -1, "DAILY CAP / COOLDOWN")
                     break
-                mint      = coin["mint"]
-                symbol    = coin["symbol"]
-                _bond_pre = coin.get("bond_pct", 0)
-                _sig_pre  = sum([bool(coin.get("twitter")), bool(coin.get("telegram")), bool(coin.get("website"))])
-
-                if mint in blacklisted_mints:
+                mint   = coin["mint"]
+                symbol = coin["symbol"]
+                bond   = coin.get("bond_pct", 0)
+                if mint in _black_snap or mint in _open_snap:
                     continue
-                with trades_lock:
-                    if mint in open_trades:
-                        continue
-
-                # Require at least MIN_SOCIALS of (Twitter, Telegram, Website)
                 social_count = sum([bool(coin.get("twitter")), bool(coin.get("telegram")), bool(coin.get("website"))])
                 if social_count < MIN_SOCIALS:
-                    _log_scan(symbol, mint, _bond_pre, social_count, "social", 0, f"ONLY {social_count}/2 SOCIALS")
+                    _log_scan(symbol, mint, bond, social_count, "social", 0, f"ONLY {social_count}/1 SOCIALS")
                     continue
                 n_social += 1
-
-                # Minimum community engagement — coins with no replies have no following
                 replies = int(coin.get("replies", 0) or 0)
                 if replies < MIN_REPLIES:
-                    _log_scan(symbol, mint, _bond_pre, _sig_pre, "social", 0, f"REPLIES {replies}<{MIN_REPLIES}")
+                    _log_scan(symbol, mint, bond, sum([bool(coin.get("twitter")), bool(coin.get("telegram")), bool(coin.get("website"))]), "social", 0, f"REPLIES {replies}<{MIN_REPLIES}")
                     continue
-
-                # Active trading: last trade within 5 minutes (was 15)
                 last_trade = coin.get("last_trade", 0)
-                if last_trade > 0:
-                    secs_since = time.time() - last_trade / 1000
-                    if secs_since > 300:
-                        _log_scan(symbol, mint, _bond_pre, _sig_pre, "active", 1, "LAST TRADE >5MIN")
-                        continue
-                n_replies += 1  # reuse counter — now means "recently active"
+                if last_trade > 0 and time.time() - last_trade / 1000 > 300:
+                    _log_scan(symbol, mint, bond, social_count, "active", 1, "LAST TRADE >5MIN")
+                    continue
+                n_replies += 1
 
-                bond = coin.get("bond_pct", 0)
-                if BOND_ENTRY_MIN <= bond <= BOND_ENTRY_MAX:
-                    n_bond_range += 1
-
-                created_at = coin.get("created_at", 0)
-                age_h = (time.time() - created_at / 1000) / 3600 if created_at > 0 else 0
-                if age_h >= SPIKE_MIN_AGE_H:
-                    n_spike_range += 1
-
-                # ── Bundle ride ────────────────────────────────────────
+                # ── Bundle ride — handled inline (special path) ────────
                 if BUNDLE_MODE == "ride" and 0 < bond < 75:
                     rug = run_rugcheck(mint)
                     if rug and rug.get("is_bundled") and not rug.get("has_mint_auth") and not rug.get("has_freeze_auth"):
@@ -1906,157 +2011,60 @@ def scanner_loop():
                         sig_score = gmgn_signal_score(mint)
                         market = get_market_data(mint)
                         if market and market["price"] > 0 and market["liq"] >= MIN_LIQ:
-                            amt = trade_size()
-                            log("ok", f"BUNDLE RIDE | bond={bond:.1f}% | sig={sig_score}", symbol)
-                            enter_trade(mint, symbol, market["price"], amt, "bundle", bond, 0, pump_swap=coin.get("pump_swap", False))
-                            time.sleep(0.5)
-                            continue
+                            with trades_lock:
+                                if len(open_trades) < MAX_OPEN and mint not in open_trades:
+                                    amt = trade_size()
+                                    log("ok", f"BUNDLE RIDE | bond={bond:.1f}% | sig={sig_score}", symbol)
+                                    enter_trade(mint, symbol, market["price"], amt, "bundle", bond, 0, pump_swap=coin.get("pump_swap", False))
+                        continue
 
-                # ── Bond Runner ────────────────────────────────────────
                 if BOND_ENTRY_MIN <= bond <= BOND_ENTRY_MAX:
-                    details = get_bonding_details(mint)
-                    if details:
-                        bond = details["bond_pct"]
-                        if details.get("complete"):
-                            log("info", f"BOND SKIP: already graduated bond={bond:.1f}%", symbol)
-                            _log_scan(symbol, mint, bond, _sig_pre, "bond", 2, "ALREADY GRADUATED")
-                            continue
-                    if not (BOND_ENTRY_MIN <= bond <= BOND_ENTRY_MAX):
-                        log("info", f"BOND SKIP: bond moved to {bond:.1f}% (range {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%)", symbol)
-                        _log_scan(symbol, mint, bond, _sig_pre, "bond", 2, f"BOND {bond:.0f}% MOVED")
-                        continue
-
-                    rug = run_rugcheck(mint)
-                    if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
-                        log("warn", f"BOND SKIP: mint/freeze auth rug={rug}", symbol)
-                        blacklisted_mints.add(mint)
-                        _log_scan(symbol, mint, bond, _sig_pre, "rug", 3, "RUG · MINT/FREEZE AUTH")
-                        continue
-                    if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
-                        log("warn", f"BOND SKIP: bundled", symbol)
-                        _log_scan(symbol, mint, bond, _sig_pre, "rug", 3, "BUNDLED TOKEN")
-                        continue
-                    holder_ok, holder_reason = check_holder_concentration(mint)
-                    if not holder_ok:
-                        log("warn", f"SKIP: {holder_reason}", symbol)
-                        _log_scan(symbol, mint, bond, _sig_pre, "holder", 4, holder_reason[:18].upper())
-                        continue
-                    dev_wallet = coin.get("creator", "") or coin.get("dev", "")
-                    dev_ok, dev_reason = check_dev_history(dev_wallet)
-                    if not dev_ok:
-                        log("warn", f"SKIP: {dev_reason}", symbol)
-                        _log_scan(symbol, mint, bond, _sig_pre, "dev", 5, dev_reason[:18].upper())
-                        continue
-                    if gmgn_smart_money_selling(mint):
-                        log("warn", "SKIP: smart money selling", symbol)
-                        _log_scan(symbol, mint, bond, _sig_pre, "sm", 6, "SMART $ SELLING")
-                        continue
-                    sig_score = gmgn_signal_score(mint)
-                    # Note: sig_score will be 0 for pre-graduation coins — GMGN only tracks Raydium tokens.
-                    # We still compute it for logging but don't gate on it here.
-
-                    market = get_market_data(mint)
-                    # Fallback: price from bonding curve when DexScreener hasn't indexed yet
-                    if not market or market["price"] <= 0:
-                        _vsol = coin.get("vsol", 0)
-                        _vtok = coin.get("vtok", 0)
-                        _sp   = get_sol_price()
-                        if _vsol > 0 and _vtok > 0 and _sp:
-                            bc_price = (_vsol / _vtok) * _sp
-                            market = {"price": bc_price, "liq": 0, "change1h": 0, "age_h": 0, "change5m": 0}
-                            log("info", f"BOND: using bonding curve price ${bc_price:.8f}", symbol)
-                        else:
-                            continue
-                    # Skip liquidity check for bond runner — bonding curve IS the liquidity
-
-                    # 5-min direction: allow small consolidation dips (-3%) but reject hard dumps
-                    if market.get("change5m", 0) < -3 and market.get("pair_address", ""):
-                        _log_scan(symbol, mint, bond, _sig_pre, "mom", 8, f"5M DOWN {market['change5m']:.1f}%")
-                        continue
-
-                    amt = trade_size()
-                    log("ok", f"BOND RUNNER | bond={bond:.1f}% 5m={market.get('change5m',0):+.1f}% | sig={sig_score}", symbol)
-                    enter_trade(mint, symbol, market["price"], amt, "bond", bond, 0, pump_swap=coin.get("pump_swap", False))
-                    time.sleep(0.5)
-                    continue
-
-                # ── Trench (near-graduation) ────────────────────────────
-                # Coins 85-97% bonded are about to migrate — pre-graduation pump
-                if TRENCH_ENTRY_MIN <= bond <= TRENCH_ENTRY_MAX:
-                    rug = run_rugcheck(mint)
-                    if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
-                        blacklisted_mints.add(mint)
-                        continue
-                    if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
-                        continue
-                    if gmgn_smart_money_selling(mint):
-                        _log_scan(symbol, mint, bond, _sig_pre, "sm", 6, "SMART $ SELLING")
-                        continue
-                    sig_score = gmgn_signal_score(mint)
-                    # sig_score will be 0 for most pre-graduation trench coins — GMGN tracks Raydium only
-                    holder_ok, holder_reason = check_holder_concentration(mint)
-                    if not holder_ok:
-                        _log_scan(symbol, mint, bond, _sig_pre, "holder", 4, holder_reason[:18].upper())
-                        continue
-                    market = get_market_data(mint)
-                    if not market or market["price"] <= 0:
-                        _vsol = coin.get("vsol", 0)
-                        _vtok = coin.get("vtok", 0)
-                        _sp   = get_sol_price()
-                        if _vsol > 0 and _vtok > 0 and _sp:
-                            bc_price = (_vsol / _vtok) * _sp
-                            market = {"price": bc_price, "liq": 0, "change1h": 0, "age_h": 0}
-                        else:
-                            continue
-                    amt = trade_size()
-                    log("ok", f"TRENCH | bond={bond:.1f}% | sig={sig_score}", symbol)
-                    enter_trade(mint, symbol, market["price"], amt, "trench", bond, 0, pump_swap=coin.get("pump_swap", False))
-                    time.sleep(0.5)
-                    continue
-
-                # ── Dormant Spike ──────────────────────────────────────
-                created_at = coin.get("created_at", 0)
-                age_h      = (time.time() - created_at / 1000) / 3600 if created_at > 0 else 0
-
+                    n_bond_range += 1
+                age_h = (time.time() - coin.get("created_at", 0) / 1000) / 3600 if coin.get("created_at", 0) > 0 else 0
                 if age_h >= SPIKE_MIN_AGE_H:
-                    market = get_market_data(mint)
-                    if not market:
-                        continue
-                    if (market["change1h"] >= SPIKE_MIN_1H and market["liq"] >= MIN_LIQ
-                            and market["price"] > 0 and market.get("vol_m5", 0) >= 1000):  # was 500
-                        rug = run_rugcheck(mint)
-                        if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
-                            log("warn", "Mint/freeze auth — skip", symbol)
-                            blacklisted_mints.add(mint)
-                            continue
-                        if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
-                            log("warn", "Bundle detected — skip", symbol)
-                            continue
-                        holder_ok, holder_reason = check_holder_concentration(mint)
-                        if not holder_ok:
-                            log("warn", f"SKIP: {holder_reason}", symbol)
-                            continue
-                        dev_wallet = coin.get("creator", "") or coin.get("dev", "")
-                        dev_ok, dev_reason = check_dev_history(dev_wallet)
-                        if not dev_ok:
-                            log("warn", f"SKIP: {dev_reason}", symbol)
-                            continue
-                        if gmgn_smart_money_selling(mint):
-                            log("warn", "SKIP: smart money selling", symbol)
-                            continue
-                        sig_score = gmgn_signal_score(mint)
-                        if sig_score < 1:
-                            log("info", f"SPIKE SKIP: sig={sig_score} (no GMGN backing)", symbol)
-                            continue
-                        if not is_1m_trending_up(market.get("pair_address", "")):
-                            log("info", f"SPIKE SKIP: 1m chart not trending up", symbol)
-                            continue
-                        amt = trade_size()
-                        log("ok", f"DORMANT SPIKE | age={age_h:.1f}h 1h={market['change1h']:+.0f}% 5m={market.get('change5m',0):+.1f}% | sig={sig_score}", symbol)
-                        enter_trade(mint, symbol, market["price"], amt, "spike", bond, 0, pump_swap=coin.get("pump_swap", False))
-                        time.sleep(0.5)
+                    n_spike_range += 1
+                candidates.append((len(candidates), coin))
 
-                time.sleep(0.2)
+            # ── Phase 2: parallel I/O evaluation ──────────────────────
+            if candidates:
+                workers = min(len(candidates), 12)
+                ordered_results = [None] * len(candidates)
+                with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="scan") as pool:
+                    future_map = {pool.submit(_eval_coin, coin): idx for idx, coin in candidates}
+                    for future in as_completed(future_map):
+                        idx = future_map[future]
+                        try:
+                            ordered_results[idx] = future.result()
+                        except Exception as e:
+                            log("warn", f"Coin eval error: {e}")
+
+                # ── Phase 3: sequential trade decisions ────────────────
+                for res in ordered_results:
+                    if not res:
+                        continue
+                    if res.get("action") == "blacklist":
+                        blacklisted_mints.add(res["mint"])
+                        continue
+                    if res.get("action") != "trade":
+                        continue
+                    if daily_limit_reached():
+                        break
+                    with trades_lock:
+                        if len(open_trades) >= MAX_OPEN:
+                            break
+                        if res["mint"] in open_trades:
+                            continue
+                    strategy = res["strategy"]
+                    m = res["market"]
+                    amt = trade_size()
+                    if strategy == "bond":
+                        log("ok", f"BOND RUNNER | bond={res['bond']:.1f}% 5m={m.get('change5m',0):+.1f}% | sig={res['sig_score']}", res["symbol"])
+                    elif strategy == "trench":
+                        log("ok", f"TRENCH | bond={res['bond']:.1f}% | sig={res['sig_score']}", res["symbol"])
+                    elif strategy == "spike":
+                        log("ok", f"DORMANT SPIKE | 1h={m.get('change1h',0):+.0f}% 5m={m.get('change5m',0):+.1f}% | sig={res['sig_score']}", res["symbol"])
+                    enter_trade(res["mint"], res["symbol"], res["price"], amt, strategy,
+                                res["bond"], 0, pump_swap=res.get("pump_swap", False))
 
             log("info",
                 f"Filter summary: {len(coins)} coins | "
