@@ -58,7 +58,7 @@ BOT_NAME          = os.environ.get("BOT_NAME", "Boogey's Treasure Chest")
 # Position sizing — capital-tiered (protects small accounts)
 MIN_TRADE         = float(os.environ.get("MIN_TRADE",   "3"))
 MAX_TRADE         = float(os.environ.get("MAX_TRADE",   "500"))
-FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "10"))  # 0 = use tiered %
+FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "0"))   # 0 = use tiered % sizing
 
 # Capital tiers per risk level: (min_capital, trade_pct, daily_max_trades)
 _RISK_TIERS = {
@@ -193,9 +193,9 @@ _milestones_hit   = set()
 _milestone_lock   = threading.Lock()
 usdc_locked       = 0.0
 usdc_lock         = threading.Lock()
-# Daily trading window — all hours in UTC
-TRADE_START_HOUR = int(os.environ.get("TRADE_START_HOUR", "14"))  # 9am ET  = 14:00 UTC
-TRADE_END_HOUR   = int(os.environ.get("TRADE_END_HOUR",    "1"))  # 8pm ET  = 01:00 UTC next day
+# Trading window — 0/0 = 24/7 (no gate). Set START/END to restrict hours (UTC).
+TRADE_START_HOUR = int(os.environ.get("TRADE_START_HOUR", "0"))
+TRADE_END_HOUR   = int(os.environ.get("TRADE_END_HOUR",   "0"))
 
 # Daily tracking — resets at TRADE_START_HOUR
 _daily_date       = ""
@@ -433,19 +433,19 @@ def _reset_daily_if_needed():
 def daily_limit_reached():
     global _daily_cap_notified
     _reset_daily_if_needed()
-    # Trading-hours gate: only scan between TRADE_START_HOUR and TRADE_END_HOUR (UTC).
-    # Handles windows that wrap past midnight (e.g. 14:00–01:00).
-    utc_hour = time.gmtime().tm_hour
-    if TRADE_START_HOUR <= TRADE_END_HOUR:
-        in_window = TRADE_START_HOUR <= utc_hour < TRADE_END_HOUR
-    else:  # wraps midnight
-        in_window = utc_hour >= TRADE_START_HOUR or utc_hour < TRADE_END_HOUR
-    if not in_window:
-        next_open = time.strftime("%H:%M UTC", time.gmtime(
-            time.time() + ((TRADE_START_HOUR - utc_hour) % 24) * 3600
-        ))
-        log("info", f"Outside trading window (UTC {TRADE_START_HOUR:02d}–{TRADE_END_HOUR:02d}) — resumes {next_open}")
-        return True
+    # Trading-hours gate. START==END==0 means 24/7 — no restriction.
+    if TRADE_START_HOUR != 0 or TRADE_END_HOUR != 0:
+        utc_hour = time.gmtime().tm_hour
+        if TRADE_START_HOUR <= TRADE_END_HOUR:
+            in_window = TRADE_START_HOUR <= utc_hour < TRADE_END_HOUR
+        else:  # wraps midnight
+            in_window = utc_hour >= TRADE_START_HOUR or utc_hour < TRADE_END_HOUR
+        if not in_window:
+            next_open = time.strftime("%H:%M UTC", time.gmtime(
+                time.time() + ((TRADE_START_HOUR - utc_hour) % 24) * 3600
+            ))
+            log("info", f"Outside trading window (UTC {TRADE_START_HOUR:02d}–{TRADE_END_HOUR:02d}) — resumes {next_open}")
+            return True
     with _daily_lock:
         if _pause_until > time.time():
             resume = time.strftime("%H:%M", time.localtime(_pause_until))
@@ -1269,7 +1269,7 @@ def execute_buy(mint, symbol, amount, pump_swap=False, raydium=False):
             headers={"Content-Type": "application/json"},
             json={"publicKey": WALLET, "action": "buy", "mint": mint,
                   "denominatedInSol": "true", "amount": sol_amount,
-                  "slippage": 20, "priorityFee": 0.001, "pool": pool},
+                  "slippage": 15, "priorityFee": 0.01, "pool": pool},
             timeout=15
         )
         if res.status_code != 200:
@@ -1306,7 +1306,7 @@ def execute_sell(tokens, mint, symbol, pump_swap=False, raydium=False):
             headers={"Content-Type": "application/json"},
             json={"publicKey": WALLET, "action": "sell", "mint": mint,
                   "denominatedInSol": "false", "amount": tokens,
-                  "slippage": 20, "priorityFee": 0.001, "pool": pool},
+                  "slippage": 15, "priorityFee": 0.01, "pool": pool},
             timeout=15
         )
         if res.status_code != 200:
