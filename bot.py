@@ -2414,6 +2414,7 @@ def _home_inner():
     <a href="/trades" class="btn btn-ghost">💼 All Trades</a>
     <button class="btn btn-ghost" onclick="fetch('/admin/reset-daily',{{method:'POST'}}).then(r=>r.json()).then(d=>alert(d.msg)).catch(()=>alert('Failed'))">🔄 Reset Daily</button>
     <button class="btn btn-ghost" onclick="if(confirm('Reset capital to ${STARTING_CAPITAL:.2f}?'))fetch('/admin/reset-capital',{{method:'POST'}}).then(r=>r.json()).then(d=>alert(d.msg)).catch(()=>alert('Failed'))">💰 Reset Capital</button>
+    <button class="btn btn-ghost" style="border-color:#ff3355;color:#ff3355" onclick="if(confirm('FULL RESET — wipes ALL trades, PNL history, and restores capital to ${STARTING_CAPITAL:.2f}. Cannot be undone. Continue?'))fetch('/admin/reset-all',{{method:'POST'}}).then(r=>r.json()).then(d=>{{alert(d.msg);location.reload()}}).catch(()=>alert('Failed'))">🗑️ Reset All</button>
   </div>
 
   <div class="cards">
@@ -3306,6 +3307,43 @@ def admin_reset_capital():
     _save_daily_state()
     log("ok", f"Capital reset to ${STARTING_CAPITAL:.2f} via /admin/reset-capital")
     return jsonify({"ok": True, "msg": f"Capital reset to ${STARTING_CAPITAL:.2f}"})
+
+@app.route("/admin/reset-all", methods=["POST"])
+def admin_reset_all():
+    global capital, usdc_locked
+    # Wipe all trade history
+    completed_trades.clear()
+    redis_save("bot_trades", [])
+    try:
+        if os.path.exists(LEARN_FILE):
+            os.remove(LEARN_FILE)
+    except Exception:
+        pass
+    # Reset capital
+    with capital_lock:
+        capital = STARTING_CAPITAL
+    # Reset USDC lock
+    with usdc_lock:
+        usdc_locked = 0.0
+    # Reset daily counters
+    global _daily_trades, _daily_wins, _daily_losses, _pause_until
+    global _daily_cap_notified, _week_day_logs, _week_start_date, _milestones_hit
+    with _daily_lock:
+        _daily_trades       = 0
+        _daily_wins         = 0
+        _daily_losses       = 0
+        _pause_until        = 0.0
+        _daily_cap_notified = False
+        _week_day_logs      = []
+        _week_start_date    = ""
+    with _milestone_lock:
+        _milestones_hit.clear()
+    # Close any open trades without executing sells (paper reset)
+    with trades_lock:
+        open_trades.clear()
+    _save_daily_state()
+    log("ok", f"FULL RESET — capital=${STARTING_CAPITAL:.2f}, trades cleared, daily reset")
+    return jsonify({"ok": True, "msg": f"Full reset complete — capital restored to ${STARTING_CAPITAL:.2f}"})
 
 @app.route("/log", methods=["GET"])
 def get_log():
