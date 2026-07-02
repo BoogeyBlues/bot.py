@@ -17,6 +17,13 @@ _session.trust_env = False  # bypass Railway proxy env vars
 
 app = Flask(__name__)
 
+@app.errorhandler(500)
+def handle_500(e):
+    import traceback
+    tb = traceback.format_exc()
+    log("warn", f"500 error: {e}\n{tb[:500]}", "FLASK")
+    return f"<h1>Internal Server Error</h1><pre style='font-size:12px;color:#aaa'>{str(e)}</pre>", 500
+
 # ── REDIS PERSISTENCE (Upstash REST) ────────────────────────────
 def _redis_cmd(*args):
     if not REDIS_URL or not REDIS_TOKEN:
@@ -2176,6 +2183,14 @@ def scanner_loop():
 
 @app.route("/", methods=["GET"])
 def home():
+    try:
+        return _home_inner()
+    except Exception as e:
+        import traceback
+        log("warn", f"/ render error: {traceback.format_exc()[:400]}", "HOME")
+        return f"<h1>Home Error</h1><pre>{e}</pre>", 500
+
+def _home_inner():
     from flask import request as _req
     theme = _req.args.get("theme", "classic")
     with capital_lock:
@@ -2184,10 +2199,10 @@ def home():
         open_list = list(open_trades.values())
     with usdc_lock:
         locked = usdc_locked
-    wins  = [t for t in completed_trades if t["pnl"] > 0]
+    wins  = [t for t in completed_trades if t.get("pnl", 0) > 0]
     total = len(completed_trades)
     wr    = round(len(wins) / max(total, 1) * 100, 1)
-    pnl   = sum(t["pnl"] for t in completed_trades)
+    pnl   = sum(t.get("pnl", 0) for t in completed_trades)
     mode  = "PAPER" if PAPER_MODE else "LIVE"
     pct, limit = _cap_tier(cap)
     next_m = next((m for m in MILESTONES if m > cap), None)
@@ -2200,25 +2215,25 @@ def home():
     recent = list(reversed(completed_trades[-20:]))
     rows = ""
     for t in recent:
-        color = "#4ade80" if t["pnl"] >= 0 else "#f87171"
-        icon  = "▲" if t["pnl"] >= 0 else "▼"
-        sign  = "+" if t["pnl"] >= 0 else ""
+        color = "#4ade80" if t.get("pnl", 0) >= 0 else "#f87171"
+        icon  = "▲" if t.get("pnl", 0) >= 0 else "▼"
+        sign  = "+" if t.get("pnl", 0) >= 0 else ""
         rows += (f'<tr>'
-                 f'<td><span class="badge badge-strategy">{t["strategy"].upper()}</span></td>'
-                 f'<td class="sym">{t["symbol"]}</td>'
-                 f'<td style="color:{color};font-weight:700">{icon} {sign}${t["pnl"]:.4f}</td>'
-                 f'<td><span class="badge">{t["result"]}</span></td>'
-                 f'<td class="muted">{t["hold_m"]:.1f}m</td>'
-                 f'<td class="muted">{t["time"]}</td>'
+                 f'<td><span class="badge badge-strategy">{t.get("strategy","?").upper()}</span></td>'
+                 f'<td class="sym">{t.get("symbol","?")}</td>'
+                 f'<td style="color:{color};font-weight:700">{icon} {sign}${t.get("pnl",0):.4f}</td>'
+                 f'<td><span class="badge">{t.get("result","?")}</span></td>'
+                 f'<td class="muted">{t.get("hold_m",0):.1f}m</td>'
+                 f'<td class="muted">{t.get("time","")}</td>'
                  f'</tr>')
 
     open_rows = ""
     for t in open_list:
-        elapsed = round((time.time() - t["opened_at"]) / 60, 1)
+        elapsed = round((time.time() - t.get("opened_at", time.time())) / 60, 1)
         open_rows += (f'<tr>'
-                      f'<td class="sym">{t["symbol"]}</td>'
-                      f'<td><span class="badge badge-strategy">{t["strategy"].upper()}</span></td>'
-                      f'<td class="gold">${t["amount"]:.2f}</td>'
+                      f'<td class="sym">{t.get("symbol","?")}</td>'
+                      f'<td><span class="badge badge-strategy">{t.get("strategy","?").upper()}</span></td>'
+                      f'<td class="gold">${t.get("amount",0):.2f}</td>'
                       f'<td class="muted">{t.get("bond_entry",0):.1f}%</td>'
                       f'<td class="muted pulse-text">{elapsed}m</td>'
                       f'</tr>')
@@ -2730,9 +2745,9 @@ new Chart(document.getElementById('capChart'),{{
 
 @app.route("/status/api", methods=["GET"])
 def status_api():
-    wins  = [t for t in completed_trades if t["pnl"] > 0]
+    wins  = [t for t in completed_trades if t.get("pnl", 0) > 0]
     total = len(completed_trades)
-    pnl   = sum(t["pnl"] for t in completed_trades)
+    pnl   = sum(t.get("pnl", 0) for t in completed_trades)
     with capital_lock:
         cap = capital
     sol_price = get_sol_price()
@@ -2751,10 +2766,10 @@ def status_api():
 
 @app.route("/status", methods=["GET"])
 def status():
-    wins   = [t for t in completed_trades if t["pnl"] > 0]
-    losses = [t for t in completed_trades if t["pnl"] <= 0]
+    wins   = [t for t in completed_trades if t.get("pnl", 0) > 0]
+    losses = [t for t in completed_trades if t.get("pnl", 0) <= 0]
     total  = len(completed_trades)
-    pnl    = sum(t["pnl"] for t in completed_trades)
+    pnl    = sum(t.get("pnl", 0) for t in completed_trades)
     with capital_lock:
         cap = capital
     wr = round(len(wins) / max(total, 1) * 100, 1)
@@ -2972,51 +2987,60 @@ def trades_api():
 
 @app.route("/trades", methods=["GET"])
 def trades():
+    try:
+        return _trades_inner()
+    except Exception as e:
+        import traceback
+        log("warn", f"/trades render error: {traceback.format_exc()[:400]}", "TRADES")
+        return f"<h1>Trades Error</h1><pre>{e}</pre>", 500
+
+def _trades_inner():
     with trades_lock:
         open_list = list(open_trades.values())
     with capital_lock:
         cap = capital
 
-    wins   = [t for t in completed_trades if t["pnl"] > 0]
-    losses = [t for t in completed_trades if t["pnl"] <= 0]
+    wins   = [t for t in completed_trades if t.get("pnl", 0) > 0]
+    losses = [t for t in completed_trades if t.get("pnl", 0) <= 0]
     total  = len(completed_trades)
     wr     = round(len(wins) / max(total, 1) * 100, 1)
-    total_pnl = round(sum(t["pnl"] for t in completed_trades), 4)
-    avg_win   = round(sum(t["pnl"] for t in wins)   / max(len(wins),   1), 4)
-    avg_loss  = round(sum(t["pnl"] for t in losses) / max(len(losses), 1), 4)
-    best      = max(completed_trades, key=lambda t: t["pnl"], default=None)
-    worst     = min(completed_trades, key=lambda t: t["pnl"], default=None)
+    total_pnl = round(sum(t.get("pnl", 0) for t in completed_trades), 4)
+    avg_win   = round(sum(t.get("pnl", 0) for t in wins)   / max(len(wins),   1), 4)
+    avg_loss  = round(sum(t.get("pnl", 0) for t in losses) / max(len(losses), 1), 4)
+    best      = max(completed_trades, key=lambda t: t.get("pnl", 0), default=None)
+    worst     = min(completed_trades, key=lambda t: t.get("pnl", 0), default=None)
 
     # Build table rows — newest first
     rows = ""
     for t in reversed(completed_trades):
-        won   = t["pnl"] > 0
+        won   = t.get("pnl", 0) > 0
         color = "#4ade80" if won else "#f87171"
         badge = f'<span class="badge {"win" if won else "loss"}">{"WIN" if won else "LOSS"}</span>'
-        sign  = "+" if t["pnl"] >= 0 else ""
-        rows += f"""<tr class="trade-row" data-id="{t['id']}" onclick="openModal({t['id']})">
-          <td class="td-num">#{t['id']}</td>
-          <td>{t['date']}<br><span class="muted">{t['time']}</span></td>
-          <td class="sym">{t['symbol']}</td>
-          <td><span class="badge strat">{t['strategy'].upper()}</span></td>
-          <td class="mono">${t['entry']:.6f}</td>
-          <td class="mono">${t['exit']:.6f}</td>
-          <td class="mono" style="color:{color}">{sign}{t['pnl_pct']:.1f}%</td>
-          <td class="mono" style="color:{color};font-weight:700">{sign}${t['pnl']:.4f}</td>
-          <td>{t['hold_m']:.1f}m</td>
-          <td><span class="badge exit">{t['result']}</span></td>
+        sign  = "+" if t.get("pnl", 0) >= 0 else ""
+        rows += f"""<tr class="trade-row" data-id="{t.get('id',0)}" onclick="openModal({t.get('id',0)})">
+          <td class="td-num">#{t.get('id',0)}</td>
+          <td>{t.get('date','')}<br><span class="muted">{t.get('time','')}</span></td>
+          <td class="sym">{t.get('symbol','?')}</td>
+          <td><span class="badge strat">{t.get('strategy','?').upper()}</span></td>
+          <td class="mono">${t.get('entry',0):.6f}</td>
+          <td class="mono">${t.get('exit',0):.6f}</td>
+          <td class="mono" style="color:{color}">{sign}{t.get('pnl_pct',0):.1f}%</td>
+          <td class="mono" style="color:{color};font-weight:700">{sign}${t.get('pnl',0):.4f}</td>
+          <td>{t.get('hold_m',0):.1f}m</td>
+          <td><span class="badge exit">{t.get('result','?')}</span></td>
           <td>{badge}</td>
         </tr>"""
 
     # Open trades rows
     open_rows = ""
     for t in open_list:
-        elapsed = round((time.time() - t["opened_at"]) / 60, 1)
-        cur_pct = round((t.get("price_high", t["entry"]) - t["entry"]) / max(t["entry"], 1e-12) * 100, 1)
+        elapsed = round((time.time() - t.get("opened_at", time.time())) / 60, 1)
+        entry   = t.get("entry", 0)
+        cur_pct = round((t.get("price_high", entry) - entry) / max(entry, 1e-12) * 100, 1)
         open_rows += f"""<tr>
-          <td class="sym">{t['symbol']}</td>
-          <td><span class="badge strat">{t['strategy'].upper()}</span></td>
-          <td class="mono">${t['amount']:.2f}</td>
+          <td class="sym">{t.get('symbol','?')}</td>
+          <td><span class="badge strat">{t.get('strategy','?').upper()}</span></td>
+          <td class="mono">${t.get('amount',0):.2f}</td>
           <td class="mono">{t.get('bond_entry',0):.1f}%</td>
           <td class="mono {'green' if cur_pct>=0 else 'red'}">{'+' if cur_pct>=0 else ''}{cur_pct:.1f}%</td>
           <td class="pulse">{elapsed}m</td>
