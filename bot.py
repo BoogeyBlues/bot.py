@@ -1435,10 +1435,13 @@ def exit_trade(mint, price, reason, bond=0):
 
     # Total PnL across the whole position (partials already returned to capital)
     pnl = (partial_proceeds + final_value) - amount
-    pnl = max(-amount, min(pnl, amount * 5))
+    pnl = max(-amount, min(pnl, amount * 5))   # clamp: can't lose more than bet, cap at 5x
 
+    # Capital gets back the clamped amount — same bound as pnl so we can't gain billions
+    # from a near-zero entry price producing trillions of tokens
+    clamped_return = max(0.0, amount - partial_proceeds + pnl)
     with capital_lock:
-        capital += final_value   # partial_proceeds were already added during _partial_exit
+        capital += clamped_return
 
     sign = "+" if pnl >= 0 else ""
     log("ok" if pnl >= 0 else "err",
@@ -3311,23 +3314,22 @@ def admin_reset_capital():
 @app.route("/admin/reset-all", methods=["POST"])
 def admin_reset_all():
     global capital, usdc_locked
-    # Wipe all trade history
-    completed_trades.clear()
-    redis_save("bot_trades", [])
-    try:
-        if os.path.exists(LEARN_FILE):
-            os.remove(LEARN_FILE)
-    except Exception:
-        pass
-    # Reset capital
-    with capital_lock:
-        capital = STARTING_CAPITAL
-    # Reset USDC lock
-    with usdc_lock:
-        usdc_locked = 0.0
-    # Reset daily counters
     global _daily_trades, _daily_wins, _daily_losses, _pause_until
     global _daily_cap_notified, _week_day_logs, _week_start_date, _milestones_hit
+    global _day_start_cap, _daily_date
+
+    # 1. Wipe Redis keys entirely (DEL, not overwrite — survives restart)
+    _redis_cmd("DEL", "bot_state")
+    _redis_cmd("DEL", "bot_trades")
+
+    # 2. Wipe in-memory state
+    completed_trades.clear()
+    with trades_lock:
+        open_trades.clear()
+    with capital_lock:
+        capital = STARTING_CAPITAL
+    with usdc_lock:
+        usdc_locked = 0.0
     with _daily_lock:
         _daily_trades       = 0
         _daily_wins         = 0
@@ -3336,14 +3338,25 @@ def admin_reset_all():
         _daily_cap_notified = False
         _week_day_logs      = []
         _week_start_date    = ""
+        _day_start_cap      = STARTING_CAPITAL
+        _daily_date         = ""
     with _milestone_lock:
         _milestones_hit.clear()
-    # Close any open trades without executing sells (paper reset)
-    with trades_lock:
-        open_trades.clear()
+
+    # 3. Wipe local files
+    for f in [LEARN_FILE, STATE_FILE]:
+        try:
+            if os.path.exists(f):
+                os.remove(f)
+        except Exception:
+            pass
+
+    # 4. Write fresh clean state to Redis so restart loads correctly
     _save_daily_state()
-    log("ok", f"FULL RESET — capital=${STARTING_CAPITAL:.2f}, trades cleared, daily reset")
-    return jsonify({"ok": True, "msg": f"Full reset complete — capital restored to ${STARTING_CAPITAL:.2f}"})
+    redis_save("bot_trades", [])
+
+    log("ok", f"FULL RESET — capital=${STARTING_CAPITAL:.2f}, all history wiped")
+    return jsonify({"ok": True, "msg": f"Full reset — capital restored to ${STARTING_CAPITAL:.2f}. Reload the page."})
 
 @app.route("/log", methods=["GET"])
 def get_log():
