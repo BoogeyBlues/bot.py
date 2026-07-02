@@ -1344,7 +1344,10 @@ def _partial_exit(mint, price, fraction, label):
         if tokens_to_sell <= 0:
             return
         entry     = trade["entry"]
-        proceeds  = tokens_to_sell * price
+        raw_proceeds = tokens_to_sell * price
+        # Cap: this partial slice is worth at most fraction*amount*(1+5x) — blocks token-count inflation
+        max_proceeds = trade["amount"] * fraction * 6.0
+        proceeds = min(raw_proceeds, max_proceeds)
         trade["tokens"]            -= tokens_to_sell
         trade["partial_proceeds"]  += proceeds
         trade["partial_tp_done"]   += 1
