@@ -7,10 +7,10 @@ app = Flask(__name__)
 # ── CONFIG ────────────────────────────────────────────────────────
 DRIFT_PAPER_MODE   = os.environ.get("DRIFT_PAPER_MODE", "true").lower() != "false"
 DRIFT_EXCHANGE     = os.environ.get("DRIFT_EXCHANGE", "jupiter")
-DRIFT_LEVERAGE     = float(os.environ.get("DRIFT_LEVERAGE", "65"))     # midpoint; used as fallback
-DRIFT_LEV_MIN      = float(os.environ.get("DRIFT_LEV_MIN",  "50"))     # minimum leverage
-DRIFT_LEV_MAX      = float(os.environ.get("DRIFT_LEV_MAX",  "80"))     # maximum leverage
-DRIFT_MARGIN_USD   = float(os.environ.get("DRIFT_MARGIN_USD", "400"))  # fixed margin per trade ($)
+DRIFT_LEVERAGE     = float(os.environ.get("DRIFT_LEVERAGE", "42"))     # midpoint; used as fallback
+DRIFT_LEV_MIN      = float(os.environ.get("DRIFT_LEV_MIN",  "30"))     # minimum leverage
+DRIFT_LEV_MAX      = float(os.environ.get("DRIFT_LEV_MAX",  "55"))     # maximum leverage
+DRIFT_MARGIN_USD   = float(os.environ.get("DRIFT_MARGIN_USD", "500"))  # fixed margin per trade ($)
 DRIFT_MAX_OPEN     = int(os.environ.get("DRIFT_MAX_OPEN", "5"))
 DRIFT_TP_PCT       = float(os.environ.get("DRIFT_TP_PCT", "0.20"))
 DRIFT_SL_PCT       = float(os.environ.get("DRIFT_SL_PCT", "0.05"))
