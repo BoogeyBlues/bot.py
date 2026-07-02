@@ -15,7 +15,8 @@ DRIFT_MAX_OPEN     = int(os.environ.get("DRIFT_MAX_OPEN", "5"))
 DRIFT_TP_PCT       = float(os.environ.get("DRIFT_TP_PCT", "0.20"))
 DRIFT_SL_PCT       = float(os.environ.get("DRIFT_SL_PCT", "0.05"))
 DRIFT_TRAIL_PCT    = float(os.environ.get("DRIFT_TRAIL_PCT", "0.05"))
-DRIFT_MARKETS      = os.environ.get("DRIFT_MARKETS", "SOL,ETH,DOGE,PEPE,WIF,BONK,POPCAT,TRUMP,XRP,AVAX")
+DRIFT_MARKETS      = os.environ.get("DRIFT_MARKETS", "SOL,ETH,BTC")  # Jupiter Perps: SOL/ETH/BTC only
+DRIFT_DAILY_LOSS_CAP = float(os.environ.get("DRIFT_DAILY_LOSS_CAP", "200"))  # stop day if down $200
 DRIFT_BOT_NAME     = os.environ.get("DRIFT_BOT_NAME", "Drift Sniper")
 DRIFT_PORT         = int(os.environ.get("DRIFT_PORT", "5001"))
 WALLET             = os.environ.get("WALLET", "")
@@ -23,7 +24,8 @@ WALLET_PRIVATE_KEY = os.environ.get("WALLET_PRIVATE_KEY", "")
 SOL_RPC            = os.environ.get("SOL_RPC", "https://api.mainnet-beta.solana.com")
 TELEGRAM_TOKEN     = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
-GMGN_API_KEY       = os.environ.get("GMGN_API_KEY", "")
+# NOTE: GMGN is used exclusively by bot.py (PumpFun sniper). This bot
+# (drift_bot.py) does NOT call GMGN. Keep these completely separate.
 STARTING_CAPITAL   = float(os.environ.get("DRIFT_STARTING_CAPITAL", "5000"))
 PROFIT_GOAL        = float(os.environ.get("DRIFT_PROFIT_GOAL", "10000"))
 DRIFT_TP_USD       = float(os.environ.get("DRIFT_TP_USD",    str(DRIFT_MARGIN_USD * 2)))  # default: 2× margin
@@ -59,7 +61,7 @@ _signals_cache     = {}   # market -> {signal, ts}
 _st_prev           = {}   # market -> previous supertrend bullish state (for flip detection)
 _market_stats      = {}   # market -> {wins, losses, long_wins, short_wins, long_total, short_total}
 _market_params     = {}   # tuned per-market: {leverage, bias, paused_until, last_result}
-_gmgn_signal_cache = {}   # market -> {result, ts} — 5-min TTL to avoid per-tick API calls
+_5m_trend_cache    = {}   # market -> {trend, ts} — 5-min candle bias, 60s TTL
 
 _session = requests.Session()
 _session.trust_env = False
@@ -465,117 +467,132 @@ def _supertrend(vals, period=10, mult=3.0):
     return bull[-1], lvl
 
 # ── SIGNAL ENGINE ─────────────────────────────────────────────────
-def _get_gmgn_signal(market):
-    """Fetch smart money signal from GMGN for the underlying asset. Returns 'long', 'short', or None."""
-    if not GMGN_API_KEY:
+def _get_5m_trend(market):
+    """
+    Fetch the 5-minute trend bias from OKX candles. Returns 'long', 'short', or None.
+    Cached for 60 seconds so it's checked once per loop cycle, not per tick.
+    Used as a higher-timeframe filter: if 5m disagrees with 1m signal, skip the trade.
+    """
+    now = time.time()
+    cached = _5m_trend_cache.get(market)
+    if cached and now - cached["ts"] < 60:
+        return cached["trend"]
+
+    sym = _OKX_SYM.get(market.upper())
+    if not sym:
+        _5m_trend_cache[market] = {"trend": None, "ts": now}
         return None
-    cached = _gmgn_signal_cache.get(market)
-    if cached and time.time() - cached["ts"] < 300:
-        return cached["result"]
-    result = None
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json",
-            "Authorization": f"Bearer {GMGN_API_KEY}",
-        }
         r = _session.get(
-            "https://gmgn.ai/defi/quotation/v1/signals/sol",
-            params={"type": "12", "limit": "20"},
-            headers=headers,
-            timeout=8
+            "https://www.okx.com/api/v5/market/candles",
+            params={"instId": sym, "bar": "5m", "limit": "22"},
+            timeout=8,
         )
-        if r.status_code == 200:
-            signals = r.json().get("data", {}).get("signals", [])
-            for s in signals:
-                sym = (s.get("token_symbol") or "").upper()
-                if sym == market.upper():
-                    action = (s.get("action") or "").lower()
-                    if action in ("buy", "accumulate"):
-                        result = "long"
-                    elif action in ("sell", "dump"):
-                        result = "short"
-                    break
+        if r.status_code != 200:
+            _5m_trend_cache[market] = {"trend": None, "ts": now}
+            return None
+        candles = r.json().get("data", [])
+        if len(candles) < 15:
+            _5m_trend_cache[market] = {"trend": None, "ts": now}
+            return None
+        closes = [float(c[4]) for c in reversed(candles)]
+        # EMA-20 on 5m candles ≈ 1h40m of trend
+        k = 2 / (20 + 1)
+        ema = closes[0]
+        for p in closes[1:]:
+            ema = p * k + ema * (1 - k)
+        trend = "long" if closes[-1] > ema else "short"
+        _5m_trend_cache[market] = {"trend": trend, "ts": now}
+        return trend
     except Exception:
-        pass
-    _gmgn_signal_cache[market] = {"result": result, "ts": time.time()}
-    return result
+        _5m_trend_cache[market] = {"trend": None, "ts": now}
+        return None
+
+
+def _calc_ema(vals, period):
+    """Proper exponential moving average — weights recent prices more than SMA."""
+    if len(vals) < period:
+        return None
+    k = 2 / (period + 1)
+    ema = sum(vals[:period]) / period  # seed with SMA of first `period` bars
+    for p in vals[period:]:
+        ema = p * k + ema * (1 - k)
+    return ema
+
 
 def get_signal(market):
     """
-    Research-backed multi-factor signal engine.
+    Multi-factor signal engine. No GMGN — that is exclusively for bot.py (PumpFun sniper).
 
     Entry requires ALL of:
-      - Supertrend (10, 3) bullish/bearish
-      - Price on correct side of EMA-50 (no counter-trend)
-      - RSI-14 between 35-65 (not exhausted, not ranging at extremes)
-      - Market not in dead zone (ATR / price > 0.001 — enough volatility to trade)
+      - Supertrend (10, 3) bullish/bearish on 1m
+      - Price on correct side of EMA-50 (1m) — no counter-trend entries
+      - 5-minute trend agrees with 1m direction — higher-timeframe alignment
+      - RSI-14 not exhausted (hard block >78 long / <22 short)
+      - ATR/price > 0.001 — market must have tradeable volatility
 
-    Confidence score (affects position size):
-      +1 base (Supertrend + EMA agree, RSI not exhausted)
-      +1 if RSI is neutral (35-65) — momentum has room to run
-      +1 if Supertrend just FLIPPED this bar (fresh signal, highest quality)
-      +1 if GMGN smart money actively confirms direction
-      → min to enter: confidence >= 2 (max 4)
+    Confidence score (scales position size):
+      +1 base (ST + EMA agree, RSI not exhausted, 5m aligned)
+      +1 if RSI is neutral 35-65 — momentum has room to run
+      +1 if Supertrend just FLIPPED this bar — fresh, highest-quality entry
+      → max 3; position sizing scales with confidence
 
     Returns (direction, confidence, atr) or (None, 0, None).
     """
     global _st_prev
     with _state_lock:
         prices = list(_price_history.get(market, []))
-    if len(prices) < 55:   # need 50 for EMA + buffer
+    if len(prices) < 55:
         return None, 0, None
     vals = [p for _, p in prices]
 
-    # ── Indicators ────────────────────────────────────────────────
-    ema50     = sum(vals[-50:]) / 50
-    rsi       = _calc_rsi(vals, 14)
-    atr       = _calc_atr(vals, 14)
-    st_bull, st_lvl = _supertrend(vals, 10, 3.0)
+    # ── Indicators (real EMA, not SMA) ────────────────────────────
+    ema50        = _calc_ema(vals, 50)
+    rsi          = _calc_rsi(vals, 14)
+    atr          = _calc_atr(vals, 14)
+    st_bull, _   = _supertrend(vals, 10, 3.0)
 
-    if rsi is None or atr is None or st_bull is None:
+    if ema50 is None or rsi is None or atr is None or st_bull is None:
         return None, 0, None
 
     cur = vals[-1]
 
-    # ── Market regime: must have enough volatility to be worth trading ──
+    # ── Regime: enough volatility to trade ────────────────────────
     atr_pct = atr / cur
-    if atr_pct < 0.001:   # market is frozen / ranging — skip
-        _st_prev[market] = st_bull  # consume flip so it doesn't linger
+    if atr_pct < 0.001:
+        _st_prev[market] = st_bull
         return None, 0, None
 
-    # ── Direction from Supertrend ──────────────────────────────────
     trend = "long" if st_bull else "short"
 
-    # ── Factor 1: EMA-50 trend filter (no counter-trend entries) ──
-    ema_ok = (trend == "long" and cur > ema50) or (trend == "short" and cur < ema50)
-    if not ema_ok:
-        _st_prev[market] = st_bull  # consume flip so stale flip doesn't persist
+    # ── Filter 1: EMA-50 alignment (no counter-trend) ─────────────
+    if not ((trend == "long" and cur > ema50) or (trend == "short" and cur < ema50)):
+        _st_prev[market] = st_bull
         return None, 0, None
 
-    # ── Factor 2: RSI exhaustion check ────────────────────────────
-    # Hard block only on clear exhaustion (overbought long or oversold short).
-    # Mid-range RSI adds a confidence point; extreme-but-not-exhausted passes with lower confidence.
-    rsi_exhausted = (trend == "long" and rsi > 78) or (trend == "short" and rsi < 22)
-    if rsi_exhausted:
+    # ── Filter 2: 5-minute higher-timeframe must agree ────────────
+    trend_5m = _get_5m_trend(market)
+    if trend_5m and trend_5m != trend:
+        log("info", f"5m={trend_5m} vs 1m={trend} — skip counter-trend entry", market)
+        _st_prev[market] = st_bull
+        return None, 0, None
+
+    # ── Filter 3: RSI exhaustion hard block ───────────────────────
+    if (trend == "long" and rsi > 78) or (trend == "short" and rsi < 22):
         _st_prev[market] = st_bull
         return None, 0, None
 
     # ── Confidence scoring ─────────────────────────────────────────
-    confidence = 1  # base: ST + EMA agree and RSI not exhausted
+    confidence = 1  # base: all filters passed
     if 35 < rsi < 65:
-        confidence += 1  # RSI in neutral zone — momentum has room to run
+        confidence += 1  # RSI neutral — momentum has room
 
-    prev_bull = _st_prev.get(market)
+    prev_bull    = _st_prev.get(market)
     just_flipped = prev_bull is not None and prev_bull != st_bull
     if just_flipped:
-        confidence += 1  # fresh flip = highest quality entry
+        confidence += 1  # fresh Supertrend flip — highest quality entry
 
     _st_prev[market] = st_bull
-
-    if confidence < 1:
-        return None, 0, None
-
     return trend, confidence, atr
 
 # ── LIVE EXECUTION STUBS ──────────────────────────────────────────
@@ -1326,15 +1343,19 @@ def run_trading_loop():
                     if not price:
                         continue
 
+                    # ── Daily loss cap — stop trading if down DRIFT_DAILY_LOSS_CAP ──
+                    with _state_lock:
+                        dpnl = _daily_pnl
+                    if dpnl <= -DRIFT_DAILY_LOSS_CAP:
+                        log("warn", f"Daily loss cap hit (${dpnl:.2f}) — no new positions today")
+                        break
+
                     # ── ATR-based SL/TP (dynamic, volatility-adjusted) ────
                     atr_pct   = sig_atr / price
                     sl_pct    = atr_pct * 1.5   # SL = 1.5× ATR
                     tp_pct    = atr_pct * 3.0   # TP = 3× ATR (2:1 R:R)
 
                     # ── Liquidation safety cap ────────────────────────────
-                    # At leverage L, liquidation happens when price moves 1/L against us.
-                    # SL must land INSIDE that distance (using 85% of margin as hard limit).
-                    # If even the minimum leverage puts SL past liquidation, skip the trade.
                     max_safe_lev = 0.85 / sl_pct if sl_pct > 0 else DRIFT_LEV_MAX
                     if max_safe_lev < DRIFT_LEV_MIN:
                         log("info",
@@ -1343,21 +1364,27 @@ def run_trading_loop():
                         continue
 
                     # ── Dynamic leverage: inverse of volatility, clamped to safe range ──
-                    # k=0.10 calibrated for 1-min ATR: gives 65x at ~0.15% per-tick ATR.
-                    # Calm markets (BTC/ETH) → higher leverage; volatile (SOL) → lower.
-                    # Max-confidence signal (fresh flip + GMGN + RSI neutral) gets 15% boost.
+                    # k=0.10: gives ~65x at 0.15% per-tick ATR on 1m data.
+                    # Calm markets (BTC/ETH) get higher leverage; volatile (SOL) gets lower.
+                    # Fresh Supertrend flip (conf=3) gets 15% leverage boost.
                     LEV_K      = 0.10
                     raw_lev    = LEV_K / atr_pct if atr_pct > 0 else DRIFT_LEV_MIN
                     tuned_lev  = mparams.get("leverage", DRIFT_LEVERAGE)
                     raw_lev    = (raw_lev + tuned_lev) / 2
-                    if confidence >= 4:
-                        raw_lev *= 1.15
+                    if confidence >= 3:
+                        raw_lev *= 1.15   # fresh flip = highest conviction, push lev up
                     market_lev = int(max(DRIFT_LEV_MIN, min(DRIFT_LEV_MAX, raw_lev, max_safe_lev)))
-                    size_usd   = DRIFT_MARGIN_USD * market_lev
-                    margin     = DRIFT_MARGIN_USD
+
+                    # ── Confidence-scaled position sizing ─────────────────
+                    # conf=1 (base): 50% of margin — weakest setups lose less
+                    # conf=2 (RSI neutral): 75% of margin
+                    # conf=3 (fresh flip): 100% of margin — highest conviction
+                    conf_scale = {1: 0.50, 2: 0.75, 3: 1.00}.get(confidence, 1.00)
+                    margin     = round(DRIFT_MARGIN_USD * conf_scale, 2)
+                    size_usd   = margin * market_lev
 
                     log("ok",
-                        f"SIGNAL {signal.upper()} conf={confidence}/4 lev={market_lev}x "
+                        f"SIGNAL {signal.upper()} conf={confidence}/3 lev={market_lev}x "
                         f"margin=${margin:.0f} notional=${size_usd:.0f} "
                         f"SL={sl_pct*100:.2f}% TP={tp_pct*100:.2f}%", market)
 
