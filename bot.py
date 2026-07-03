@@ -3418,108 +3418,6 @@ function closeModal(e) {{
 }}
 
 document.addEventListener('keydown', e => {{ if(e.key==='Escape') closeModal(); }});
-
-// ── Inline card accordion ─────────────────────────────────
-let _exMint=null;
-const _cvData={{}};
-function _fmtS(s){{if(s<60)return Math.round(s)+'s';if(s<3600)return Math.round(s/60)+'m';return Math.round(s/3600)+'h '+Math.round((s%3600)/60)+'m';}}
-function toggleCardExpand(mint){{
-  if(_exMint===mint){{_collapseCard(mint);}}
-  else{{if(_exMint)_collapseCard(_exMint);_openCard(mint);}}
-}}
-function _collapseCard(mint){{
-  var d=_cvData[mint];
-  if(d&&d.timer){{clearInterval(d.timer);d.timer=null;}}
-  _exMint=null;
-  if(stackExpanded&&visMints().length<2)stackExpanded=false;
-  updateStack();
-}}
-function _openCard(mint){{
-  _exMint=mint;
-  if(!_cvData[mint])_cvData[mint]={{hist:[],timer:null,fresh:true}};
-  else{{_cvData[mint].hist=[];_cvData[mint].fresh=true;}}
-  if(!stackExpanded)stackExpanded=true;
-  updateStack();
-  clearInterval(_cvData[mint].timer);
-  _fetchCard(mint);
-  _cvData[mint].timer=setInterval(function(){{_fetchCard(mint);}},3000);
-}}
-async function _fetchCard(mint){{
-  if(_exMint!==mint)return;
-  try{{
-    const r=await fetch('/positions/api');
-    const d=await r.json();
-    const pos=(d.open||[]).find(function(p){{return p.mint===mint;}});
-    if(!pos){{_collapseCard(mint);return;}}
-    const pnl=pos.pnl||0;
-    const pe=document.getElementById('pcp-pnl'+mint);
-    if(pe){{pe.textContent=(pnl>=0?'+':'')+'\$'+Math.abs(pnl).toFixed(4);pe.style.color=pnl>=0?'#39ff14':'#ff3355';}}
-    const prEl=document.getElementById('pcp-price'+mint);
-    if(prEl)prEl.textContent='\$'+(pos.price||pos.entry||0).toFixed(8);
-    const bEl=document.getElementById('pcp-bond'+mint);
-    if(bEl)bEl.textContent='bond '+(pos.bond_high||0).toFixed(1)+'%';
-    const hEl=document.getElementById('pcp-held'+mint);
-    if(hEl)hEl.textContent=_fmtS(pos.held_s||0)+' held';
-    const cd=_cvData[mint];
-    cd.hist.push(pos.price||pos.entry||0);
-    if(cd.hist.length>40)cd.hist.shift();
-    const anim=cd.fresh&&cd.hist.length>=2;
-    if(anim)cd.fresh=false;
-    _drawCard(mint,pos.entry||0,anim);
-  }}catch(e){{}}
-}}
-function _drawCard(mint,entry,animate){{
-  const cv=document.getElementById('pcp-cv'+mint);
-  if(!cv)return;
-  const w=cv.offsetWidth||320,h=72;
-  cv.width=w;cv.height=h;
-  const ctx=cv.getContext('2d');
-  const pts=(_cvData[mint]||{{}}).hist||[];
-  if(pts.length<2){{ctx.clearRect(0,0,w,h);return;}}
-  const mn=Math.min(...pts,entry),mx=Math.max(...pts,entry);
-  const pad=(mx-mn)*0.12||entry*0.001;
-  const lo=mn-pad,hi=mx+pad,rng=hi-lo||1;
-  const xx=i=>(i/(pts.length-1))*w;
-  const yy=v=>h-((v-lo)/rng)*(h-4);
-  const last=pts[pts.length-1],col=last>=entry?'#39ff14':'#ff3355';
-  const grad=ctx.createLinearGradient(0,0,0,h);
-  grad.addColorStop(0,last>=entry?'rgba(57,255,20,.22)':'rgba(255,51,85,.22)');
-  grad.addColorStop(1,'rgba(0,0,0,0)');
-  function _r(prog){{
-    ctx.clearRect(0,0,w,h);
-    ctx.strokeStyle='rgba(255,255,255,.15)';ctx.lineWidth=1;ctx.setLineDash([4,4]);
-    ctx.beginPath();ctx.moveTo(0,yy(entry));ctx.lineTo(w,yy(entry));ctx.stroke();ctx.setLineDash([]);
-    ctx.save();
-    ctx.beginPath();ctx.rect(0,0,xx(pts.length-1)*prog+2,h);ctx.clip();
-    ctx.beginPath();ctx.moveTo(xx(0),yy(pts[0]));
-    pts.forEach(function(v,i){{if(i>0)ctx.lineTo(xx(i),yy(v));}});
-    ctx.lineTo(w,h);ctx.lineTo(0,h);ctx.closePath();ctx.fillStyle=grad;ctx.fill();
-    ctx.beginPath();ctx.moveTo(xx(0),yy(pts[0]));
-    for(let i=1;i<pts.length;i++){{const cx=xx(i-.5);ctx.bezierCurveTo(cx,yy(pts[i-1]),cx,yy(pts[i]),xx(i),yy(pts[i]));}}
-    ctx.strokeStyle=col;ctx.lineWidth=2;ctx.lineJoin='round';ctx.stroke();
-    ctx.restore();
-    if(prog>=1){{
-      const lx=xx(pts.length-1),ly=yy(last);
-      ctx.beginPath();ctx.arc(lx,ly,4,0,Math.PI*2);
-      ctx.fillStyle=col;ctx.shadowColor=col;ctx.shadowBlur=12;ctx.fill();ctx.shadowBlur=0;
-    }}
-  }}
-  if(animate){{
-    let start=null;const dur=500;
-    function step(ts){{if(!start)start=ts;const p=Math.min((ts-start)/dur,1);_r(1-(1-p)*(1-p)*(1-p));if(p<1)requestAnimationFrame(step);}}
-    requestAnimationFrame(step);
-  }}else{{_r(1);}}
-}}
-async function lvAct(mint,action){{
-  let url,body=null;
-  if(action==='close')url='/position/'+mint+'/close';
-  else if(action==='tp'){{url='/position/'+mint+'/tp';body={{fraction:0.4,label:'TP1'}};}}
-  else if(action==='add'){{url='/position/'+mint+'/compound';body={{amount:5}};}}
-  try{{
-    await fetch(url,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:body?JSON.stringify(body):null}});
-    if(action==='close')_collapseCard(mint);else _fetchCard(mint);
-  }}catch(e){{}}
-}}
 </script>
 
 </body></html>"""
@@ -3945,6 +3843,107 @@ function dismissCard(mint){
   var h=card.offsetHeight;void card.offsetHeight;card.style.height=h+'px';
   requestAnimationFrame(function(){card.style.height='0';card.style.opacity='0';card.style.overflow='hidden';});
   setTimeout(function(){card.style.display='none';dismissed.add(mint);if(visMints().length<2&&stackExpanded)stackExpanded=false;updateStack();},400);
+}
+// ── Inline card accordion ─────────────────────────────────
+let _exMint=null;
+const _cvData={};
+function _fmtS(s){if(s<60)return Math.round(s)+'s';if(s<3600)return Math.round(s/60)+'m';return Math.round(s/3600)+'h '+Math.round((s%3600)/60)+'m';}
+function toggleCardExpand(mint){
+  if(_exMint===mint){_collapseCard(mint);}
+  else{if(_exMint)_collapseCard(_exMint);_openCard(mint);}
+}
+function _collapseCard(mint){
+  var d=_cvData[mint];
+  if(d&&d.timer){clearInterval(d.timer);d.timer=null;}
+  _exMint=null;
+  if(stackExpanded&&visMints().length<2)stackExpanded=false;
+  updateStack();
+}
+function _openCard(mint){
+  _exMint=mint;
+  if(!_cvData[mint])_cvData[mint]={hist:[],timer:null,fresh:true};
+  else{_cvData[mint].hist=[];_cvData[mint].fresh=true;}
+  if(!stackExpanded)stackExpanded=true;
+  updateStack();
+  clearInterval(_cvData[mint].timer);
+  _fetchCard(mint);
+  _cvData[mint].timer=setInterval(function(){_fetchCard(mint);},3000);
+}
+async function _fetchCard(mint){
+  if(_exMint!==mint)return;
+  try{
+    const r=await fetch('/positions/api');
+    const d=await r.json();
+    const pos=(d.open||[]).find(function(p){return p.mint===mint;});
+    if(!pos){_collapseCard(mint);return;}
+    const pnl=pos.pnl||0;
+    const pe=document.getElementById('pcp-pnl'+mint);
+    if(pe){pe.textContent=(pnl>=0?'+':'')+'$'+Math.abs(pnl).toFixed(4);pe.style.color=pnl>=0?'#39ff14':'#ff3355';}
+    const prEl=document.getElementById('pcp-price'+mint);
+    if(prEl)prEl.textContent='$'+(pos.price||pos.entry||0).toFixed(8);
+    const bEl=document.getElementById('pcp-bond'+mint);
+    if(bEl)bEl.textContent='bond '+(pos.bond_high||0).toFixed(1)+'%';
+    const hEl=document.getElementById('pcp-held'+mint);
+    if(hEl)hEl.textContent=_fmtS(pos.held_s||0)+' held';
+    const cd=_cvData[mint];
+    cd.hist.push(pos.price||pos.entry||0);
+    if(cd.hist.length>40)cd.hist.shift();
+    const anim=cd.fresh&&cd.hist.length>=2;
+    if(anim)cd.fresh=false;
+    _drawCard(mint,pos.entry||0,anim);
+  }catch(e){}
+}
+function _drawCard(mint,entry,animate){
+  const cv=document.getElementById('pcp-cv'+mint);
+  if(!cv)return;
+  const w=cv.offsetWidth||320,h=72;
+  cv.width=w;cv.height=h;
+  const ctx=cv.getContext('2d');
+  const pts=(_cvData[mint]||{}).hist||[];
+  if(pts.length<2){ctx.clearRect(0,0,w,h);return;}
+  const mn=Math.min(...pts,entry),mx=Math.max(...pts,entry);
+  const pad=(mx-mn)*0.12||entry*0.001;
+  const lo=mn-pad,hi=mx+pad,rng=hi-lo||1;
+  const xx=i=>(i/(pts.length-1))*w;
+  const yy=v=>h-((v-lo)/rng)*(h-4);
+  const last=pts[pts.length-1],col=last>=entry?'#39ff14':'#ff3355';
+  const grad=ctx.createLinearGradient(0,0,0,h);
+  grad.addColorStop(0,last>=entry?'rgba(57,255,20,.22)':'rgba(255,51,85,.22)');
+  grad.addColorStop(1,'rgba(0,0,0,0)');
+  function _r(prog){
+    ctx.clearRect(0,0,w,h);
+    ctx.strokeStyle='rgba(255,255,255,.15)';ctx.lineWidth=1;ctx.setLineDash([4,4]);
+    ctx.beginPath();ctx.moveTo(0,yy(entry));ctx.lineTo(w,yy(entry));ctx.stroke();ctx.setLineDash([]);
+    ctx.save();
+    ctx.beginPath();ctx.rect(0,0,xx(pts.length-1)*prog+2,h);ctx.clip();
+    ctx.beginPath();ctx.moveTo(xx(0),yy(pts[0]));
+    pts.forEach(function(v,i){if(i>0)ctx.lineTo(xx(i),yy(v));});
+    ctx.lineTo(w,h);ctx.lineTo(0,h);ctx.closePath();ctx.fillStyle=grad;ctx.fill();
+    ctx.beginPath();ctx.moveTo(xx(0),yy(pts[0]));
+    for(let i=1;i<pts.length;i++){const cx=xx(i-.5);ctx.bezierCurveTo(cx,yy(pts[i-1]),cx,yy(pts[i]),xx(i),yy(pts[i]));}
+    ctx.strokeStyle=col;ctx.lineWidth=2;ctx.lineJoin='round';ctx.stroke();
+    ctx.restore();
+    if(prog>=1){
+      const lx=xx(pts.length-1),ly=yy(last);
+      ctx.beginPath();ctx.arc(lx,ly,4,0,Math.PI*2);
+      ctx.fillStyle=col;ctx.shadowColor=col;ctx.shadowBlur=12;ctx.fill();ctx.shadowBlur=0;
+    }
+  }
+  if(animate){
+    let start=null;const dur=500;
+    function step(ts){if(!start)start=ts;const p=Math.min((ts-start)/dur,1);_r(1-(1-p)*(1-p)*(1-p));if(p<1)requestAnimationFrame(step);}
+    requestAnimationFrame(step);
+  }else{_r(1);}
+}
+async function lvAct(mint,action){
+  let url,body=null;
+  if(action==='close')url='/position/'+mint+'/close';
+  else if(action==='tp'){url='/position/'+mint+'/tp';body={fraction:0.4,label:'TP1'};}
+  else if(action==='add'){url='/position/'+mint+'/compound';body={amount:5};}
+  try{
+    await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):null});
+    if(action==='close')_collapseCard(mint);else _fetchCard(mint);
+  }catch(e){}
 }
 setInterval(function(){Object.keys(posTimers).forEach(function(m){if(dismissed.has(m))return;posTimers[m]+=1;var c=posCards[m];if(c&&c.timeEl)c.timeEl.textContent=fmt(posTimers[m]);});},1000);
 
