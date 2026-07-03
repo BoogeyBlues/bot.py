@@ -3861,7 +3861,9 @@ function toggleCardDrop(mint){
   clearInterval(_cvData[mint].timer);
   _fetchDrop(mint);
   _cvData[mint].timer=setInterval(function(){_fetchDrop(mint);},3000);
-  document.getElementById('lv-drop').style.maxHeight='420px';
+  var drop=document.getElementById('lv-drop');
+  // Use scrollHeight for exact fit; fall back to 400px before data loads
+  drop.style.maxHeight=(drop.scrollHeight||400)+'px';
 }
 function _closeDrop(){
   if(_exMint&&_cvData[_exMint]){clearInterval(_cvData[_exMint].timer);_cvData[_exMint].timer=null;}
@@ -3873,7 +3875,7 @@ async function _fetchDrop(mint){
   try{
     const r=await fetch('/positions/api');
     const d=await r.json();
-    const pos=(d.open||[]).find(function(p){return p.mint===mint;});
+    const pos=(d.positions||[]).find(function(p){return p.mint===mint;});
     if(!pos){_closeDrop();return;}
     const pnl=pos.pnl||0;
     const pe=document.getElementById('lvd-pnl');
@@ -3883,13 +3885,17 @@ async function _fetchDrop(mint){
     const bEl=document.getElementById('lvd-bond');
     if(bEl)bEl.textContent='bond '+(pos.bond_high||0).toFixed(1)+'%';
     const hEl=document.getElementById('lvd-held');
-    if(hEl)hEl.textContent='held '+_fmtS(pos.held_s||0);
+    var heldS=pos.opened_at?Math.round(Date.now()/1000-pos.opened_at):0;
+    if(hEl)hEl.textContent='held '+_fmtS(heldS);
     const cd=_cvData[mint];
     cd.hist.push(pos.price||pos.entry||0);
     if(cd.hist.length>40)cd.hist.shift();
     const anim=cd.fresh&&cd.hist.length>=2;
     if(anim)cd.fresh=false;
     _drawDrop(pos.entry||0,anim);
+    // Re-fit height now that content is populated
+    var drop=document.getElementById('lv-drop');
+    if(drop.style.maxHeight!=='0px')drop.style.maxHeight=drop.scrollHeight+'px';
   }catch(e){}
 }
 function _drawDrop(entry,animate){
