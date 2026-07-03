@@ -3871,12 +3871,22 @@ function makePos(t){
       '</div>'+
       '<canvas id="pcp-cv'+mint+'" height="72" style="width:100%;display:block;border-radius:8px;background:rgba(0,0,0,.35)"></canvas>'+
       '<div class="pc-act-grid">'+
-        '<button class="pc-act-btn" onclick="lvAct(\''+mint+'\',\'close\')" style="background:rgba(255,51,85,.1);color:#ff3355;border:1px solid rgba(255,51,85,.25)"><span class="ico">&#x2715;</span>CLOSE</button>'+
-        '<button class="pc-act-btn" onclick="lvAct(\''+mint+'\',\'tp\')" style="background:rgba(255,238,0,.08);color:#ffee00;border:1px solid rgba(255,238,0,.22)"><span class="ico">&#x1F4B0;</span>TAKE TP</button>'+
-        '<button class="pc-act-btn" onclick="lvAct(\''+mint+'\',\'add\')" style="background:rgba(0,229,255,.08);color:#00e5ff;border:1px solid rgba(0,229,255,.22)"><span class="ico">&#xFF0B;</span>ADD</button>'+
+        '<button class="pc-act-btn" data-act="close" style="background:rgba(255,51,85,.1);color:#ff3355;border:1px solid rgba(255,51,85,.25)"><span class="ico">&#x2715;</span>CLOSE</button>'+
+        '<button class="pc-act-btn" data-act="tp" style="background:rgba(255,238,0,.08);color:#ffee00;border:1px solid rgba(255,238,0,.22)"><span class="ico">&#x1F4B0;</span>TAKE TP</button>'+
+        '<button class="pc-act-btn" data-act="add" style="background:rgba(0,229,255,.08);color:#00e5ff;border:1px solid rgba(0,229,255,.22)"><span class="ico">&#xFF0B;</span>ADD</button>'+
       '</div>'+
     '</div>';
   posWrap.appendChild(el);
+  // wire action buttons — avoids any quote-escaping in inline onclick
+  (function(m){
+    el.querySelectorAll('[data-act]').forEach(function(btn){
+      btn.addEventListener('touchend',function(e){e.stopPropagation();},{passive:true});
+      btn.onclick=function(e){e.stopPropagation();lvAct(m,btn.dataset.act);};
+    });
+    // prevent panel taps from bubbling up to the card swipe handler
+    var pnl=el.querySelector('.pc-panel');
+    if(pnl)pnl.addEventListener('touchend',function(e){e.stopPropagation();},{passive:true});
+  })(mint);
   posCards[mint]={card:el,timeEl:document.getElementById('pct'+mint)};
   posTimers[mint]=t.elapsed_s;
   initSwipe(el,mint);
