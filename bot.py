@@ -343,6 +343,9 @@ def _save_daily_state():
     except Exception:
         pass
     redis_save("bot_state", state)
+    # Persist open positions so they survive restarts
+    with trades_lock:
+        redis_save("bot_open_trades", list(open_trades.values()))
 
 def _load_daily_state():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses
@@ -390,6 +393,16 @@ def _load_daily_state():
         completed_trades.clear()
         completed_trades.extend(trades_data)
         log("ok", f"Reloaded {len(completed_trades)} completed trades")
+
+    # Restore open positions so bot doesn't re-buy after crash/redeploy
+    saved_open = redis_load("bot_open_trades")
+    if saved_open:
+        with trades_lock:
+            for t in saved_open:
+                mint = t.get("mint")
+                if mint and mint not in open_trades:
+                    open_trades[mint] = t
+        log("ok", f"Restored {len(saved_open)} open position(s) from Redis")
 
 def _reset_daily_if_needed():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses, _pause_until
@@ -1417,6 +1430,9 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
     _log_scan(symbol, mint, bond_entry, 0, "pass", -1, f"ENTERED [{strategy.upper()}] ${amount:.2f}")
     notify(f"🟢 BUY {symbol}",
            f"Strategy: {strategy.upper()}\nAmount: ${amount:.2f}\nBond: {bond_entry:.1f}%\nReplies: {replies}")
+    # Persist immediately so restart won't re-buy this position
+    with trades_lock:
+        redis_save("bot_open_trades", list(open_trades.values()))
     return True
 
 def exit_trade(mint, price, reason, bond=0):
@@ -3845,7 +3861,7 @@ function toggleCardDrop(mint){
   clearInterval(_cvData[mint].timer);
   _fetchDrop(mint);
   _cvData[mint].timer=setInterval(function(){_fetchDrop(mint);},3000);
-  document.getElementById('lv-drop').style.maxHeight='300px';
+  document.getElementById('lv-drop').style.maxHeight='420px';
 }
 function _closeDrop(){
   if(_exMint&&_cvData[_exMint]){clearInterval(_cvData[_exMint].timer);_cvData[_exMint].timer=null;}
