@@ -3418,7 +3418,109 @@ function closeModal(e) {{
 }}
 
 document.addEventListener('keydown', e => {{ if(e.key==='Escape') closeModal(); }});
+
+// ── Position detail drawer ────────────────────────────────
+const _lv={{mint:null,timer:null,hist:[]}};
+function _fmtS(s){{if(s<60)return Math.round(s)+'s';if(s<3600)return Math.round(s/60)+'m';return Math.round(s/3600)+'h '+Math.round((s%3600)/60)+'m';}}
+function openPosMini(mint){{
+  _lv.mint=mint;_lv.hist=[];
+  document.getElementById('lv-backdrop').style.display='block';
+  document.getElementById('lv-drawer').style.display='block';
+  fetchLvPos();
+  clearInterval(_lv.timer);
+  _lv.timer=setInterval(fetchLvPos,3000);
+}}
+function closeLvDrawer(){{
+  clearInterval(_lv.timer);_lv.mint=null;
+  document.getElementById('lv-backdrop').style.display='none';
+  document.getElementById('lv-drawer').style.display='none';
+}}
+async function fetchLvPos(){{
+  if(!_lv.mint)return;
+  try{{
+    const r=await fetch('/positions/api');
+    const d=await r.json();
+    const pos=(d.open||[]).find(p=>p.mint===_lv.mint);
+    if(!pos){{closeLvDrawer();return;}}
+    const pnl=pos.pnl||0;
+    document.getElementById('lv-sym').textContent=pos.symbol||'—';
+    document.getElementById('lv-badge').textContent=(pos.strategy||'?').toUpperCase();
+    document.getElementById('lv-held').textContent=_fmtS(pos.held_s||0);
+    const pe=document.getElementById('lv-pnl');
+    pe.textContent=(pnl>=0?'+':'')+'\$'+Math.abs(pnl).toFixed(4);
+    pe.style.color=pnl>=0?'#39ff14':'#ff3355';
+    document.getElementById('lv-price').textContent='\$'+(pos.price||pos.entry||0).toFixed(8);
+    document.getElementById('lv-bond').textContent=(pos.bond_high||0).toFixed(1)+'%';
+    _lv.hist.push(pos.price||pos.entry||0);
+    if(_lv.hist.length>40)_lv.hist.shift();
+    _drawLvChart(pos.entry||0);
+  }}catch(e){{}}
+}}
+function _drawLvChart(entry){{
+  const cv=document.getElementById('lv-chart');
+  const w=cv.offsetWidth||360,h=88;cv.width=w;cv.height=h;
+  const ctx=cv.getContext('2d');ctx.clearRect(0,0,w,h);
+  const pts=_lv.hist;if(pts.length<2)return;
+  const mn=Math.min(...pts,entry),mx=Math.max(...pts,entry);
+  const pad=(mx-mn)*0.1||entry*0.001;
+  const lo=mn-pad,hi=mx+pad,rng=hi-lo;
+  const x=i=>(i/(pts.length-1))*w,y=v=>h-((v-lo)/rng)*h;
+  ctx.strokeStyle='rgba(0,229,255,.18)';ctx.lineWidth=1;ctx.setLineDash([4,4]);
+  ctx.beginPath();ctx.moveTo(0,y(entry));ctx.lineTo(w,y(entry));ctx.stroke();ctx.setLineDash([]);
+  const last=pts[pts.length-1],col=last>=entry?'#39ff14':'#ff3355';
+  const grad=ctx.createLinearGradient(0,0,0,h);
+  grad.addColorStop(0,last>=entry?'rgba(57,255,20,.18)':'rgba(255,51,85,.18)');
+  grad.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.beginPath();ctx.moveTo(x(0),y(pts[0]));
+  pts.forEach((v,i)=>i>0&&ctx.lineTo(x(i),y(v)));
+  ctx.lineTo(w,h);ctx.lineTo(0,h);ctx.closePath();ctx.fillStyle=grad;ctx.fill();
+  ctx.beginPath();ctx.moveTo(x(0),y(pts[0]));
+  pts.forEach((v,i)=>i>0&&ctx.lineTo(x(i),y(v)));
+  ctx.strokeStyle=col;ctx.lineWidth=2;ctx.stroke();
+}}
+async function lvAction(action){{
+  const mint=_lv.mint;if(!mint)return;
+  let url,body=null;
+  if(action==='close')url=`/position/${{mint}}/close`;
+  else if(action==='tp'){{url=`/position/${{mint}}/tp`;body={{fraction:0.4,label:'TP1'}};}}
+  else if(action==='add'){{url=`/position/${{mint}}/compound`;body={{amount:5}};}}
+  try{{
+    await fetch(url,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:body?JSON.stringify(body):null}});
+    if(action==='close')closeLvDrawer();else fetchLvPos();
+  }}catch(e){{}}
+}}
 </script>
+
+<!-- position detail drawer -->
+<div id="lv-backdrop" onclick="closeLvDrawer()" style="display:none;position:fixed;inset:0;background:#000000b8;z-index:80;backdrop-filter:blur(4px)"></div>
+<div id="lv-drawer" style="display:none;position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;background:#080f1e;border-radius:20px 20px 0 0;border-top:1px solid rgba(0,229,255,.18);z-index:81;font-family:'JetBrains Mono',monospace">
+  <div style="display:flex;justify-content:center;padding:10px 0 4px"><div style="width:36px;height:4px;border-radius:2px;background:rgba(0,229,255,.15)"></div></div>
+  <div style="padding:12px 18px 8px;display:flex;justify-content:space-between;align-items:center">
+    <div>
+      <div id="lv-sym" style="font-size:1.5rem;font-weight:800;color:#00e5ff;letter-spacing:.02em;line-height:1">—</div>
+      <div style="display:flex;gap:6px;margin-top:5px;align-items:center">
+        <span id="lv-badge" style="font-size:.6rem;font-weight:700;letter-spacing:.08em;padding:2px 8px;border-radius:4px;background:rgba(0,229,255,.1);color:#00e5ff;border:1px solid rgba(0,229,255,.25)">—</span>
+        <span id="lv-held" style="font-size:.6rem;color:#4a6080;letter-spacing:.04em">—</span>
+      </div>
+    </div>
+    <div style="text-align:right">
+      <div id="lv-pnl" style="font-size:1.85rem;font-weight:800;line-height:1;letter-spacing:-.01em;font-family:'JetBrains Mono',monospace">—</div>
+      <div style="font-size:.58rem;color:#4a6080;margin-top:4px"><span id="lv-price">—</span> &nbsp;·&nbsp; <span id="lv-bond">—</span> bond</div>
+    </div>
+  </div>
+  <canvas id="lv-chart" height="88" style="display:block;width:calc(100% - 28px);margin:4px 14px 10px;border-radius:10px;background:rgba(0,0,0,.3)"></canvas>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;padding:0 14px 20px">
+    <button onclick="lvAction('close')" style="background:rgba(255,51,85,.1);color:#ff3355;border:1px solid rgba(255,51,85,.25);border-radius:10px;padding:14px 6px 10px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:5px;font-family:'JetBrains Mono',monospace;font-weight:700;transition:all .12s">
+      <span style="font-size:1.1rem">✕</span><span style="font-size:.75rem;letter-spacing:.06em">CLOSE</span><span style="font-size:.52rem;opacity:.5">full exit</span>
+    </button>
+    <button onclick="lvAction('tp')" style="background:rgba(255,238,0,.08);color:#ffee00;border:1px solid rgba(255,238,0,.22);border-radius:10px;padding:14px 6px 10px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:5px;font-family:'JetBrains Mono',monospace;font-weight:700;transition:all .12s">
+      <span style="font-size:1.1rem">💰</span><span style="font-size:.75rem;letter-spacing:.06em">TAKE TP</span><span style="font-size:.52rem;opacity:.5">40% out</span>
+    </button>
+    <button onclick="lvAction('add')" style="background:rgba(0,229,255,.08);color:#00e5ff;border:1px solid rgba(0,229,255,.22);border-radius:10px;padding:14px 6px 10px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:5px;font-family:'JetBrains Mono',monospace;font-weight:700;transition:all .12s">
+      <span style="font-size:1.1rem">＋</span><span style="font-size:.75rem;letter-spacing:.06em">ADD</span><span style="font-size:.52rem;opacity:.5">compound</span>
+    </button>
+  </div>
+</div>
 </body></html>"""
     return html, 200
 
@@ -3787,7 +3889,7 @@ function initSwipe(card,mint){
   },{passive:false});
   card.addEventListener('touchend',function(e){
     var dx=e.changedTouches[0].clientX-sx;
-    if(!moved||isH===null){snap();if(!stackExpanded)toggleExpand();return;}
+    if(!moved||isH===null){snap();if(!stackExpanded)toggleExpand();else openPosMini(mint);return;}
     if(!isH){snap();return;}
     if(dx<-80){
       inner.style.transition='transform .28s ease';inner.style.transform='translateX(-110%)';bg.style.opacity='1';
