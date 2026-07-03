@@ -2240,7 +2240,8 @@ def _home_inner():
     open_rows = ""
     for t in open_list:
         elapsed = round((time.time() - t.get("opened_at", time.time())) / 60, 1)
-        open_rows += (f'<tr>'
+        _mint = t.get("mint", "")
+        open_rows += (f'<tr class="open-trade-row" data-mint="{_mint}" onclick="openPosMini(this)" style="cursor:pointer">'
                       f'<td class="sym">{t.get("symbol","?")}</td>'
                       f'<td><span class="badge badge-strategy">{t.get("strategy","?").upper()}</span></td>'
                       f'<td class="gold">${t.get("amount",0):.2f}</td>'
@@ -2506,6 +2507,36 @@ def _home_inner():
     <a href="https://github.com/BoogeyBlues/bot.py" target="_blank" style="color:var(--gold);text-decoration:none">GitHub ↗</a>
   </footer>
 
+<!-- ── Position mini-drawer ─────────────────────────── -->
+<div id="pm-backdrop" onclick="closeMiniDrawer()" style="display:none;position:fixed;inset:0;background:#000000b8;z-index:50;backdrop-filter:blur(3px)"></div>
+<div id="pm-drawer" style="display:none;position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;background:#10101a;border-radius:20px 20px 0 0;border-top:1px solid #ffffff0d;z-index:51;padding:0 0 env(safe-area-inset-bottom,16px)">
+  <div style="display:flex;justify-content:center;padding:10px 0 4px"><div style="width:36px;height:4px;border-radius:2px;background:#ffffff14"></div></div>
+  <div style="padding:12px 18px 6px;display:flex;justify-content:space-between;align-items:center">
+    <div>
+      <div id="pm-sym" style="font-size:1.5rem;font-weight:800;letter-spacing:-.01em;line-height:1">—</div>
+      <div style="display:flex;gap:6px;margin-top:4px;align-items:center">
+        <span id="pm-badge" style="font-size:.6rem;font-weight:700;letter-spacing:.06em;padding:2px 7px;border-radius:5px;background:#60a5fa18;color:#60a5fa;border:1px solid #60a5fa30;text-transform:uppercase">—</span>
+        <span id="pm-held" style="font-size:.6rem;color:#5a5a7a">—</span>
+      </div>
+    </div>
+    <div style="text-align:right">
+      <div id="pm-pnl" style="font-size:1.8rem;font-weight:800;line-height:1;letter-spacing:-.02em">—</div>
+      <div style="font-size:.58rem;color:#5a5a7a;margin-top:3px"><span id="pm-price">—</span> &nbsp;·&nbsp; <span id="pm-bond">—</span> bond</div>
+    </div>
+  </div>
+  <canvas id="pm-chart" height="80" style="display:block;width:calc(100% - 28px);margin:6px 14px 8px;border-radius:10px"></canvas>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;padding:0 14px 14px">
+    <button onclick="miniAction('close')" style="background:#f8717114;color:#f87171;border:1px solid #f8717130;border-radius:12px;padding:14px 6px 10px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:4px;font-family:inherit;transition:all .13s">
+      <span style="font-size:1.1rem">✕</span><span style="font-size:.8rem;font-weight:700;letter-spacing:.04em">CLOSE</span><span style="font-size:.52rem;color:#f8717180">full exit</span>
+    </button>
+    <button onclick="miniAction('tp')" style="background:#f5c54214;color:#f5c542;border:1px solid #f5c54230;border-radius:12px;padding:14px 6px 10px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:4px;font-family:inherit;transition:all .13s">
+      <span style="font-size:1.1rem">💰</span><span style="font-size:.8rem;font-weight:700;letter-spacing:.04em">TAKE TP</span><span style="font-size:.52rem;color:#f5c54280">40% out</span>
+    </button>
+    <button onclick="miniAction('add')" style="background:#60a5fa12;color:#60a5fa;border:1px solid #60a5fa28;border-radius:12px;padding:14px 6px 10px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:4px;font-family:inherit;transition:all .13s">
+      <span style="font-size:1.1rem">＋</span><span style="font-size:.8rem;font-weight:700;letter-spacing:.04em">ADD</span><span style="font-size:.52rem;color:#60a5fa80">compound</span>
+    </button>
+  </div>
+</div>
 </div>
 <script>
 const data = {cap_json};
@@ -2537,6 +2568,100 @@ new Chart(document.getElementById('capChart'), {{
     }}
   }}
 }});
+
+// ── Position mini-drawer ─────────────────────────────────
+const _pm = {{mint:null,timer:null,hist:[],chartObj:null}};
+
+function _fmtHeld(s){{
+  if(s<60) return Math.round(s)+'s';
+  if(s<3600) return Math.round(s/60)+'m';
+  return Math.round(s/3600)+'h '+Math.round((s%3600)/60)+'m';
+}}
+
+function openPosMini(row){{
+  _pm.mint = row.dataset.mint;
+  document.querySelector('meta[http-equiv="refresh"]')?.remove();
+  document.getElementById('pm-backdrop').style.display='block';
+  const d=document.getElementById('pm-drawer');
+  d.style.display='block';
+  _pm.hist=[];
+  fetchMiniPos();
+  clearInterval(_pm.timer);
+  _pm.timer=setInterval(fetchMiniPos,3000);
+}}
+
+function closeMiniDrawer(){{
+  clearInterval(_pm.timer);
+  _pm.mint=null;
+  document.getElementById('pm-backdrop').style.display='none';
+  document.getElementById('pm-drawer').style.display='none';
+}}
+
+async function fetchMiniPos(){{
+  if(!_pm.mint) return;
+  try{{
+    const r=await fetch('/positions/api');
+    const d=await r.json();
+    const pos=(d.open||[]).find(p=>p.mint===_pm.mint);
+    if(!pos){{closeMiniDrawer();return;}}
+    const pnl=pos.pnl||0;
+    document.getElementById('pm-sym').textContent=pos.symbol||'—';
+    document.getElementById('pm-badge').textContent=(pos.strategy||'?').toUpperCase();
+    document.getElementById('pm-held').textContent=_fmtHeld(pos.held_s||0);
+    const pe=document.getElementById('pm-pnl');
+    pe.textContent=(pnl>=0?'+':'')+'\$'+Math.abs(pnl).toFixed(4);
+    pe.style.color=pnl>=0?'#4ade80':'#f87171';
+    document.getElementById('pm-price').textContent='\$'+(pos.price||pos.entry||0).toFixed(8);
+    document.getElementById('pm-bond').textContent=(pos.bond_high||0).toFixed(1)+'%';
+    _pm.hist.push(pos.price||pos.entry||0);
+    if(_pm.hist.length>40)_pm.hist.shift();
+    _drawMiniChart(pos.entry||0);
+  }}catch(e){{}}
+}}
+
+function _drawMiniChart(entry){{
+  const cv=document.getElementById('pm-chart');
+  const w=cv.offsetWidth||360,h=80;
+  cv.width=w;cv.height=h;
+  const ctx=cv.getContext('2d');
+  ctx.clearRect(0,0,w,h);
+  const pts=_pm.hist;
+  if(pts.length<2) return;
+  const mn=Math.min(...pts,entry),mx=Math.max(...pts,entry);
+  const pad=(mx-mn)*0.1||entry*0.001;
+  const lo=mn-pad,hi=mx+pad,rng=hi-lo;
+  const x=i=>(i/(pts.length-1))*w;
+  const y=v=>h-((v-lo)/rng)*h;
+  ctx.strokeStyle='#ffffff20';ctx.lineWidth=1;ctx.setLineDash([4,4]);
+  ctx.beginPath();ctx.moveTo(0,y(entry));ctx.lineTo(w,y(entry));ctx.stroke();
+  ctx.setLineDash([]);
+  const last=pts[pts.length-1];
+  const col=last>=entry?'#4ade80':'#f87171';
+  const grad=ctx.createLinearGradient(0,0,0,h);
+  grad.addColorStop(0,last>=entry?'rgba(74,222,128,.18)':'rgba(248,113,113,.18)');
+  grad.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.beginPath();ctx.moveTo(x(0),y(pts[0]));
+  pts.forEach((v,i)=>i>0&&ctx.lineTo(x(i),y(v)));
+  ctx.lineTo(w,h);ctx.lineTo(0,h);ctx.closePath();
+  ctx.fillStyle=grad;ctx.fill();
+  ctx.beginPath();ctx.moveTo(x(0),y(pts[0]));
+  pts.forEach((v,i)=>i>0&&ctx.lineTo(x(i),y(v)));
+  ctx.strokeStyle=col;ctx.lineWidth=2;ctx.stroke();
+}}
+
+async function miniAction(action){{
+  const mint=_pm.mint;
+  if(!mint) return;
+  let url,body=null;
+  if(action==='close') url=`/position/${{mint}}/close`;
+  else if(action==='tp'){{url=`/position/${{mint}}/tp`;body={{fraction:0.4,label:'TP1'}};}}
+  else if(action==='add'){{url=`/position/${{mint}}/compound`;body={{amount:5}};}}
+  try{{
+    await fetch(url,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:body?JSON.stringify(body):undefined}});
+    if(action==='close') closeMiniDrawer();
+    else fetchMiniPos();
+  }}catch(e){{}}
+}}
 </script>
 </body></html>"""
     return html, 200
@@ -5426,6 +5551,14 @@ nav.topnav{{height:56px;background:var(--surface);border-bottom:1px solid var(--
 .toast.tok-success{{border-color:var(--green);color:var(--green)}}
 .toast.tok-error{{border-color:var(--red);color:var(--red)}}
 .toast.tok-info{{border-color:var(--cyan);color:var(--cyan)}}
+.page-nav{{display:flex;gap:6px;padding:8px 14px;overflow-x:auto;flex-shrink:0;
+  border-bottom:1px solid var(--border);position:relative;z-index:1;background:var(--surface)}}
+.page-nav::-webkit-scrollbar{{display:none}}
+.pn-link{{color:var(--muted);font-size:.7rem;font-weight:600;text-decoration:none;
+  padding:5px 12px;border-radius:8px;border:1px solid var(--border);
+  background:var(--surface2);white-space:nowrap;transition:all .18s;flex-shrink:0}}
+.pn-link:active,.pn-link:hover{{color:var(--gold);border-color:#f5c54244;background:#f5c54210}}
+.pn-link.cur{{color:var(--gold);border-color:#f5c54244;background:#f5c54214;font-weight:700}}
 </style>
 </head>
 <body>
@@ -5438,6 +5571,16 @@ nav.topnav{{height:56px;background:var(--surface);border-bottom:1px solid var(--
   </div>
   <div class="mode-pill"><span class="dot"></span>{mode}</div>
 </nav>
+<div class="page-nav">
+  <a href="/" class="pn-link">🏠 Home</a>
+  <a href="/live" class="pn-link">⚡ Live</a>
+  <a href="/positions" class="pn-link cur">📍 Positions</a>
+  <a href="/trades" class="pn-link">📋 Trades</a>
+  <a href="/status" class="pn-link">📊 Status</a>
+  <a href="/chart" class="pn-link">📈 Chart</a>
+  <a href="/learn" class="pn-link">🧠 Strategy</a>
+  <a href="/setup" class="pn-link">⚙️ Setup</a>
+</div>
 <div class="scroll" id="main-scroll">
   <div class="sec-lbl">OPEN POSITIONS <span class="count-pill" id="open-count">0</span></div>
   <div id="positions-list"></div>
