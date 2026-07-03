@@ -14,7 +14,7 @@ DRIFT_MARGIN_USD   = float(os.environ.get("DRIFT_MARGIN_USD", "400"))  # fixed m
 DRIFT_MAX_OPEN     = int(os.environ.get("DRIFT_MAX_OPEN", "5"))
 DRIFT_TP_PCT       = float(os.environ.get("DRIFT_TP_PCT", "0.20"))
 DRIFT_SL_PCT       = float(os.environ.get("DRIFT_SL_PCT", "0.05"))
-DRIFT_TRAIL_PCT    = float(os.environ.get("DRIFT_TRAIL_PCT", "0.05"))
+DRIFT_TRAIL_PCT    = float(os.environ.get("DRIFT_TRAIL_PCT", "0.015"))
 DRIFT_MARKETS      = os.environ.get("DRIFT_MARKETS", "SOL,ETH,DOGE,PEPE,WIF,BONK,POPCAT,TRUMP,XRP,AVAX")
 DRIFT_BOT_NAME     = os.environ.get("DRIFT_BOT_NAME", "Drift Sniper")
 DRIFT_PORT         = int(os.environ.get("DRIFT_PORT", "5001"))
@@ -29,7 +29,8 @@ PROFIT_GOAL        = float(os.environ.get("DRIFT_PROFIT_GOAL", "10000"))
 DRIFT_TP_USD       = float(os.environ.get("DRIFT_TP_USD",    str(DRIFT_MARGIN_USD * 2)))  # default: 2× margin
 DRIFT_SL_MARGIN_PCT = float(os.environ.get("DRIFT_SL_MARGIN_PCT", "0.75"))  # close when loss = 75% of margin
 DRIFT_TUNE_EVERY   = int(os.environ.get("DRIFT_TUNE_EVERY",   "3")) # retune after every N closed trades
-DRIFT_COMPOUND_PCT = float(os.environ.get("DRIFT_COMPOUND_PCT", "0.10"))  # % of profit reinvested
+DRIFT_COMPOUND_PCT    = float(os.environ.get("DRIFT_COMPOUND_PCT", "0.10"))  # % of profit reinvested
+DRIFT_MAX_HOLD_MINUTES = int(os.environ.get("DRIFT_MAX_HOLD_MINUTES", "30"))  # force-exit after N minutes
 REDIS_URL          = os.environ.get("UPSTASH_REDIS_REST_URL", "")
 REDIS_TOKEN        = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
 BYBIT_API_KEY      = os.environ.get("BYBIT_API_KEY", "")
@@ -1090,7 +1091,7 @@ def close_position(market, exit_price, reason=""):
     emoji = "✅" if pnl_usd >= 0 else "❌"
     log("ok" if pnl_usd >= 0 else "err",
         f"CLOSE {pos['side'].upper()} {market} @ ${exit_price:.4f} "
-        f"PnL={pnl_usd:+.2f} ({pnl_pct*100:+.1f}%) [{reason}]")
+        f"PnL={pnl_usd:+.2f} ({pnl_pct * pos['leverage'] * 100:+.1f}% lev) [{reason}]")
     if is_dollar_tp:
         notify(
             f"💰 *{DRIFT_BOT_NAME}*\n"
@@ -2529,18 +2530,23 @@ def run_position_price_updater():
                         close_position(market, price, f"LIQ-GUARD liq={liq_price:.4f}")
                         continue
 
-                # ── Dollar TP / SL ────────────────────────────────────
-                if DRIFT_TP_USD > 0 and pnl >= DRIFT_TP_USD:
-                    close_position(market, price, f"TP${DRIFT_TP_USD:.0f}")
-                elif DRIFT_SL_MARGIN_PCT > 0 and pnl <= -(updated["size"] / updated["leverage"] * DRIFT_SL_MARGIN_PCT):
-                    sl_usd = updated["size"] / updated["leverage"] * DRIFT_SL_MARGIN_PCT
-                    close_position(market, price, f"SL${sl_usd:.1f}")
-                elif (updated["side"] == "long" and price >= updated["tp"]) or \
-                     (updated["side"] == "short" and price <= updated["tp"]):
+                # ── ATR TP% / SL% — primary exits (volatility-calibrated) ──
+                if (updated["side"] == "long" and price >= updated["tp"]) or \
+                   (updated["side"] == "short" and price <= updated["tp"]):
                     close_position(market, price, "TP%")
                 elif (updated["side"] == "long" and price <= updated["sl"]) or \
                      (updated["side"] == "short" and price >= updated["sl"]):
                     close_position(market, price, "SL%")
+                # ── Dollar ceiling TP / margin SL — secondary hard limits ──
+                elif DRIFT_TP_USD > 0 and pnl >= DRIFT_TP_USD:
+                    close_position(market, price, f"TP${DRIFT_TP_USD:.0f}")
+                elif DRIFT_SL_MARGIN_PCT > 0 and pnl <= -(updated["size"] / updated["leverage"] * DRIFT_SL_MARGIN_PCT):
+                    sl_usd = updated["size"] / updated["leverage"] * DRIFT_SL_MARGIN_PCT
+                    close_position(market, price, f"SL${sl_usd:.1f}")
+                # ── Max hold time — force-exit stale positions ────────────
+                elif DRIFT_MAX_HOLD_MINUTES > 0 and \
+                     (time.time() - updated["opened_at"]) > DRIFT_MAX_HOLD_MINUTES * 60:
+                    close_position(market, price, f"TIMEOUT-{'PROFIT' if pnl > 0 else 'FLAT'}")
         except Exception as e:
             log("warn", f"Price updater error: {e}")
         time.sleep(1)
