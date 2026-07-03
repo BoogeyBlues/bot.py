@@ -3419,108 +3419,109 @@ function closeModal(e) {{
 
 document.addEventListener('keydown', e => {{ if(e.key==='Escape') closeModal(); }});
 
-// ── Position detail drawer ────────────────────────────────
-const _lv={{mint:null,timer:null,hist:[]}};
+// ── Inline card accordion ─────────────────────────────────
+let _exMint=null;
+const _cvData={{}};
 function _fmtS(s){{if(s<60)return Math.round(s)+'s';if(s<3600)return Math.round(s/60)+'m';return Math.round(s/3600)+'h '+Math.round((s%3600)/60)+'m';}}
-function openPosMini(mint){{
-  _lv.mint=mint;_lv.hist=[];
-  document.getElementById('lv-backdrop').style.display='block';
-  document.getElementById('lv-drawer').style.display='block';
-  fetchLvPos();
-  clearInterval(_lv.timer);
-  _lv.timer=setInterval(fetchLvPos,3000);
+function toggleCardExpand(mint){{
+  if(_exMint===mint){{_collapseCard(mint);}}
+  else{{if(_exMint)_collapseCard(_exMint);_openCard(mint);}}
 }}
-function closeLvDrawer(){{
-  clearInterval(_lv.timer);_lv.mint=null;
-  document.getElementById('lv-backdrop').style.display='none';
-  document.getElementById('lv-drawer').style.display='none';
+function _collapseCard(mint){{
+  var d=_cvData[mint];
+  if(d&&d.timer){{clearInterval(d.timer);d.timer=null;}}
+  _exMint=null;
+  if(stackExpanded&&visMints().length<2)stackExpanded=false;
+  updateStack();
 }}
-async function fetchLvPos(){{
-  if(!_lv.mint)return;
+function _openCard(mint){{
+  _exMint=mint;
+  if(!_cvData[mint])_cvData[mint]={{hist:[],timer:null,fresh:true}};
+  else{{_cvData[mint].hist=[];_cvData[mint].fresh=true;}}
+  if(!stackExpanded)stackExpanded=true;
+  updateStack();
+  clearInterval(_cvData[mint].timer);
+  _fetchCard(mint);
+  _cvData[mint].timer=setInterval(function(){{_fetchCard(mint);}},3000);
+}}
+async function _fetchCard(mint){{
+  if(_exMint!==mint)return;
   try{{
     const r=await fetch('/positions/api');
     const d=await r.json();
-    const pos=(d.open||[]).find(p=>p.mint===_lv.mint);
-    if(!pos){{closeLvDrawer();return;}}
+    const pos=(d.open||[]).find(function(p){{return p.mint===mint;}});
+    if(!pos){{_collapseCard(mint);return;}}
     const pnl=pos.pnl||0;
-    document.getElementById('lv-sym').textContent=pos.symbol||'—';
-    document.getElementById('lv-badge').textContent=(pos.strategy||'?').toUpperCase();
-    document.getElementById('lv-held').textContent=_fmtS(pos.held_s||0);
-    const pe=document.getElementById('lv-pnl');
-    pe.textContent=(pnl>=0?'+':'')+'\$'+Math.abs(pnl).toFixed(4);
-    pe.style.color=pnl>=0?'#39ff14':'#ff3355';
-    document.getElementById('lv-price').textContent='\$'+(pos.price||pos.entry||0).toFixed(8);
-    document.getElementById('lv-bond').textContent=(pos.bond_high||0).toFixed(1)+'%';
-    _lv.hist.push(pos.price||pos.entry||0);
-    if(_lv.hist.length>40)_lv.hist.shift();
-    _drawLvChart(pos.entry||0);
+    const pe=document.getElementById('pcp-pnl'+mint);
+    if(pe){{pe.textContent=(pnl>=0?'+':'')+'\$'+Math.abs(pnl).toFixed(4);pe.style.color=pnl>=0?'#39ff14':'#ff3355';}}
+    const prEl=document.getElementById('pcp-price'+mint);
+    if(prEl)prEl.textContent='\$'+(pos.price||pos.entry||0).toFixed(8);
+    const bEl=document.getElementById('pcp-bond'+mint);
+    if(bEl)bEl.textContent='bond '+(pos.bond_high||0).toFixed(1)+'%';
+    const hEl=document.getElementById('pcp-held'+mint);
+    if(hEl)hEl.textContent=_fmtS(pos.held_s||0)+' held';
+    const cd=_cvData[mint];
+    cd.hist.push(pos.price||pos.entry||0);
+    if(cd.hist.length>40)cd.hist.shift();
+    const anim=cd.fresh&&cd.hist.length>=2;
+    if(anim)cd.fresh=false;
+    _drawCard(mint,pos.entry||0,anim);
   }}catch(e){{}}
 }}
-function _drawLvChart(entry){{
-  const cv=document.getElementById('lv-chart');
-  const w=cv.offsetWidth||360,h=88;cv.width=w;cv.height=h;
-  const ctx=cv.getContext('2d');ctx.clearRect(0,0,w,h);
-  const pts=_lv.hist;if(pts.length<2)return;
+function _drawCard(mint,entry,animate){{
+  const cv=document.getElementById('pcp-cv'+mint);
+  if(!cv)return;
+  const w=cv.offsetWidth||320,h=72;
+  cv.width=w;cv.height=h;
+  const ctx=cv.getContext('2d');
+  const pts=(_cvData[mint]||{{}}).hist||[];
+  if(pts.length<2){{ctx.clearRect(0,0,w,h);return;}}
   const mn=Math.min(...pts,entry),mx=Math.max(...pts,entry);
-  const pad=(mx-mn)*0.1||entry*0.001;
-  const lo=mn-pad,hi=mx+pad,rng=hi-lo;
-  const x=i=>(i/(pts.length-1))*w,y=v=>h-((v-lo)/rng)*h;
-  ctx.strokeStyle='rgba(0,229,255,.18)';ctx.lineWidth=1;ctx.setLineDash([4,4]);
-  ctx.beginPath();ctx.moveTo(0,y(entry));ctx.lineTo(w,y(entry));ctx.stroke();ctx.setLineDash([]);
+  const pad=(mx-mn)*0.12||entry*0.001;
+  const lo=mn-pad,hi=mx+pad,rng=hi-lo||1;
+  const xx=i=>(i/(pts.length-1))*w;
+  const yy=v=>h-((v-lo)/rng)*(h-4);
   const last=pts[pts.length-1],col=last>=entry?'#39ff14':'#ff3355';
   const grad=ctx.createLinearGradient(0,0,0,h);
-  grad.addColorStop(0,last>=entry?'rgba(57,255,20,.18)':'rgba(255,51,85,.18)');
+  grad.addColorStop(0,last>=entry?'rgba(57,255,20,.22)':'rgba(255,51,85,.22)');
   grad.addColorStop(1,'rgba(0,0,0,0)');
-  ctx.beginPath();ctx.moveTo(x(0),y(pts[0]));
-  pts.forEach((v,i)=>i>0&&ctx.lineTo(x(i),y(v)));
-  ctx.lineTo(w,h);ctx.lineTo(0,h);ctx.closePath();ctx.fillStyle=grad;ctx.fill();
-  ctx.beginPath();ctx.moveTo(x(0),y(pts[0]));
-  pts.forEach((v,i)=>i>0&&ctx.lineTo(x(i),y(v)));
-  ctx.strokeStyle=col;ctx.lineWidth=2;ctx.stroke();
+  function _r(prog){{
+    ctx.clearRect(0,0,w,h);
+    ctx.strokeStyle='rgba(255,255,255,.15)';ctx.lineWidth=1;ctx.setLineDash([4,4]);
+    ctx.beginPath();ctx.moveTo(0,yy(entry));ctx.lineTo(w,yy(entry));ctx.stroke();ctx.setLineDash([]);
+    ctx.save();
+    ctx.beginPath();ctx.rect(0,0,xx(pts.length-1)*prog+2,h);ctx.clip();
+    ctx.beginPath();ctx.moveTo(xx(0),yy(pts[0]));
+    pts.forEach(function(v,i){{if(i>0)ctx.lineTo(xx(i),yy(v));}});
+    ctx.lineTo(w,h);ctx.lineTo(0,h);ctx.closePath();ctx.fillStyle=grad;ctx.fill();
+    ctx.beginPath();ctx.moveTo(xx(0),yy(pts[0]));
+    for(let i=1;i<pts.length;i++){{const cx=xx(i-.5);ctx.bezierCurveTo(cx,yy(pts[i-1]),cx,yy(pts[i]),xx(i),yy(pts[i]));}}
+    ctx.strokeStyle=col;ctx.lineWidth=2;ctx.lineJoin='round';ctx.stroke();
+    ctx.restore();
+    if(prog>=1){{
+      const lx=xx(pts.length-1),ly=yy(last);
+      ctx.beginPath();ctx.arc(lx,ly,4,0,Math.PI*2);
+      ctx.fillStyle=col;ctx.shadowColor=col;ctx.shadowBlur=12;ctx.fill();ctx.shadowBlur=0;
+    }}
+  }}
+  if(animate){{
+    let start=null;const dur=500;
+    function step(ts){{if(!start)start=ts;const p=Math.min((ts-start)/dur,1);_r(1-(1-p)*(1-p)*(1-p));if(p<1)requestAnimationFrame(step);}}
+    requestAnimationFrame(step);
+  }}else{{_r(1);}}
 }}
-async function lvAction(action){{
-  const mint=_lv.mint;if(!mint)return;
+async function lvAct(mint,action){{
   let url,body=null;
-  if(action==='close')url=`/position/${{mint}}/close`;
-  else if(action==='tp'){{url=`/position/${{mint}}/tp`;body={{fraction:0.4,label:'TP1'}};}}
-  else if(action==='add'){{url=`/position/${{mint}}/compound`;body={{amount:5}};}}
+  if(action==='close')url='/position/'+mint+'/close';
+  else if(action==='tp'){{url='/position/'+mint+'/tp';body={{fraction:0.4,label:'TP1'}};}}
+  else if(action==='add'){{url='/position/'+mint+'/compound';body={{amount:5}};}}
   try{{
     await fetch(url,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:body?JSON.stringify(body):null}});
-    if(action==='close')closeLvDrawer();else fetchLvPos();
+    if(action==='close')_collapseCard(mint);else _fetchCard(mint);
   }}catch(e){{}}
 }}
 </script>
 
-<!-- position detail drawer -->
-<div id="lv-backdrop" onclick="closeLvDrawer()" style="display:none;position:fixed;inset:0;background:#000000b8;z-index:80;backdrop-filter:blur(4px)"></div>
-<div id="lv-drawer" style="display:none;position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;background:#080f1e;border-radius:20px 20px 0 0;border-top:1px solid rgba(0,229,255,.18);z-index:81;font-family:'JetBrains Mono',monospace">
-  <div style="display:flex;justify-content:center;padding:10px 0 4px"><div style="width:36px;height:4px;border-radius:2px;background:rgba(0,229,255,.15)"></div></div>
-  <div style="padding:12px 18px 8px;display:flex;justify-content:space-between;align-items:center">
-    <div>
-      <div id="lv-sym" style="font-size:1.5rem;font-weight:800;color:#00e5ff;letter-spacing:.02em;line-height:1">—</div>
-      <div style="display:flex;gap:6px;margin-top:5px;align-items:center">
-        <span id="lv-badge" style="font-size:.6rem;font-weight:700;letter-spacing:.08em;padding:2px 8px;border-radius:4px;background:rgba(0,229,255,.1);color:#00e5ff;border:1px solid rgba(0,229,255,.25)">—</span>
-        <span id="lv-held" style="font-size:.6rem;color:#4a6080;letter-spacing:.04em">—</span>
-      </div>
-    </div>
-    <div style="text-align:right">
-      <div id="lv-pnl" style="font-size:1.85rem;font-weight:800;line-height:1;letter-spacing:-.01em;font-family:'JetBrains Mono',monospace">—</div>
-      <div style="font-size:.58rem;color:#4a6080;margin-top:4px"><span id="lv-price">—</span> &nbsp;·&nbsp; <span id="lv-bond">—</span> bond</div>
-    </div>
-  </div>
-  <canvas id="lv-chart" height="88" style="display:block;width:calc(100% - 28px);margin:4px 14px 10px;border-radius:10px;background:rgba(0,0,0,.3)"></canvas>
-  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;padding:0 14px 20px">
-    <button onclick="lvAction('close')" style="background:rgba(255,51,85,.1);color:#ff3355;border:1px solid rgba(255,51,85,.25);border-radius:10px;padding:14px 6px 10px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:5px;font-family:'JetBrains Mono',monospace;font-weight:700;transition:all .12s">
-      <span style="font-size:1.1rem">✕</span><span style="font-size:.75rem;letter-spacing:.06em">CLOSE</span><span style="font-size:.52rem;opacity:.5">full exit</span>
-    </button>
-    <button onclick="lvAction('tp')" style="background:rgba(255,238,0,.08);color:#ffee00;border:1px solid rgba(255,238,0,.22);border-radius:10px;padding:14px 6px 10px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:5px;font-family:'JetBrains Mono',monospace;font-weight:700;transition:all .12s">
-      <span style="font-size:1.1rem">💰</span><span style="font-size:.75rem;letter-spacing:.06em">TAKE TP</span><span style="font-size:.52rem;opacity:.5">40% out</span>
-    </button>
-    <button onclick="lvAction('add')" style="background:rgba(0,229,255,.08);color:#00e5ff;border:1px solid rgba(0,229,255,.22);border-radius:10px;padding:14px 6px 10px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:5px;font-family:'JetBrains Mono',monospace;font-weight:700;transition:all .12s">
-      <span style="font-size:1.1rem">＋</span><span style="font-size:.75rem;letter-spacing:.06em">ADD</span><span style="font-size:.52rem;opacity:.5">compound</span>
-    </button>
-  </div>
-</div>
 </body></html>"""
     return html, 200
 
@@ -3667,10 +3668,17 @@ nav::-webkit-scrollbar{display:none}
 .cbadge{font-family:'JetBrains Mono',monospace;font-size:8px;padding:2px 7px;border-radius:10px;font-weight:700;background:rgba(255,238,0,.12);color:var(--yellow);border:1px solid rgba(255,238,0,.25);transition:all .3s}
 .sec-btn{font-family:'JetBrains Mono',monospace;font-size:8px;padding:3px 9px;border:1px solid rgba(0,229,255,.25);border-radius:6px;color:var(--cyan);background:rgba(0,229,255,.07);letter-spacing:1px;cursor:pointer;-webkit-tap-highlight-color:transparent}
 .pos-stack-wrap{position:relative;transition:height .45s cubic-bezier(.22,.8,.36,1);overflow:hidden;background:var(--bg2)}
-.pos-card{position:absolute;left:14px;right:14px;height:100px;border-radius:12px;overflow:hidden;transition:top .45s cubic-bezier(.22,.8,.36,1),transform .45s cubic-bezier(.22,.8,.36,1),opacity .45s,box-shadow .3s;will-change:transform,top,opacity}
+.pos-card{position:absolute;left:14px;right:14px;height:100px;border-radius:12px;overflow:hidden;transition:top .45s cubic-bezier(.22,.8,.36,1),height .38s cubic-bezier(.22,.8,.36,1),transform .45s cubic-bezier(.22,.8,.36,1),opacity .45s,box-shadow .3s;will-change:transform,top,opacity,height}
 .pos-card.neutral-card{border:1px solid rgba(0,229,255,.2);box-shadow:0 2px 14px rgba(0,229,255,.04)}
 .pc-hide-bg{position:absolute;inset:0;background:linear-gradient(90deg,transparent 25%,rgba(0,80,100,.88));display:flex;align-items:center;justify-content:flex-end;padding-right:18px;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;letter-spacing:1px;color:#fff;opacity:0;pointer-events:none}
-.pc-inner{position:absolute;inset:0;background:var(--bg3);padding:11px 13px;display:flex;flex-direction:column;justify-content:space-between;will-change:transform}
+.pc-inner{position:absolute;top:0;left:0;right:0;height:100px;background:var(--bg3);padding:11px 13px;display:flex;flex-direction:column;justify-content:space-between;will-change:transform}
+.pc-panel{position:absolute;top:100px;left:0;right:0;bottom:0;background:var(--bg3);padding:0 13px 10px;display:flex;flex-direction:column;gap:7px;will-change:transform}
+.pc-panel-row{display:flex;justify-content:space-between;align-items:center;padding-top:7px;border-top:1px solid rgba(0,229,255,.08)}
+.pc-pnl-val{font-family:'JetBrains Mono',monospace;font-size:1.05rem;font-weight:800;letter-spacing:-.01em;line-height:1}
+.pc-meta{font-family:'JetBrains Mono',monospace;font-size:.53rem;color:#4a6080;letter-spacing:.04em;margin-top:2px}
+.pc-act-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:5px}
+.pc-act-btn{font-family:'JetBrains Mono',monospace;font-size:.62rem;font-weight:700;padding:8px 4px 6px;border-radius:9px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px;letter-spacing:.04em;-webkit-tap-highlight-color:transparent;transition:opacity .1s}
+.pc-act-btn .ico{font-size:.85rem}
 .pc-row1{display:flex;align-items:baseline;justify-content:space-between}
 .pc-sym{font-family:'Bebas Neue',sans-serif;font-size:26px;letter-spacing:2px;line-height:1;color:var(--cyan)}
 .pc-bond{font-family:'Bebas Neue',sans-serif;font-size:16px;letter-spacing:1px;line-height:1;color:var(--green)}
@@ -3816,7 +3824,7 @@ nav::-webkit-scrollbar{display:none}
 <div class="bot-name">__BOT_NAME__ &#xB7; Live</div>
 <script>
 // OPEN POSITIONS — iOS card stack
-const CARD_H=100,PEEK=17,EXP_GAP=10,PAD=13;
+const CARD_H=100,PEEK=17,EXP_GAP=10,PAD=13,EXP_H=268;
 let stackExpanded=false;
 const dismissed=new Set();
 const posCards={};
@@ -3849,6 +3857,24 @@ function makePos(t){
         '<div class="pc-time" id="pct'+mint+'">'+fmt(t.elapsed_s)+'</div>'+
         '<div class="pc-swipe-lbl">&#x2190; HIDE</div>'+
       '</div>'+
+    '</div>'+
+    '<div class="pc-panel" id="pcp'+mint+'">'+
+      '<div class="pc-panel-row">'+
+        '<div>'+
+          '<div class="pc-pnl-val" id="pcp-pnl'+mint+'">—</div>'+
+          '<div class="pc-meta" id="pcp-price'+mint+'">price —</div>'+
+        '</div>'+
+        '<div style="text-align:right">'+
+          '<div class="pc-meta" id="pcp-bond'+mint+'">bond —%</div>'+
+          '<div class="pc-meta" id="pcp-held'+mint+'">held —</div>'+
+        '</div>'+
+      '</div>'+
+      '<canvas id="pcp-cv'+mint+'" height="72" style="width:100%;display:block;border-radius:8px;background:rgba(0,0,0,.35)"></canvas>'+
+      '<div class="pc-act-grid">'+
+        '<button class="pc-act-btn" onclick="lvAct(\''+mint+'\',\'close\')" style="background:rgba(255,51,85,.1);color:#ff3355;border:1px solid rgba(255,51,85,.25)"><span class="ico">&#x2715;</span>CLOSE</button>'+
+        '<button class="pc-act-btn" onclick="lvAct(\''+mint+'\',\'tp\')" style="background:rgba(255,238,0,.08);color:#ffee00;border:1px solid rgba(255,238,0,.22)"><span class="ico">&#x1F4B0;</span>TAKE TP</button>'+
+        '<button class="pc-act-btn" onclick="lvAct(\''+mint+'\',\'add\')" style="background:rgba(0,229,255,.08);color:#00e5ff;border:1px solid rgba(0,229,255,.22)"><span class="ico">&#xFF0B;</span>ADD</button>'+
+      '</div>'+
     '</div>';
   posWrap.appendChild(el);
   posCards[mint]={card:el,timeEl:document.getElementById('pct'+mint)};
@@ -3865,39 +3891,44 @@ function updateStack(){
   colHint.style.display=stackExpanded&&n>1?'':'none';
   expandBtn.textContent=stackExpanded?'COLLAPSE &#x2195;':'EXPAND &#x2195;';
   if(stackExpanded){
-    posWrap.style.height=(PAD+n*CARD_H+(n-1)*EXP_GAP+PAD)+'px';
-    vk.forEach(function(m,i){var c=posCards[m].card;c.style.top=(PAD+i*(CARD_H+EXP_GAP))+'px';c.style.transform='scale(1)';c.style.opacity='1';c.style.zIndex=n-i;c.style.pointerEvents='auto';});
+    var totalH=PAD;
+    vk.forEach(function(m,i){var ch=m===_exMint?EXP_H:CARD_H;var c=posCards[m].card;c.style.top=totalH+'px';c.style.height=ch+'px';c.style.transform='scale(1)';c.style.opacity='1';c.style.zIndex=n-i;c.style.pointerEvents='auto';totalH+=ch+EXP_GAP;});
+    posWrap.style.height=(totalH-EXP_GAP+PAD)+'px';
   }else{
     posWrap.style.height=(PAD+CARD_H+(n-1)*PEEK+PAD)+'px';
-    vk.forEach(function(m,i){var c=posCards[m].card;c.style.top=(PAD+i*PEEK)+'px';c.style.transform='scale('+(1-i*0.03)+')';c.style.opacity=i===0?'1':i===1?'0.78':'0.58';c.style.zIndex=n-i;c.style.pointerEvents='auto';});
+    vk.forEach(function(m,i){var c=posCards[m].card;c.style.top=(PAD+i*PEEK)+'px';c.style.height=CARD_H+'px';c.style.transform='scale('+(1-i*0.03)+')';c.style.opacity=i===0?'1':i===1?'0.78':'0.58';c.style.zIndex=n-i;c.style.pointerEvents='auto';});
   }
 }
 function toggleExpand(){if(visMints().length<=1)return;stackExpanded=!stackExpanded;updateStack();}
 function initSwipe(card,mint){
   var inner=card.querySelector('.pc-inner');
+  var panel=card.querySelector('.pc-panel');
   var bg=card.querySelector('.pc-hide-bg');
   var sx,sy,isH=null,moved=false;
-  function snap(){inner.style.transition='transform .35s cubic-bezier(.22,.8,.36,1)';inner.style.transform='translateX(0)';bg.style.opacity='0';}
-  card.addEventListener('touchstart',function(e){sx=e.touches[0].clientX;sy=e.touches[0].clientY;isH=null;moved=false;inner.style.transition='none';bg.style.transition='none';},{passive:true});
+  function snap(){var t='transform .35s cubic-bezier(.22,.8,.36,1)';inner.style.transition=t;inner.style.transform='translateX(0)';if(panel){panel.style.transition=t;panel.style.transform='translateX(0)';}bg.style.opacity='0';}
+  card.addEventListener('touchstart',function(e){sx=e.touches[0].clientX;sy=e.touches[0].clientY;isH=null;moved=false;inner.style.transition='none';bg.style.transition='none';if(panel)panel.style.transition='none';},{passive:true});
   card.addEventListener('touchmove',function(e){
     var dx=e.touches[0].clientX-sx,dy=e.touches[0].clientY-sy;
     if(isH===null&&(Math.abs(dx)>6||Math.abs(dy)>6))isH=Math.abs(dx)>Math.abs(dy);
     if(!isH)return;moved=true;if(dx>8)return;
     inner.style.transform='translateX('+Math.min(0,dx)+'px)';
+    if(panel)panel.style.transform=inner.style.transform;
     bg.style.opacity=Math.min(1,Math.abs(Math.min(0,dx))/88);
     e.preventDefault();
   },{passive:false});
   card.addEventListener('touchend',function(e){
     var dx=e.changedTouches[0].clientX-sx;
-    if(!moved||isH===null){snap();if(!stackExpanded)toggleExpand();else openPosMini(mint);return;}
+    if(!moved||isH===null){snap();toggleCardExpand(mint);return;}
     if(!isH){snap();return;}
     if(dx<-80){
-      inner.style.transition='transform .28s ease';inner.style.transform='translateX(-110%)';bg.style.opacity='1';
+      var t='transform .28s ease';inner.style.transition=t;inner.style.transform='translateX(-110%)';bg.style.opacity='1';
+      if(panel){panel.style.transition=t;panel.style.transform='translateX(-110%)';}
       setTimeout(function(){dismissCard(mint);},290);
     }else snap();
   },{passive:true});
 }
 function dismissCard(mint){
+  if(_exMint===mint)_collapseCard(mint);
   var c=posCards[mint];if(!c)return;
   var card=c.card;
   card.style.transition='height .38s ease,opacity .28s ease';
@@ -6042,7 +6073,7 @@ function fillDrawer(id){{
   const badge=document.getElementById('d-badge');
   badge.textContent=p.strat;badge.className='strat-badge sb-'+p.stratClass;
   refreshDrawer(true);
-  setTimeout(()=>drawChart(id),80);
+  setTimeout(()=>drawChart(id,true),80);
 }}
 
 function refreshDrawer(full){{
@@ -6090,7 +6121,7 @@ function refreshDrawer(full){{
 }}
 
 // ── CHART ─────────────────────────────────────────────────
-function drawChart(id){{
+function drawChart(id,animate){{
   const p=POSITIONS[id];if(!p)return;
   const canvas=document.getElementById('d-chart');if(!canvas)return;
   const parent=canvas.parentElement;
@@ -6099,7 +6130,7 @@ function drawChart(id){{
   canvas.width=W*dpr;canvas.height=H*dpr;
   canvas.style.width=W+'px';canvas.style.height=H+'px';
   const ctx=canvas.getContext('2d');
-  ctx.scale(dpr,dpr);ctx.clearRect(0,0,W,H);
+  ctx.scale(dpr,dpr);
   const pts=p.history;
   const slP=p.entry*(1-p.slPct/100),tp1P=p.entry*(1+p.tp1Pct/100);
   const allV=[...pts,slP,tp1P];
@@ -6108,34 +6139,63 @@ function drawChart(id){{
   const xx=i=>pl+(i/(pts.length-1))*fw;
   const yy=v=>pt+fh-((v-mn)/rng)*fh;
   const win=calcPnL(p)>=0,hue=win?'#00ff88':'#ff3355';
-  ctx.strokeStyle='#ffffff05';ctx.lineWidth=1;
-  for(let i=0;i<=3;i++){{const gy=pt+(fh/3)*i;ctx.beginPath();ctx.moveTo(pl,gy);ctx.lineTo(W-pr,gy);ctx.stroke();}}
   const ey=yy(p.entry);
-  ctx.setLineDash([4,4]);ctx.strokeStyle='#ffffff22';ctx.lineWidth=1;
-  ctx.beginPath();ctx.moveTo(pl,ey);ctx.lineTo(W-pr,ey);ctx.stroke();ctx.setLineDash([]);
-  ctx.font='500 9px monospace';ctx.fillStyle='#ffffff25';ctx.fillText('ENTRY',pl+4,ey-3);
-  ctx.setLineDash([3,5]);ctx.strokeStyle='#ff335540';ctx.lineWidth=1;
-  ctx.beginPath();ctx.moveTo(pl,yy(slP));ctx.lineTo(W-pr,yy(slP));ctx.stroke();ctx.setLineDash([]);
-  ctx.setLineDash([3,5]);ctx.strokeStyle='#00ff8840';ctx.lineWidth=1;
-  ctx.beginPath();ctx.moveTo(pl,yy(tp1P));ctx.lineTo(W-pr,yy(tp1P));ctx.stroke();ctx.setLineDash([]);
-  ctx.beginPath();ctx.moveTo(xx(0),yy(pts[0]));
-  pts.forEach((v,i)=>{{if(i)ctx.lineTo(xx(i),yy(v));}});
-  ctx.lineTo(xx(pts.length-1),ey);ctx.lineTo(xx(0),ey);ctx.closePath();
-  const g=ctx.createLinearGradient(0,pt,0,H-pb);
-  if(win){{g.addColorStop(0,'#00ff8825');g.addColorStop(1,'#00ff8804');}}
-  else{{g.addColorStop(0,'#ff335506');g.addColorStop(1,'#ff335525');}}
-  ctx.fillStyle=g;ctx.fill();
-  ctx.beginPath();ctx.moveTo(xx(0),yy(pts[0]));
-  for(let i=1;i<pts.length;i++){{
-    const cpx=xx(i-.5);
-    ctx.bezierCurveTo(cpx,yy(pts[i-1]),cpx,yy(pts[i]),xx(i),yy(pts[i]));
-  }}
-  ctx.strokeStyle=hue;ctx.lineWidth=2;ctx.lineJoin='round';ctx.stroke();
-  const lx=xx(pts.length-1),ly=yy(pts[pts.length-1]);
-  ctx.beginPath();ctx.arc(lx,ly,4,0,Math.PI*2);
-  ctx.fillStyle=hue;ctx.shadowColor=hue;ctx.shadowBlur=12;ctx.fill();ctx.shadowBlur=0;
   document.getElementById('d-ax-l').textContent=Math.round(HIST_LEN*TICK_MS/60000)+'m ago';
   document.getElementById('d-entry-lbl').textContent='entry '+fmtP(p.entry);
+
+  function _render(prog){{
+    ctx.clearRect(0,0,W,H);
+    // grid lines
+    ctx.strokeStyle='#ffffff05';ctx.lineWidth=1;
+    for(let i=0;i<=3;i++){{const gy=pt+(fh/3)*i;ctx.beginPath();ctx.moveTo(pl,gy);ctx.lineTo(W-pr,gy);ctx.stroke();}}
+    // entry dashed
+    ctx.setLineDash([4,4]);ctx.strokeStyle='#ffffff22';ctx.lineWidth=1;
+    ctx.beginPath();ctx.moveTo(pl,ey);ctx.lineTo(W-pr,ey);ctx.stroke();ctx.setLineDash([]);
+    ctx.font='500 9px monospace';ctx.fillStyle='#ffffff25';ctx.fillText('ENTRY',pl+4,ey-3);
+    // SL / TP lines
+    ctx.setLineDash([3,5]);ctx.strokeStyle='#ff335540';ctx.lineWidth=1;
+    ctx.beginPath();ctx.moveTo(pl,yy(slP));ctx.lineTo(W-pr,yy(slP));ctx.stroke();
+    ctx.strokeStyle='#00ff8840';
+    ctx.beginPath();ctx.moveTo(pl,yy(tp1P));ctx.lineTo(W-pr,yy(tp1P));ctx.stroke();
+    ctx.setLineDash([]);
+    // clip to animated progress
+    const clipW=pl+fw*prog;
+    ctx.save();ctx.beginPath();ctx.rect(0,0,clipW,H);ctx.clip();
+    // fill under curve
+    ctx.beginPath();ctx.moveTo(xx(0),yy(pts[0]));
+    pts.forEach((v,i)=>{{if(i)ctx.lineTo(xx(i),yy(v));}});
+    ctx.lineTo(xx(pts.length-1),ey);ctx.lineTo(xx(0),ey);ctx.closePath();
+    const g=ctx.createLinearGradient(0,pt,0,H-pb);
+    if(win){{g.addColorStop(0,'#00ff8825');g.addColorStop(1,'#00ff8804');}}
+    else{{g.addColorStop(0,'#ff335506');g.addColorStop(1,'#ff335525');}}
+    ctx.fillStyle=g;ctx.fill();
+    // price curve
+    ctx.beginPath();ctx.moveTo(xx(0),yy(pts[0]));
+    for(let i=1;i<pts.length;i++){{const cpx=xx(i-.5);ctx.bezierCurveTo(cpx,yy(pts[i-1]),cpx,yy(pts[i]),xx(i),yy(pts[i]));}}
+    ctx.strokeStyle=hue;ctx.lineWidth=2;ctx.lineJoin='round';ctx.stroke();
+    ctx.restore();
+    // live dot at clip edge
+    if(prog>=1){{
+      const lx=xx(pts.length-1),ly=yy(pts[pts.length-1]);
+      ctx.beginPath();ctx.arc(lx,ly,4,0,Math.PI*2);
+      ctx.fillStyle=hue;ctx.shadowColor=hue;ctx.shadowBlur=12;ctx.fill();ctx.shadowBlur=0;
+    }}
+  }}
+
+  if(animate){{
+    let start=null;
+    const dur=520;
+    function step(ts){{
+      if(!start)start=ts;
+      const prog=Math.min((ts-start)/dur,1);
+      // ease-out cubic
+      _render(1-(1-prog)*(1-prog)*(1-prog));
+      if(prog<1)requestAnimationFrame(step);
+    }}
+    requestAnimationFrame(step);
+  }}else{{
+    _render(1);
+  }}
 }}
 
 // ── PANELS ────────────────────────────────────────────────
