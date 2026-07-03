@@ -2408,6 +2408,7 @@ def _home_inner():
 
   <nav>
     <a href="/live">⚡ Live Feed</a>
+    <a href="/positions">📍 Positions</a>
     <a href="/trades">📋 All Trades</a>
     <a href="/status">📊 Status</a>
     <a href="/learn">🧠 Strategy</a>
@@ -2644,6 +2645,7 @@ def _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
   </div>
   <nav>
     <a href="/live">⚡ LIVE</a>
+    <a href="/positions">📍 POS</a>
     <a href="/trades">📋 TRADES</a>
     <a href="/status">📊 STATUS</a>
     <a href="/learn">🧠 STRAT</a>
@@ -5111,6 +5113,936 @@ function updateProjection(){{
 </body>
 </html>"""
 
+
+
+# ── POSITIONS FEATURE ────────────────────────────────────────────
+def _pos_price(trade):
+    """Best-effort current price: paper mode uses bond drift, live uses price_high."""
+    if PAPER_MODE:
+        bond_h = trade.get("bond_high", trade.get("bond_entry", 0))
+        bond_e = trade.get("bond_entry", 0)
+        entry  = trade["entry"]
+        if bond_e > 0 and bond_h >= bond_e:
+            return entry * (1 + (bond_h - bond_e) / 100)
+    return trade.get("price_high", trade["entry"])
+
+@app.route("/positions/api", methods=["GET"])
+def positions_api():
+    with trades_lock:
+        rows = []
+        for mint, t in open_trades.items():
+            price   = _pos_price(t)
+            tokens  = t["tokens"]
+            amount  = t["amount"]
+            partial = t.get("partial_proceeds", 0.0)
+            final_v = tokens * price if price > 0 else 0
+            pnl     = max(-amount, min((partial + final_v) - amount, amount * 5))
+            rows.append({
+                "mint":           mint,
+                "symbol":         t["symbol"],
+                "strategy":       t["strategy"],
+                "entry":          t["entry"],
+                "price":          price,
+                "amount":         amount,
+                "tokens":         tokens,
+                "opened_at":      t["opened_at"],
+                "bond_entry":     t.get("bond_entry", 0),
+                "bond_high":      t.get("bond_high",  t.get("bond_entry", 0)),
+                "sl_pct":         BOND_SL_PCT,
+                "tp1_pct":        PARTIAL_TP1_PCT,
+                "partial_tp_done": t.get("partial_tp_done", 0),
+                "partial_proceeds": partial,
+                "pnl":            round(pnl, 4),
+                "pnl_pct":        round(pnl / max(amount, 1e-12) * 100, 2),
+            })
+    with capital_lock:
+        cap = capital
+    return jsonify({"positions": rows, "capital": round(cap, 2)})
+
+@app.route("/position/<mint>/close", methods=["POST"])
+def position_close(mint):
+    with trades_lock:
+        if mint not in open_trades:
+            return jsonify({"error": "not found"}), 404
+        trade = dict(open_trades[mint])
+    price = _pos_price(trade)
+    exit_trade(mint, price, "MANUAL_CLOSE", trade.get("bond_high", 0))
+    return jsonify({"ok": True})
+
+@app.route("/position/<mint>/tp", methods=["POST"])
+def position_tp(mint):
+    from flask import request as _req
+    data     = _req.get_json(silent=True) or {}
+    fraction = float(data.get("fraction", 0.40))
+    with trades_lock:
+        if mint not in open_trades:
+            return jsonify({"error": "not found"}), 404
+        trade = dict(open_trades[mint])
+    price = _pos_price(trade)
+    _partial_exit(mint, price, fraction, "MANUAL_TP")
+    return jsonify({"ok": True})
+
+@app.route("/position/<mint>/compound", methods=["POST"])
+def position_compound(mint):
+    global capital
+    from flask import request as _req
+    data       = _req.get_json(silent=True) or {}
+    add_amount = float(data.get("amount", 0))
+    if add_amount <= 0:
+        return jsonify({"error": "invalid amount"}), 400
+    with capital_lock:
+        if capital < add_amount:
+            return jsonify({"error": "insufficient capital"}), 400
+    with trades_lock:
+        if mint not in open_trades:
+            return jsonify({"error": "not found"}), 404
+        t          = open_trades[mint]
+        price      = _pos_price(t)
+        if price <= 0:
+            return jsonify({"error": "invalid price"}), 400
+        old_tok    = t["tokens"]
+        new_tok    = add_amount / price
+        new_total  = t["amount"] + add_amount
+        t["tokens"] += new_tok
+        t["entry"]  = new_total / max(old_tok + new_tok, 1e-12)
+        t["amount"] = new_total
+        sym = t["symbol"]
+    with capital_lock:
+        capital -= add_amount
+    log("ok", f"[MANUAL_COMPOUND] +${add_amount:.2f} | new_entry={t['entry']:.8f}", sym)
+    return jsonify({"ok": True})
+
+@app.route("/positions", methods=["GET"])
+def positions_page():
+    mode = "PAPER" if PAPER_MODE else "LIVE"
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Positions — {BOT_NAME}</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}}
+:root{{
+  --bg:#050a14;--s1:#0a1020;--s2:#0f1830;--border:#ffffff0e;
+  --green:#00ff88;--red:#ff3355;--cyan:#00e5ff;--gold:#ffee00;
+  --text:#e2e8f0;--muted:#4a5a7a;--dim:#151f35;
+}}
+html,body{{height:100%;background:var(--bg);overflow:hidden;color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  max-width:430px;margin:0 auto;display:flex;flex-direction:column}}
+nav.topnav{{height:52px;background:var(--s1);border-bottom:1px solid var(--border);
+  display:flex;align-items:center;justify-content:space-between;padding:0 16px;
+  flex-shrink:0;z-index:10}}
+.n-logo{{font-family:Impact,'Arial Narrow',Arial,sans-serif;font-size:1.05rem;
+  letter-spacing:.12em;color:var(--green)}}
+.n-mid{{display:flex;flex-direction:column;align-items:center;gap:0}}
+.n-cap{{font-family:'SF Mono','Consolas','Courier New',monospace;font-size:.75rem;
+  font-weight:700;color:var(--text);letter-spacing:.02em}}
+.n-cap-lbl{{font-size:.52rem;color:var(--muted);letter-spacing:.08em;text-transform:uppercase}}
+.n-pnl{{font-family:'SF Mono','Consolas','Courier New',monospace;font-size:.56rem;
+  color:var(--muted)}}
+.n-live{{display:flex;align-items:center;gap:5px;font-size:.56rem;font-weight:700;
+  color:var(--green);letter-spacing:.1em;text-transform:uppercase}}
+.dot{{width:6px;height:6px;border-radius:50%;background:var(--green);
+  box-shadow:0 0 8px var(--green);animation:blink 1.6s ease-in-out infinite}}
+@keyframes blink{{0%,100%{{opacity:1}}50%{{opacity:.25}}}}
+.scroll{{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px}}
+.scroll::-webkit-scrollbar{{display:none}}
+.sec-lbl{{font-family:'SF Mono','Consolas','Courier New',monospace;font-size:.57rem;
+  font-weight:700;color:var(--muted);letter-spacing:.14em;text-transform:uppercase;
+  padding:2px 0 6px;display:flex;align-items:center;gap:8px}}
+.count-pill{{background:var(--green);color:#000;font-size:.5rem;font-weight:900;
+  padding:2px 7px;border-radius:3px;letter-spacing:.06em}}
+.pos-card{{background:var(--s1);border:1px solid var(--border);border-radius:12px;
+  padding:13px 14px;cursor:pointer;transition:background .12s,transform .1s;
+  display:flex;align-items:center;gap:12px;position:relative;overflow:hidden}}
+.pos-card:active{{transform:scale(.983)}}
+.pos-card.win{{border-left:3px solid var(--green)}}
+.pos-card.loss{{border-left:3px solid var(--red)}}
+@keyframes exitCard{{to{{opacity:0;transform:scale(.92);max-height:0;padding:0;margin:0;border:0}}}}
+.pos-card.exiting{{animation:exitCard .38s ease forwards;overflow:hidden}}
+.tok-icon{{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;
+  justify-content:center;flex-shrink:0;
+  font-family:Impact,'Arial Narrow',Arial,sans-serif;font-size:.72rem;letter-spacing:.04em}}
+.tok-icon.win{{background:#00ff8812;color:var(--green);border:1px solid #00ff8828}}
+.tok-icon.loss{{background:#ff335512;color:var(--red);border:1px solid #ff335528}}
+.card-body{{flex:1;min-width:0}}
+.card-top{{display:flex;align-items:center;gap:7px;margin-bottom:3px}}
+.card-sym{{font-family:Impact,'Arial Narrow',Arial,sans-serif;font-size:1.05rem;
+  letter-spacing:.06em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.strat-badge{{font-size:.5rem;font-weight:700;letter-spacing:.08em;padding:2px 6px;
+  border-radius:4px;text-transform:uppercase;flex-shrink:0}}
+.sb-bond{{background:#00e5ff12;color:var(--cyan);border:1px solid #00e5ff25}}
+.sb-trench{{background:#ffee0012;color:var(--gold);border:1px solid #ffee0025}}
+.sb-spike{{background:#ff00ff12;color:#ff6ef0;border:1px solid #ff00ff25}}
+.sb-copy{{background:#a855f712;color:#a855f7;border:1px solid #a855f725}}
+.sb-migrate{{background:#00e5ff12;color:var(--cyan);border:1px solid #00e5ff25}}
+.card-meta{{font-size:.6rem;color:var(--muted);display:flex;align-items:center;gap:5px;
+  font-family:'SF Mono','Consolas','Courier New',monospace}}
+.card-right{{text-align:right;flex-shrink:0}}
+.card-pnl{{font-family:Impact,'Arial Narrow',Arial,sans-serif;font-size:1.4rem;line-height:1}}
+.card-pct{{font-family:'SF Mono','Consolas','Courier New',monospace;font-size:.62rem;
+  font-weight:700;margin-top:2px}}
+@keyframes numFlash{{0%,100%{{opacity:1}}45%{{opacity:.35;transform:scale(1.04)}}}}
+.flash{{animation:numFlash .3s ease}}
+.spark-c{{width:52px;height:28px;flex-shrink:0}}
+.tp-badge{{position:absolute;top:7px;right:7px;font-size:.48rem;font-weight:700;
+  letter-spacing:.08em;padding:2px 5px;border-radius:3px;
+  background:#00ff8812;color:var(--green);border:1px solid #00ff8828;text-transform:uppercase}}
+.exit-row{{background:var(--s1);border:1px solid var(--border);border-radius:10px;
+  padding:11px 14px;display:flex;justify-content:space-between;align-items:center;opacity:.48}}
+.exit-sym{{font-family:Impact,'Arial Narrow',Arial,sans-serif;font-size:.88rem;letter-spacing:.06em}}
+.exit-meta{{font-size:.57rem;color:var(--muted);font-family:'SF Mono','Consolas','Courier New',monospace;margin-top:1px}}
+.exit-pnl{{font-family:Impact,'Arial Narrow',Arial,sans-serif;font-size:1rem;text-align:right}}
+.exit-pct{{font-size:.57rem;font-family:'SF Mono','Consolas','Courier New',monospace;text-align:right;margin-top:1px}}
+.empty-state{{text-align:center;padding:40px 20px;color:var(--muted)}}
+.empty-state .e-ico{{font-size:2.2rem;margin-bottom:10px;opacity:.4}}
+.empty-state p{{font-size:.75rem}}
+.backdrop{{position:fixed;inset:0;background:#000000b8;z-index:40;
+  opacity:0;pointer-events:none;transition:opacity .28s;backdrop-filter:blur(3px)}}
+.backdrop.on{{opacity:1;pointer-events:all}}
+.drawer{{position:fixed;bottom:0;left:50%;transform:translateX(-50%) translateY(104%);
+  width:100%;max-width:430px;height:90vh;background:var(--s1);
+  border-radius:22px 22px 0 0;z-index:41;border-top:1px solid #ffffff12;
+  display:flex;flex-direction:column;transition:transform .35s cubic-bezier(.25,.72,0,1)}}
+.drawer.on{{transform:translateX(-50%) translateY(0)}}
+.handle-wrap{{padding:10px 0 2px;display:flex;justify-content:center;flex-shrink:0;
+  cursor:grab;touch-action:none}}
+.handle{{width:34px;height:4px;background:var(--dim);border-radius:2px}}
+.d-scroll{{flex:1;overflow-y:auto;display:flex;flex-direction:column}}
+.d-scroll::-webkit-scrollbar{{display:none}}
+.d-head{{padding:4px 18px 14px;display:flex;align-items:flex-start;
+  justify-content:space-between;flex-shrink:0;border-bottom:1px solid var(--border)}}
+.d-sym-grp{{display:flex;align-items:center;gap:10px}}
+.d-sym{{font-family:Impact,'Arial Narrow',Arial,sans-serif;font-size:2.1rem;
+  letter-spacing:.06em;line-height:1}}
+.d-badges{{display:flex;flex-direction:column;gap:5px}}
+.d-live{{display:flex;align-items:center;gap:4px;font-size:.56rem;font-weight:700;
+  color:var(--green);letter-spacing:.1em;text-transform:uppercase}}
+.d-right{{text-align:right}}
+.d-pnl-big{{font-family:Impact,'Arial Narrow',Arial,sans-serif;font-size:2.3rem;
+  line-height:1;transition:color .25s}}
+.d-sub{{font-size:.58rem;color:var(--muted);margin-top:4px;
+  font-family:'SF Mono','Consolas','Courier New',monospace;
+  display:flex;flex-direction:column;gap:2px;align-items:flex-end}}
+.d-price-live{{font-weight:700;font-size:.68rem;transition:color .25s}}
+.chart-wrap{{padding:10px 14px 2px;flex-shrink:0}}
+.chart-axis{{display:flex;justify-content:space-between;margin-bottom:5px;
+  font-family:'SF Mono','Consolas','Courier New',monospace;font-size:.54rem;color:var(--muted)}}
+#d-chart{{display:block;width:100%;border-radius:8px}}
+.chart-legend{{display:flex;gap:14px;padding:5px 14px 0;flex-shrink:0}}
+.leg{{display:flex;align-items:center;gap:5px;
+  font-family:'SF Mono','Consolas','Courier New',monospace;font-size:.54rem;color:var(--muted)}}
+.leg-line{{width:14px;height:2px;border-radius:1px}}
+.stats-grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;
+  margin:10px 14px;background:var(--border);border:1px solid var(--border);
+  border-radius:10px;overflow:hidden;flex-shrink:0}}
+.stat-cell{{background:var(--s1);padding:9px 5px;text-align:center}}
+.stat-lbl{{font-size:.5rem;font-weight:600;color:var(--muted);letter-spacing:.1em;
+  text-transform:uppercase;margin-bottom:3px}}
+.stat-val{{font-family:'SF Mono','Consolas','Courier New',monospace;
+  font-size:.68rem;font-weight:700;font-variant-numeric:tabular-nums}}
+.bars-section{{padding:0 14px 2px;display:flex;flex-direction:column;gap:7px;flex-shrink:0}}
+.bar-row{{display:flex;align-items:center;gap:8px}}
+.bar-lbl{{font-size:.54rem;font-weight:700;color:var(--muted);letter-spacing:.1em;
+  text-transform:uppercase;width:30px;flex-shrink:0}}
+.bar-track{{flex:1;height:5px;background:#ffffff07;border-radius:3px;overflow:hidden;position:relative}}
+.bar-fill{{height:5px;border-radius:3px;transition:width .5s ease}}
+.bf-g{{background:linear-gradient(90deg,var(--gold),var(--green))}}
+.bf-r{{background:var(--red)}}
+.bf-c{{background:var(--cyan)}}
+.bar-val{{font-family:'SF Mono','Consolas','Courier New',monospace;font-size:.58rem;
+  font-weight:700;width:38px;text-align:right;flex-shrink:0;font-variant-numeric:tabular-nums}}
+.actions-wrap{{padding:10px 14px 6px;flex-shrink:0}}
+.primary-row{{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px}}
+.act-btn{{border:none;border-radius:11px;padding:14px 6px 10px;cursor:pointer;
+  display:flex;flex-direction:column;align-items:center;gap:3px;
+  transition:all .12s;font-family:Impact,'Arial Narrow',Arial,sans-serif;letter-spacing:.06em}}
+.act-btn:active{{transform:scale(.94)}}
+.act-btn .a-icon{{font-size:1.1rem;line-height:1}}
+.act-btn .a-label{{font-size:.98rem;letter-spacing:.07em}}
+.act-btn .a-hint{{font-family:-apple-system,sans-serif;font-size:.52rem;font-weight:600;
+  letter-spacing:.03em;opacity:.55}}
+.ab-close{{background:#ff335514;color:var(--red);border:1px solid #ff335530}}
+.ab-add{{background:#00e5ff10;color:var(--cyan);border:1px solid #00e5ff28}}
+.ab-tp{{background:#00ff8810;color:var(--green);border:1px solid #00ff8828}}
+.act-btn.active-btn{{border-color:currentColor;box-shadow:0 0 0 1px currentColor inset}}
+.panel{{display:none;border-radius:11px;padding:12px;margin-bottom:8px;
+  animation:panIn .18s ease both}}
+.panel.open{{display:block}}
+@keyframes panIn{{from{{opacity:0;transform:translateY(-4px)}}to{{opacity:1;transform:translateY(0)}}}}
+.tp-panel{{background:#00ff8806;border:1px solid #00ff8818}}
+.tp-row{{display:flex;justify-content:space-between;align-items:center;
+  padding:11px 12px;border-radius:9px;cursor:pointer;
+  border:1px solid #ffffff09;background:#ffffff05;
+  transition:background .11s;margin-bottom:7px}}
+.tp-row:last-child{{margin-bottom:0}}
+.tp-row:active,.tp-row:hover{{background:#00ff8812;border-color:#00ff8828}}
+.tp-name{{font-family:Impact,'Arial Narrow',Arial,sans-serif;
+  font-size:.9rem;color:var(--green);letter-spacing:.05em}}
+.tp-desc{{font-size:.56rem;color:var(--muted);
+  font-family:'SF Mono','Consolas','Courier New',monospace;margin-top:1px}}
+.tp-amt{{font-family:Impact,'Arial Narrow',Arial,sans-serif;
+  font-size:1rem;letter-spacing:.04em;text-align:right}}
+.tp-note{{font-size:.55rem;color:var(--green);
+  font-family:'SF Mono','Consolas','Courier New',monospace;text-align:right}}
+.cmp-panel{{background:#00e5ff06;border:1px solid #00e5ff18}}
+.cmp-lbl{{font-size:.56rem;font-weight:700;color:var(--muted);
+  letter-spacing:.12em;text-transform:uppercase;margin-bottom:8px}}
+.preset-row{{display:flex;gap:7px;margin-bottom:10px}}
+.preset-btn{{background:#00e5ff0c;border:1px solid #00e5ff22;color:var(--cyan);
+  font-family:'SF Mono','Consolas','Courier New',monospace;font-size:.77rem;font-weight:700;
+  padding:9px 0;border-radius:9px;cursor:pointer;transition:all .11s;flex:1;text-align:center}}
+.preset-btn.sel{{background:#00e5ff20;border-color:var(--cyan);box-shadow:0 0 10px #00e5ff1a}}
+.cmp-go{{width:100%;background:var(--cyan);color:#000;border:none;
+  font-family:Impact,'Arial Narrow',Arial,sans-serif;
+  font-size:1.05rem;letter-spacing:.07em;padding:12px;border-radius:9px;cursor:pointer;transition:all .11s}}
+.cmp-go:disabled{{opacity:.45;cursor:default}}
+.cmp-note{{font-size:.56rem;color:var(--muted);
+  font-family:'SF Mono','Consolas','Courier New',monospace;margin-top:7px;text-align:center}}
+.cls-panel{{background:#ff335506;border:1px solid #ff335518}}
+.cls-msg{{font-size:.7rem;font-weight:600;text-align:center;margin-bottom:10px;color:var(--text)}}
+.cls-row{{display:grid;grid-template-columns:1fr 1fr;gap:8px}}
+.cls-cancel{{background:#ffffff08;border:1px solid var(--border);color:var(--muted);
+  font-family:Impact,'Arial Narrow',Arial,sans-serif;font-size:.95rem;letter-spacing:.06em;
+  padding:12px;border-radius:9px;cursor:pointer;transition:all .11s}}
+.cls-confirm{{background:var(--red);border:none;color:#fff;
+  font-family:Impact,'Arial Narrow',Arial,sans-serif;font-size:.95rem;letter-spacing:.06em;
+  padding:12px;border-radius:9px;cursor:pointer;transition:all .11s}}
+.cls-confirm:disabled{{opacity:.45;cursor:default}}
+.spin{{display:inline-block;width:12px;height:12px;border:2px solid #ffffff28;
+  border-top-color:#fff;border-radius:50%;animation:spinr .55s linear infinite;vertical-align:middle;margin-right:4px}}
+@keyframes spinr{{to{{transform:rotate(360deg)}}}}
+.safe{{height:max(env(safe-area-inset-bottom,0px),16px);flex-shrink:0}}
+.toast{{position:fixed;bottom:96px;left:50%;transform:translateX(-50%) translateY(6px);
+  opacity:0;transition:all .22s;pointer-events:none;z-index:99;
+  background:var(--s2);border-radius:10px;padding:9px 17px;
+  font-family:'SF Mono','Consolas','Courier New',monospace;
+  font-size:.67rem;border:1px solid var(--border);white-space:nowrap;
+  box-shadow:0 6px 28px #00000090}}
+.toast.show{{opacity:1;transform:translateX(-50%) translateY(0)}}
+.toast.tok-success{{border-color:var(--green);color:var(--green)}}
+.toast.tok-error{{border-color:var(--red);color:var(--red)}}
+.toast.tok-info{{border-color:var(--cyan);color:var(--cyan)}}
+</style>
+</head>
+<body>
+<nav class="topnav">
+  <div class="n-logo">Boogey's</div>
+  <div class="n-mid">
+    <div class="n-cap" id="nav-cap">—</div>
+    <div class="n-cap-lbl">capital</div>
+    <div class="n-pnl"><span id="nav-open">0</span> open · <span id="nav-pnl">+$0.00</span></div>
+  </div>
+  <div class="n-live"><span class="dot"></span>{mode}</div>
+</nav>
+<div class="scroll" id="main-scroll">
+  <div class="sec-lbl">OPEN POSITIONS <span class="count-pill" id="open-count">0</span></div>
+  <div id="positions-list"></div>
+  <div class="sec-lbl" style="margin-top:6px">RECENT EXITS</div>
+  <div id="exits-list"></div>
+</div>
+<div class="backdrop" id="backdrop"></div>
+<div class="drawer" id="drawer">
+  <div class="handle-wrap" id="handle-wrap"><div class="handle"></div></div>
+  <div class="d-scroll">
+    <div class="d-head">
+      <div class="d-sym-grp">
+        <div class="d-sym" id="d-sym">—</div>
+        <div class="d-badges">
+          <span class="strat-badge sb-bond" id="d-badge">bond</span>
+          <div class="d-live"><span class="dot"></span>LIVE</div>
+        </div>
+      </div>
+      <div class="d-right">
+        <div class="d-pnl-big" id="d-pnl">—</div>
+        <div class="d-sub">
+          <span id="d-hold" style="color:var(--muted)">0m 0s</span>
+          <span class="d-price-live" id="d-price-live">—</span>
+        </div>
+      </div>
+    </div>
+    <div class="chart-wrap">
+      <div class="chart-axis">
+        <span id="d-ax-l">3m ago</span>
+        <span id="d-entry-lbl">entry</span>
+        <span>now</span>
+      </div>
+      <canvas id="d-chart" height="148"></canvas>
+    </div>
+    <div class="chart-legend">
+      <div class="leg"><div class="leg-line" style="border-top:2px dashed #ffffff28;background:transparent"></div>ENTRY</div>
+      <div class="leg"><div class="leg-line" style="background:#ff335550"></div>SL</div>
+      <div class="leg"><div class="leg-line" style="background:#00ff8850"></div>TP1</div>
+    </div>
+    <div class="stats-grid">
+      <div class="stat-cell"><div class="stat-lbl">Entry</div><div class="stat-val" id="d-entry-v">—</div></div>
+      <div class="stat-cell"><div class="stat-lbl">Current</div><div class="stat-val" id="d-cur-v" style="color:var(--green)">—</div></div>
+      <div class="stat-cell"><div class="stat-lbl">PnL %</div><div class="stat-val" id="d-pct-v">—</div></div>
+      <div class="stat-cell"><div class="stat-lbl">Size</div><div class="stat-val" id="d-size-v">—</div></div>
+    </div>
+    <div class="bars-section">
+      <div class="bar-row">
+        <span class="bar-lbl">Bond</span>
+        <div class="bar-track"><div class="bar-fill bf-g" id="d-bond-fill" style="width:0%"></div></div>
+        <span class="bar-val" id="d-bond-val" style="color:var(--gold)">—</span>
+      </div>
+      <div class="bar-row">
+        <span class="bar-lbl">SL</span>
+        <div class="bar-track"><div class="bar-fill bf-r" id="d-sl-fill" style="width:0%"></div></div>
+        <span class="bar-val" id="d-sl-val" style="color:var(--red)">—</span>
+      </div>
+      <div class="bar-row">
+        <span class="bar-lbl">TP1</span>
+        <div class="bar-track"><div class="bar-fill bf-c" id="d-tp1-fill" style="width:0%"></div></div>
+        <span class="bar-val" id="d-tp1-val" style="color:var(--cyan)">—</span>
+      </div>
+    </div>
+    <div class="actions-wrap">
+      <div class="panel tp-panel" id="panel-tp">
+        <div class="tp-row" id="tp-row-1" onclick="doTP('tp1')">
+          <div><div class="tp-name">TP1 — LOCK 40%</div><div class="tp-desc">sell 40% at current price</div></div>
+          <div><div class="tp-amt" id="tp1-amt">—</div><div class="tp-note">returned to capital</div></div>
+        </div>
+        <div class="tp-row" id="tp-row-2" onclick="doTP('tp2')">
+          <div><div class="tp-name">TP2 — LOCK 40% REM.</div><div class="tp-desc">sell 40% of remaining tokens</div></div>
+          <div><div class="tp-amt" id="tp2-amt">—</div><div class="tp-note">returned to capital</div></div>
+        </div>
+        <div class="tp-row" onclick="doTP('full')">
+          <div><div class="tp-name">FULL EXIT</div><div class="tp-desc">close entire remaining position</div></div>
+          <div><div class="tp-amt" id="full-amt">—</div><div class="tp-note" id="full-pnl" style="color:var(--green)">—</div></div>
+        </div>
+      </div>
+      <div class="panel cmp-panel" id="panel-cmp">
+        <div class="cmp-lbl">Add to Position</div>
+        <div class="preset-row">
+          <button class="preset-btn sel" id="prs5"  onclick="setPreset(5)">$5</button>
+          <button class="preset-btn"     id="prs10" onclick="setPreset(10)">$10</button>
+          <button class="preset-btn"     id="prs15" onclick="setPreset(15)">$15</button>
+          <button class="preset-btn"     id="prs25" onclick="setPreset(25)">$25</button>
+        </div>
+        <button class="cmp-go" id="cmp-go" onclick="doCompound()">COMPOUND $5</button>
+        <div class="cmp-note">⚠ Increases risk · averages entry price</div>
+      </div>
+      <div class="panel cls-panel" id="panel-cls">
+        <div class="cls-msg" id="cls-msg">Close at market? Return: <span id="cls-return" style="color:var(--green)">—</span></div>
+        <div class="cls-row">
+          <button class="cls-cancel" onclick="closePanel()">Cancel</button>
+          <button class="cls-confirm" id="cls-confirm-btn" onclick="doClose()">CLOSE NOW</button>
+        </div>
+      </div>
+      <div class="primary-row">
+        <button class="act-btn ab-close" id="btn-close" onclick="togglePanel('close')">
+          <span class="a-icon">✕</span><span class="a-label">CLOSE</span><span class="a-hint">market sell</span>
+        </button>
+        <button class="act-btn ab-add" id="btn-add" onclick="togglePanel('compound')">
+          <span class="a-icon">⊕</span><span class="a-label">ADD</span><span class="a-hint">compound</span>
+        </button>
+        <button class="act-btn ab-tp" id="btn-tp" onclick="togglePanel('tp')">
+          <span class="a-icon">◈</span><span class="a-label">TAKE</span><span class="a-hint">profit</span>
+        </button>
+      </div>
+    </div>
+    <div class="safe"></div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+const TICK_MS  = 3000;
+const HIST_LEN = 60;
+let POSITIONS  = {{}};
+let capital    = 0;
+let activeId   = null;
+let openPanel  = null;
+let selPreset  = 5;
+let toastTimer = null;
+let tickTimer  = null;
+
+function fmtPrice(v){{
+  if(!v||v===0) return '$0';
+  let s=v.toFixed(8);
+  return '$'+s.replace(/(\\.\\.d*?[1-9])0+$/,'$1').replace(/\\.$/,'');
+}}
+// Fix: proper trailing-zero strip for fmtPrice
+function fmtP(v){{
+  if(!v||v===0) return '$0';
+  const s=v.toFixed(8);
+  let i=s.length-1;
+  while(i>s.indexOf('.')+2&&s[i]==='0') i--;
+  return '$'+s.slice(0,i+1);
+}}
+function fmtUSD(v){{return '$'+Math.abs(v).toFixed(2);}}
+function sign(v){{return v>=0?'+':'−';}}
+function col(v){{return v>=0?'var(--green)':'var(--red)';}}
+function holdStr(openedAt){{
+  const s=Math.floor((Date.now()/1000-openedAt));
+  return Math.floor(s/60)+'m '+s%60+'s';
+}}
+function calcPnL(p){{
+  const cur=p.price*p.remFrac*(p.amount/p.entry);
+  return p.partialProceeds+cur-p.amount;
+}}
+function calcPct(p){{return ((p.price-p.entry)/p.entry)*100;}}
+
+// ── FETCH & BUILD STATE ──────────────────────────────────────
+async function fetchPositions(){{
+  try{{
+    const r=await fetch('/positions/api');
+    const d=await r.json();
+    capital=d.capital;
+    // merge: update prices from server; keep browser history
+    const newIds=new Set(d.positions.map(p=>p.mint));
+    // remove closed positions
+    for(const id of Object.keys(POSITIONS)){{
+      if(!newIds.has(id)){{ delete POSITIONS[id]; }}
+    }}
+    d.positions.forEach(p=>{{
+      if(POSITIONS[p.mint]){{
+        // update server truth; keep browser history and vel
+        POSITIONS[p.mint].price=p.price;
+        POSITIONS[p.mint].amount=p.amount;
+        POSITIONS[p.mint].entry=p.entry;
+        POSITIONS[p.mint].partialProceeds=p.partial_proceeds;
+        POSITIONS[p.mint].tpDone=p.partial_tp_done;
+        POSITIONS[p.mint].remFrac=p.tokens>0?p.tokens/(p.amount/p.entry):0;
+        POSITIONS[p.mint].bond=p.bond_high;
+        POSITIONS[p.mint].bondEntry=p.bond_entry;
+      }} else {{
+        // new position
+        const remFrac=p.tokens>0?p.tokens/(p.amount/p.entry):1;
+        const pos={{
+          id:p.mint,sym:p.symbol,strat:p.strategy,stratClass:stratClass(p.strategy),
+          entry:p.entry,price:p.price,vel:(p.price-p.entry)*0.01,
+          amount:p.amount,partialProceeds:p.partial_proceeds,
+          tpDone:p.partial_tp_done,remFrac:remFrac,
+          bond:p.bond_high,bondEntry:p.bond_entry,
+          openedAt:p.opened_at,slPct:p.sl_pct,tp1Pct:p.tp1_pct,
+          history:[],tpBadge:null
+        }};
+        // seed history from entry
+        let px=p.entry;
+        const drift=(p.price-p.entry)/Math.max(HIST_LEN,1);
+        for(let i=0;i<HIST_LEN;i++){{
+          px+=drift+(Math.random()-.5)*p.entry*.006;
+          px=Math.max(px,p.entry*.3);
+          pos.history.push(px);
+        }}
+        pos.price=pos.history[pos.history.length-1];
+        POSITIONS[p.mint]=pos;
+      }}
+    }});
+    buildCards();
+    updateNav();
+  }} catch(e){{console.error('fetch error',e);}}
+}}
+
+function stratClass(s){{
+  if(s==='bond'||s==='migrate') return 'bond';
+  if(s==='trench') return 'trench';
+  if(s==='spike'||s==='bundle') return 'spike';
+  return 'copy';
+}}
+
+// ── TICK ──────────────────────────────────────────────────
+function tick(){{
+  Object.values(POSITIONS).forEach(p=>{{
+    p.vel+=(Math.random()-.5)*p.entry*.003;
+    p.vel*=.92;
+    p.vel=Math.max(-p.entry*.03,Math.min(p.entry*.03,p.vel));
+    let nx=p.price+p.vel+(Math.random()-.49)*p.entry*.008;
+    nx=Math.max(nx,p.entry*.3);
+    p.price=nx;
+    p.history.push(nx);
+    if(p.history.length>HIST_LEN) p.history.shift();
+    p.bond+=(Math.random()-.35)*.4;
+    p.bond=Math.max(p.bondEntry,Math.min(99.9,p.bond));
+  }});
+  refreshCards();
+  updateNav();
+  if(activeId&&POSITIONS[activeId]) refreshDrawer(false);
+}}
+
+// ── CARDS ──────────────────────────────────────────────────
+function buildCards(){{
+  const list=document.getElementById('positions-list');
+  list.querySelectorAll('[data-pos]').forEach(el=>{{
+    if(!POSITIONS[el.dataset.pos]) el.remove();
+  }});
+  const ids=Object.keys(POSITIONS);
+  if(ids.length===0){{
+    if(!list.querySelector('.empty-state')){{
+      list.innerHTML='<div class="empty-state"><div class="e-ico">📭</div><p>No open positions</p></div>';
+    }}
+    document.getElementById('open-count').textContent='0';
+    document.getElementById('nav-open').textContent='0';
+    return;
+  }}
+  const empty=list.querySelector('.empty-state');
+  if(empty) empty.remove();
+  ids.forEach(id=>{{
+    if(list.querySelector(`[data-pos="${{id}}"]`)) return;
+    const p=POSITIONS[id];
+    const div=document.createElement('div');
+    div.className='pos-card';
+    div.dataset.pos=id;
+    div.addEventListener('click',()=>openDrawer(id));
+    div.innerHTML=`
+      <div class="tok-icon" id="icon-${{id}}">${{p.sym.slice(0,4)}}</div>
+      <div class="card-body">
+        <div class="card-top">
+          <span class="card-sym">${{p.sym}}</span>
+          <span class="strat-badge sb-${{p.stratClass}}" id="badge-${{id}}">${{p.strat}}</span>
+        </div>
+        <div class="card-meta">
+          <span id="c-sz-${{id}}">$${{p.amount.toFixed(2)}}</span>
+          <span style="opacity:.3">·</span>
+          <span id="c-hold-${{id}}">—</span>
+          <span style="opacity:.3">·</span>
+          <span id="c-bond-${{id}}">bond —%</span>
+        </div>
+      </div>
+      <canvas class="spark-c" id="spark-${{id}}"></canvas>
+      <div class="card-right">
+        <div class="card-pnl" id="c-pnl-${{id}}">—</div>
+        <div class="card-pct" id="c-pct-${{id}}">—</div>
+      </div>`;
+    list.appendChild(div);
+  }});
+  refreshCards();
+  document.getElementById('open-count').textContent=ids.length;
+  document.getElementById('nav-open').textContent=ids.length;
+}}
+
+function refreshCards(){{
+  Object.values(POSITIONS).forEach(p=>{{
+    const pnlEl=document.getElementById('c-pnl-'+p.id);
+    if(!pnlEl) return;
+    const pnl=calcPnL(p),pct=calcPct(p),win=pnl>=0;
+    const newT=sign(pnl)+fmtUSD(pnl);
+    if(pnlEl.textContent!==newT){{
+      pnlEl.classList.remove('flash');void pnlEl.offsetWidth;pnlEl.classList.add('flash');
+    }}
+    pnlEl.textContent=newT;pnlEl.style.color=col(pnl);
+    const pctEl=document.getElementById('c-pct-'+p.id);
+    pctEl.textContent=sign(pct)+pct.toFixed(1)+'%';
+    pctEl.style.color=win?'#00ff8877':'#ff335577';
+    const card=document.querySelector(`[data-pos="${{p.id}}"]`);
+    if(card) card.className='pos-card '+(win?'win':'loss');
+    const icon=document.getElementById('icon-'+p.id);
+    if(icon) icon.className='tok-icon '+(win?'win':'loss');
+    document.getElementById('c-hold-'+p.id).textContent=holdStr(p.openedAt);
+    document.getElementById('c-bond-'+p.id).textContent='bond '+p.bond.toFixed(0)+'%';
+    drawSpark(p.id);
+  }});
+}}
+
+function updateNav(){{
+  document.getElementById('nav-cap').textContent='$'+capital.toFixed(2);
+  let pnl=0;
+  Object.values(POSITIONS).forEach(p=>pnl+=calcPnL(p));
+  const el=document.getElementById('nav-pnl');
+  el.textContent=sign(pnl)+fmtUSD(pnl);
+  el.style.color=col(pnl);
+}}
+
+// ── SPARKLINE ──────────────────────────────────────────────
+function drawSpark(id){{
+  const c=document.getElementById('spark-'+id);
+  if(!c) return;
+  const p=POSITIONS[id];
+  const dpr=window.devicePixelRatio||1;
+  const W=52,H=28;
+  c.width=W*dpr;c.height=H*dpr;
+  c.style.width=W+'px';c.style.height=H+'px';
+  const ctx=c.getContext('2d');
+  ctx.scale(dpr,dpr);
+  const pts=p.history.slice(-20);
+  const mn=Math.min(...pts),mx=Math.max(...pts),rng=mx-mn||1;
+  const x=i=>2+(i/(pts.length-1))*(W-4);
+  const y=v=>H-2-((v-mn)/rng)*(H-4);
+  const win=calcPnL(p)>=0,hue=win?'#00ff88':'#ff3355';
+  ctx.beginPath();ctx.moveTo(x(0),y(pts[0]));
+  pts.forEach((v,i)=>{{if(i)ctx.lineTo(x(i),y(v));}});
+  ctx.lineTo(x(pts.length-1),H);ctx.lineTo(x(0),H);ctx.closePath();
+  const g=ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,hue+'44');g.addColorStop(1,hue+'00');
+  ctx.fillStyle=g;ctx.fill();
+  ctx.beginPath();ctx.moveTo(x(0),y(pts[0]));
+  pts.forEach((v,i)=>{{if(i)ctx.lineTo(x(i),y(v));}});
+  ctx.strokeStyle=hue;ctx.lineWidth=1.5;ctx.stroke();
+  ctx.beginPath();ctx.arc(x(pts.length-1),y(pts[pts.length-1]),2.5,0,Math.PI*2);
+  ctx.fillStyle=hue;ctx.shadowColor=hue;ctx.shadowBlur=6;ctx.fill();ctx.shadowBlur=0;
+}}
+
+// ── DRAWER ────────────────────────────────────────────────
+function openDrawer(id){{
+  activeId=id;closePanel();
+  fillDrawer(id);
+  document.getElementById('backdrop').classList.add('on');
+  document.getElementById('drawer').classList.add('on');
+}}
+function closeDrawer(){{
+  activeId=null;
+  document.getElementById('backdrop').classList.remove('on');
+  document.getElementById('drawer').classList.remove('on');
+  closePanel();
+}}
+document.getElementById('backdrop').addEventListener('click',closeDrawer);
+
+function fillDrawer(id){{
+  const p=POSITIONS[id];
+  document.getElementById('d-sym').textContent=p.sym;
+  const badge=document.getElementById('d-badge');
+  badge.textContent=p.strat;badge.className='strat-badge sb-'+p.stratClass;
+  refreshDrawer(true);
+  setTimeout(()=>drawChart(id),80);
+}}
+
+function refreshDrawer(full){{
+  if(!activeId||!POSITIONS[activeId]) return;
+  const p=POSITIONS[activeId];
+  const pnl=calcPnL(p),pct=calcPct(p),win=pnl>=0;
+  const pnlEl=document.getElementById('d-pnl');
+  pnlEl.textContent=sign(pnl)+fmtUSD(pnl);pnlEl.style.color=col(pnl);
+  document.getElementById('d-hold').textContent=holdStr(p.openedAt);
+  const prEl=document.getElementById('d-price-live');
+  prEl.textContent=fmtP(p.price);prEl.style.color=col(pnl);
+  const curEl=document.getElementById('d-cur-v');
+  curEl.textContent=fmtP(p.price);curEl.style.color=col(pnl);
+  const pctEl=document.getElementById('d-pct-v');
+  pctEl.textContent=sign(pct)+pct.toFixed(2)+'%';pctEl.style.color=col(pnl);
+  const slP=p.entry*(1-p.slPct/100),tp1P=p.entry*(1+p.tp1Pct/100);
+  const prng=tp1P-slP;
+  const slProg=Math.max(0,Math.min(100,((p.price-slP)/prng)*100));
+  const tp1Prog=Math.max(0,Math.min(100,((p.price-p.entry)/(tp1P-p.entry))*100));
+  document.getElementById('d-bond-fill').style.width=p.bond+'%';
+  document.getElementById('d-bond-val').textContent=p.bond.toFixed(0)+'%';
+  document.getElementById('d-sl-fill').style.width=slProg+'%';
+  document.getElementById('d-sl-val').textContent=p.slPct+'%';
+  document.getElementById('d-tp1-fill').style.width=tp1Prog+'%';
+  document.getElementById('d-tp1-val').textContent=p.tp1Pct+'%';
+  if(full){{
+    document.getElementById('d-entry-v').textContent=fmtP(p.entry);
+    document.getElementById('d-size-v').textContent='$'+p.amount.toFixed(2);
+  }}
+  const tp1R=p.amount*0.4*(p.price/p.entry);
+  const tp2R=p.amount*p.remFrac*0.4*(p.price/p.entry);
+  const fullR=p.partialProceeds+p.price*p.remFrac*(p.amount/p.entry);
+  document.getElementById('tp1-amt').textContent=fmtUSD(tp1R);
+  document.getElementById('tp2-amt').textContent=fmtUSD(tp2R);
+  document.getElementById('full-amt').textContent=fmtUSD(fullR);
+  const fpEl=document.getElementById('full-pnl');
+  fpEl.textContent=sign(pnl)+fmtUSD(pnl);fpEl.style.color=col(pnl);
+  document.getElementById('cls-return').textContent=fmtUSD(fullR);
+  document.getElementById('cls-return').style.color=col(pnl);
+  const r1=document.getElementById('tp-row-1');
+  const r2=document.getElementById('tp-row-2');
+  if(r1)r1.style.opacity=p.tpDone>=1?'.35':'1';
+  if(r2)r2.style.opacity=p.tpDone>=2?'.35':'1';
+  if(!full)drawChart(activeId);
+}}
+
+// ── CHART ─────────────────────────────────────────────────
+function drawChart(id){{
+  const p=POSITIONS[id];if(!p)return;
+  const canvas=document.getElementById('d-chart');if(!canvas)return;
+  const parent=canvas.parentElement;
+  const dpr=window.devicePixelRatio||1;
+  const W=parent.offsetWidth-28,H=148;
+  canvas.width=W*dpr;canvas.height=H*dpr;
+  canvas.style.width=W+'px';canvas.style.height=H+'px';
+  const ctx=canvas.getContext('2d');
+  ctx.scale(dpr,dpr);ctx.clearRect(0,0,W,H);
+  const pts=p.history;
+  const slP=p.entry*(1-p.slPct/100),tp1P=p.entry*(1+p.tp1Pct/100);
+  const allV=[...pts,slP,tp1P];
+  const mn=Math.min(...allV)*.997,mx=Math.max(...allV)*1.003,rng=mx-mn;
+  const pl=4,pr=4,pt=10,pb=10,fw=W-pl-pr,fh=H-pt-pb;
+  const xx=i=>pl+(i/(pts.length-1))*fw;
+  const yy=v=>pt+fh-((v-mn)/rng)*fh;
+  const win=calcPnL(p)>=0,hue=win?'#00ff88':'#ff3355';
+  ctx.strokeStyle='#ffffff05';ctx.lineWidth=1;
+  for(let i=0;i<=3;i++){{const gy=pt+(fh/3)*i;ctx.beginPath();ctx.moveTo(pl,gy);ctx.lineTo(W-pr,gy);ctx.stroke();}}
+  const ey=yy(p.entry);
+  ctx.setLineDash([4,4]);ctx.strokeStyle='#ffffff22';ctx.lineWidth=1;
+  ctx.beginPath();ctx.moveTo(pl,ey);ctx.lineTo(W-pr,ey);ctx.stroke();ctx.setLineDash([]);
+  ctx.font='500 9px monospace';ctx.fillStyle='#ffffff25';ctx.fillText('ENTRY',pl+4,ey-3);
+  ctx.setLineDash([3,5]);ctx.strokeStyle='#ff335540';ctx.lineWidth=1;
+  ctx.beginPath();ctx.moveTo(pl,yy(slP));ctx.lineTo(W-pr,yy(slP));ctx.stroke();ctx.setLineDash([]);
+  ctx.setLineDash([3,5]);ctx.strokeStyle='#00ff8840';ctx.lineWidth=1;
+  ctx.beginPath();ctx.moveTo(pl,yy(tp1P));ctx.lineTo(W-pr,yy(tp1P));ctx.stroke();ctx.setLineDash([]);
+  ctx.beginPath();ctx.moveTo(xx(0),yy(pts[0]));
+  pts.forEach((v,i)=>{{if(i)ctx.lineTo(xx(i),yy(v));}});
+  ctx.lineTo(xx(pts.length-1),ey);ctx.lineTo(xx(0),ey);ctx.closePath();
+  const g=ctx.createLinearGradient(0,pt,0,H-pb);
+  if(win){{g.addColorStop(0,'#00ff8825');g.addColorStop(1,'#00ff8804');}}
+  else{{g.addColorStop(0,'#ff335506');g.addColorStop(1,'#ff335525');}}
+  ctx.fillStyle=g;ctx.fill();
+  ctx.beginPath();ctx.moveTo(xx(0),yy(pts[0]));
+  for(let i=1;i<pts.length;i++){{
+    const cpx=xx(i-.5);
+    ctx.bezierCurveTo(cpx,yy(pts[i-1]),cpx,yy(pts[i]),xx(i),yy(pts[i]));
+  }}
+  ctx.strokeStyle=hue;ctx.lineWidth=2;ctx.lineJoin='round';ctx.stroke();
+  const lx=xx(pts.length-1),ly=yy(pts[pts.length-1]);
+  ctx.beginPath();ctx.arc(lx,ly,4,0,Math.PI*2);
+  ctx.fillStyle=hue;ctx.shadowColor=hue;ctx.shadowBlur=12;ctx.fill();ctx.shadowBlur=0;
+  document.getElementById('d-ax-l').textContent=Math.round(HIST_LEN*TICK_MS/60000)+'m ago';
+  document.getElementById('d-entry-lbl').textContent='entry '+fmtP(p.entry);
+}}
+
+// ── PANELS ────────────────────────────────────────────────
+function togglePanel(name){{
+  if(openPanel===name){{closePanel();return;}}
+  closePanel();openPanel=name;
+  if(name==='tp')      {{document.getElementById('panel-tp').classList.add('open'); document.getElementById('btn-tp').classList.add('active-btn');}}
+  if(name==='compound'){{document.getElementById('panel-cmp').classList.add('open');document.getElementById('btn-add').classList.add('active-btn');}}
+  if(name==='close')   {{document.getElementById('panel-cls').classList.add('open');document.getElementById('btn-close').classList.add('active-btn');}}
+}}
+function closePanel(){{
+  ['panel-tp','panel-cmp','panel-cls'].forEach(id=>document.getElementById(id).classList.remove('open'));
+  ['btn-tp','btn-add','btn-close'].forEach(id=>document.getElementById(id).classList.remove('active-btn'));
+  openPanel=null;
+}}
+function setPreset(v){{
+  selPreset=v;
+  [5,10,15,25].forEach(n=>document.getElementById('prs'+n).classList.toggle('sel',n===v));
+  document.getElementById('cmp-go').textContent='COMPOUND $'+v;
+}}
+
+// ── ACTIONS ───────────────────────────────────────────────
+async function doTP(type){{
+  const p=POSITIONS[activeId];if(!p)return;
+  let fraction=0.40,label='';
+  if(type==='tp1'){{
+    if(p.tpDone>=1){{toast('TP1 already locked','tok-error');return;}}
+    fraction=0.40;label='TP1 — 40% locked';
+  }} else if(type==='tp2'){{
+    if(p.tpDone>=2){{toast('TP2 already locked','tok-error');return;}}
+    fraction=0.40;label='TP2 — 40% of remaining locked';
+  }} else {{
+    // full exit
+    try{{
+      const r=await fetch('/position/'+activeId+'/close',{{method:'POST'}});
+      const d=await r.json();
+      if(d.ok){{toast('Position closed','tok-success');exitPosition(activeId);await fetchPositions();}}
+      else toast(d.error||'Error','tok-error');
+    }}catch(e){{toast('Network error','tok-error');}}
+    return;
+  }}
+  try{{
+    const r=await fetch('/position/'+activeId+'/tp',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{fraction}})}});
+    const d=await r.json();
+    if(d.ok){{
+      toast(label,'tok-success');
+      closePanel();
+      await fetchPositions();
+      if(activeId&&POSITIONS[activeId])refreshDrawer(true);
+    }} else toast(d.error||'Error','tok-error');
+  }}catch(e){{toast('Network error','tok-error');}}
+}}
+
+async function doClose(){{
+  const p=POSITIONS[activeId];if(!p)return;
+  const btn=document.getElementById('cls-confirm-btn');
+  btn.disabled=true;btn.innerHTML='<span class="spin"></span>CLOSING';
+  try{{
+    const r=await fetch('/position/'+activeId+'/close',{{method:'POST'}});
+    const d=await r.json();
+    if(d.ok){{
+      toast('Position closed','tok-success');
+      exitPosition(activeId);
+      await fetchPositions();
+    }} else {{toast(d.error||'Error','tok-error');btn.disabled=false;btn.textContent='CLOSE NOW';}}
+  }}catch(e){{toast('Network error','tok-error');btn.disabled=false;btn.textContent='CLOSE NOW';}}
+}}
+
+async function doCompound(){{
+  const p=POSITIONS[activeId];if(!p)return;
+  const btn=document.getElementById('cmp-go');
+  btn.disabled=true;btn.textContent='Adding...';
+  try{{
+    const r=await fetch('/position/'+activeId+'/compound',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{amount:selPreset}})}});
+    const d=await r.json();
+    if(d.ok){{
+      toast('Compounded +$'+selPreset,'tok-info');
+      closePanel();
+      await fetchPositions();
+      if(activeId&&POSITIONS[activeId])refreshDrawer(true);
+    }} else toast(d.error||'Error','tok-error');
+  }}catch(e){{toast('Network error','tok-error');}}
+  btn.disabled=false;btn.textContent='COMPOUND $'+selPreset;
+}}
+
+function exitPosition(id){{
+  const card=document.querySelector(`[data-pos="${{id}}"]`);
+  if(card)card.classList.add('exiting');
+  setTimeout(()=>{{delete POSITIONS[id];buildCards();updateNav();}},380);
+  closeDrawer();
+}}
+
+// ── TOAST ─────────────────────────────────────────────────
+function toast(msg,type='tok-info'){{
+  const el=document.getElementById('toast');
+  el.textContent=msg;el.className='toast '+type+' show';
+  clearTimeout(toastTimer);
+  toastTimer=setTimeout(()=>el.classList.remove('show'),2800);
+}}
+
+// ── DRAG TO CLOSE ─────────────────────────────────────────
+let dragY0=0,dragging=false;
+const hw=document.getElementById('handle-wrap');
+const dr=document.getElementById('drawer');
+hw.addEventListener('touchstart',e=>{{dragY0=e.touches[0].clientY;dragging=true;}},{{passive:true}});
+document.addEventListener('touchmove',e=>{{
+  if(!dragging)return;
+  const dy=e.touches[0].clientY-dragY0;
+  if(dy>0)dr.style.transform=`translateX(-50%) translateY(${{dy}}px)`;
+}},{{passive:true}});
+document.addEventListener('touchend',e=>{{
+  if(!dragging)return;
+  dragging=false;
+  const dy=e.changedTouches[0].clientY-dragY0;
+  dr.style.transform='';
+  if(dy>80)closeDrawer();
+}});
+
+// ── EXITS LIST ─────────────────────────────────────────────
+function buildExits(exits){{
+  const list=document.getElementById('exits-list');
+  if(!exits||exits.length===0){{list.innerHTML='<div style="font-size:.62rem;color:var(--muted);padding:8px 0">No exits yet this session</div>';return;}}
+  list.innerHTML=exits.slice(0,5).map(t=>{{
+    const win=t.pnl>=0;
+    const s=win?'+':'';
+    const ago=Math.round((Date.now()/1000-t.closed_ts)/60);
+    return `<div class="exit-row">
+      <div><div class="exit-sym">${{t.symbol}}</div>
+      <div class="exit-meta">${{t.result}} · ${{t.strategy}} · ${{ago}}m ago</div></div>
+      <div><div class="exit-pnl" style="color:${{win?'var(--green)':'var(--red)'}}">${{win?'+':'−'}}$${{Math.abs(t.pnl).toFixed(2)}}</div>
+      <div class="exit-pct" style="color:${{win?'#00ff8866':'#ff335566'}}">${{s}}${{t.pnl_pct.toFixed(1)}}%</div></div>
+    </div>`;
+  }}).join('');
+}}
+
+// ── INIT ──────────────────────────────────────────────────
+async function init(){{
+  await fetchPositions();
+  // also fetch recent exits from /trades/api
+  try{{
+    const r=await fetch('/trades/api');
+    const d=await r.json();
+    buildExits(d.completed?d.completed.slice(-5).reverse():[]);
+  }}catch(e){{}}
+  tickTimer=setInterval(tick,TICK_MS);
+  // re-sync with server every 10s
+  setInterval(fetchPositions,10000);
+}}
+init();
+</script>
+</body>
+</html>"""
+    return html, 200
 
 
 if __name__ == "__main__":
