@@ -3940,17 +3940,44 @@ function _drawDrop(entry,animate){
     requestAnimationFrame(step);
   }else{_r(1);}
 }
+function _lvFlash(id,color){
+  var btn=document.getElementById(id);if(!btn)return;
+  var ob=btn.style.background,oc=btn.style.color,obc=btn.style.borderColor;
+  btn.style.background='rgba(0,255,136,.25)';btn.style.color='#00ff88';btn.style.borderColor='rgba(0,255,136,.55)';
+  setTimeout(function(){btn.style.background=ob;btn.style.color=oc;btn.style.borderColor=obc;},1400);
+}
+function _lvSetBtns(disabled){
+  ['lvd-close','lvd-tp','lvd-add'].forEach(function(id){var b=document.getElementById(id);if(b)b.disabled=disabled;b.style.opacity=disabled?'.4':'1';});
+}
 async function lvAct(action){
   if(!_exMint)return;
   var mint=_exMint;
   var url,body=null;
-  if(action==='close')url='/position/'+mint+'/close';
-  else if(action==='tp'){url='/position/'+mint+'/tp';body={fraction:0.4,label:'TP1'};}
-  else if(action==='add'){url='/position/'+mint+'/compound';body={amount:5};}
+  if(action==='close'){
+    url='/position/'+mint+'/close';
+  } else if(action==='tp'){
+    url='/position/'+mint+'/tp';body={fraction:0.4};
+  } else if(action==='add'){
+    var amtStr=prompt('Add funds ($):','5');
+    if(!amtStr)return;
+    var amt=parseFloat(amtStr);
+    if(isNaN(amt)||amt<=0){alert('Enter a valid amount');return;}
+    url='/position/'+mint+'/compound';body={amount:amt};
+  }
+  _lvSetBtns(true);
   try{
-    await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):null});
-    if(action==='close')_closeDrop();else _fetchDrop(mint);
-  }catch(e){}
+    var r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):null});
+    if(!r.ok){var e=await r.json().catch(function(){return {};});alert('Failed: '+(e.error||('HTTP '+r.status)));return;}
+    if(action==='close'){
+      _closeDrop();
+      dismissCard(mint);
+    } else {
+      _lvFlash(action==='tp'?'lvd-tp':'lvd-add');
+      if(_cvData[mint]){_cvData[mint].hist=[];_cvData[mint].fresh=true;}
+      _fetchDrop(mint);
+    }
+  }catch(e){alert('Network error — try again');}
+  finally{_lvSetBtns(false);}
 }
 document.getElementById('lvd-close').addEventListener('click',function(){lvAct('close');});
 document.getElementById('lvd-tp').addEventListener('click',function(){lvAct('tp');});
