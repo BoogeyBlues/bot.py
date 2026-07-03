@@ -1145,6 +1145,73 @@ def close_position(market, exit_price, reason=""):
                     _tuning_lock.release()
             threading.Thread(target=_tune_and_release, daemon=True).start()
 
+def partial_close_position(market, exit_price, target_usd, reason=""):
+    """Lock target_usd of profit by closing a fraction of the position; let the rest ride.
+    Resets the timeout clock on the remaining notional."""
+    global _capital, _daily_pnl
+    with _state_lock:
+        pos = _positions.get(market)
+        if not pos:
+            return
+
+        if pos["side"] == "long":
+            pnl_pct = (exit_price - pos["entry"]) / pos["entry"]
+        else:
+            pnl_pct = (pos["entry"] - exit_price) / pos["entry"]
+
+        full_pnl = pos["size"] * pnl_pct  # notional * raw %
+
+        if full_pnl > 0 and full_pnl >= target_usd:
+            fraction = min(target_usd / full_pnl, 0.50)
+        elif full_pnl > 0:
+            fraction = 0.50   # can't hit target yet — take half anyway
+        else:
+            fraction = 0.25   # underwater: trim exposure
+
+        realized_pnl  = full_pnl * fraction
+        closed_margin = (pos["size"] / pos["leverage"]) * fraction
+        closed_size   = pos["size"] * fraction
+
+        _positions[market]["size"]     -= closed_size
+        _positions[market]["opened_at"] = time.time()  # restart timeout clock
+
+        cap_snap = pos.copy()   # snapshot for logging
+
+    trade = {
+        "market": market, "side": cap_snap["side"],
+        "entry": cap_snap["entry"], "exit": exit_price,
+        "pnl": round(realized_pnl, 4),
+        "pnl_pct": pnl_pct * 100 * cap_snap["leverage"],
+        "reason": reason,
+        "secured": 0, "compounded": 0,
+        "duration_s": time.time() - cap_snap["opened_at"],
+        "ts": time.strftime("%Y-%m-%d %H:%M"),
+    }
+
+    with _state_lock:
+        _capital   += closed_margin + realized_pnl
+        _daily_pnl += realized_pnl
+        cap_after   = _capital
+        _trades.insert(0, trade)
+        if len(_trades) > 200:
+            _trades.pop()
+
+    pct_closed = int(fraction * 100)
+    pct_riding = 100 - pct_closed
+    log("ok" if realized_pnl >= 0 else "warn",
+        f"PARTIAL-{pct_closed}% {cap_snap['side'].upper()} {market} @ ${exit_price:.4f} "
+        f"locked=${realized_pnl:+.4f} ({pnl_pct * cap_snap['leverage'] * 100:+.1f}% lev) "
+        f"— {pct_riding}% riding [{reason}]")
+    notify(
+        f"💰 *{DRIFT_BOT_NAME}*\n"
+        f"PARTIAL EXIT {market} ({pct_closed}%)\n"
+        f"Locked: ${realized_pnl:+.4f}\n"
+        f"Remaining: {pct_riding}% still riding\n"
+        f"Capital now: ${cap_after:.2f}"
+    )
+    _save_state()
+
+
 def monitor_positions():
     # TP/SL exits are handled exclusively by run_position_price_updater (every 5s).
     # This function only updates trailing peaks so the 60s loop keeps them current.
@@ -2543,10 +2610,26 @@ def run_position_price_updater():
                 elif DRIFT_SL_MARGIN_PCT > 0 and pnl <= -(updated["size"] / updated["leverage"] * DRIFT_SL_MARGIN_PCT):
                     sl_usd = updated["size"] / updated["leverage"] * DRIFT_SL_MARGIN_PCT
                     close_position(market, price, f"SL${sl_usd:.1f}")
-                # ── Max hold time — force-exit stale positions ────────────
+                # ── Stale check — ride upswings, pull $2 if stalling ─────
                 elif DRIFT_MAX_HOLD_MINUTES > 0 and \
                      (time.time() - updated["opened_at"]) > DRIFT_MAX_HOLD_MINUTES * 60:
-                    close_position(market, price, f"TIMEOUT-{'PROFIT' if pnl > 0 else 'FLAT'}")
+                    with _state_lock:
+                        hist = list(_price_history.get(market, []))
+                    ref_prices = [p for t, p in hist if t <= time.time() - 300]
+                    ref = ref_prices[-1] if ref_prices else None
+                    if ref and ((updated["side"] == "long"  and price > ref * 1.001) or
+                                (updated["side"] == "short" and price < ref * 0.999)):
+                        # Still moving our way — reset clock, keep riding
+                        with _state_lock:
+                            if market in _positions:
+                                _positions[market]["opened_at"] = time.time()
+                        log("info", f"Upswing ongoing — clock reset (pnl={pnl:+.2f})", market)
+                    elif pnl > 0:
+                        # Stalling with profit — lock $2, let rest ride
+                        partial_close_position(market, price, 2.0, "STALL-PARTIAL")
+                    else:
+                        # Stalling with no profit — cut it
+                        close_position(market, price, "STALL-FLAT")
         except Exception as e:
             log("warn", f"Price updater error: {e}")
         time.sleep(1)
