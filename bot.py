@@ -2392,18 +2392,14 @@ def _eval_coin(coin):
             _log_scan(symbol, mint, bond, _sig_pre, "vel", 7, "BOND STALLED")
             return None
         market = get_market_data(mint)
-        if not market or market["price"] <= 0:
-            _vsol = coin.get("vsol", 0); _vtok = coin.get("vtok", 0); _sp = get_sol_price()
-            if _vsol > 0 and _vtok > 0 and _sp:
-                _vtok_whole = _vtok / 1e6  # base units → whole tokens (matches DexScreener priceUsd)
-                market = {"price": (_vsol / max(_vtok_whole, 1)) * _sp, "liq": 0, "change1h": 0, "age_h": 0, "change5m": 0}
-            else:
-                return None
-        # Volume gate — only enforce when DexScreener has indexed the pair
-        if market.get("pair_address") and market.get("vol_m5", 0) < MIN_VOL_5M:
+        # Require DexScreener indexing — no pair address means no volume data, skip
+        if not market or not market.get("pair_address") or market["price"] <= 0:
+            _log_scan(symbol, mint, bond, _sig_pre, "vol", 8, "NOT INDEXED YET")
+            return None
+        if market.get("vol_m5", 0) < MIN_VOL_5M:
             _log_scan(symbol, mint, bond, _sig_pre, "vol", 8, f"VOL ${market['vol_m5']:.0f}<{MIN_VOL_5M:.0f}")
             return None
-        if market.get("change5m", 0) < -3 and market.get("pair_address", ""):
+        if market.get("change5m", 0) < -3:
             _log_scan(symbol, mint, bond, _sig_pre, "mom", 8, f"5M DOWN {market['change5m']:.1f}%")
             return None
         impact = jup_price_impact(mint, trade_size())
@@ -2436,14 +2432,10 @@ def _eval_coin(coin):
             _log_scan(symbol, mint, bond, _sig_pre, "sig", 7, f"SIG {sig_score}<{MIN_SIGNAL_SCORE}")
             return None
         market = get_market_data(mint)
-        if not market or market["price"] <= 0:
-            _vsol = coin.get("vsol", 0); _vtok = coin.get("vtok", 0); _sp = get_sol_price()
-            if _vsol > 0 and _vtok > 0 and _sp:
-                _vtok_whole = _vtok / 1e6  # base units → whole tokens
-                market = {"price": (_vsol / max(_vtok_whole, 1)) * _sp, "liq": 0, "change1h": 0, "age_h": 0}
-            else:
-                return None
-        if market.get("pair_address") and market.get("vol_m5", 0) < MIN_VOL_5M:
+        if not market or not market.get("pair_address") or market["price"] <= 0:
+            _log_scan(symbol, mint, bond, _sig_pre, "vol", 8, "NOT INDEXED YET")
+            return None
+        if market.get("vol_m5", 0) < MIN_VOL_5M:
             _log_scan(symbol, mint, bond, _sig_pre, "vol", 8, f"VOL ${market['vol_m5']:.0f}<{MIN_VOL_5M:.0f}")
             return None
         impact = jup_price_impact(mint, trade_size())
