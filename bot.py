@@ -61,6 +61,7 @@ PAPER_MODE         = _PAPER_ENV == "true" or not WALLET or not WALLET_PRIVATE_KE
 PROFIT_GOAL       = float(os.environ.get("PROFIT_GOAL", "25000"))
 RISK_LEVEL        = os.environ.get("RISK_LEVEL", "standard").lower()  # conservative / standard / aggressive
 BOT_NAME          = os.environ.get("BOT_NAME", "Boogey's Treasure Chest")
+BOT_PAUSED        = os.environ.get("BOT_PAUSED", "false").lower() == "true"  # set true in Railway to halt all trading
 
 # Position sizing — capital-tiered (protects small accounts)
 MIN_TRADE         = float(os.environ.get("MIN_TRADE",   "3"))
@@ -3280,7 +3281,9 @@ def status():
     paused = _pause_until > time.time()
     daily_loss_pct = round((_day_start_cap - cap) / max(_day_start_cap, 1) * 100, 1) if _day_start_cap > 0 else 0
 
-    if not scan_active:
+    if BOT_PAUSED:
+        health = ("#a78bfa", "🟣", "MAINTENANCE", "Set BOT_PAUSED=false in Railway to resume")
+    elif not scan_active:
         health = ("#f87171", "🔴", "HALTED", "Capital too low — scanner stopped")
     elif paused:
         resume = time.strftime("%H:%M", time.localtime(_pause_until))
@@ -3300,8 +3303,8 @@ def status():
     wr_c   = "#4ade80" if wr >= 55 else ("#fbbf24" if wr >= 40 else "#f87171")
     pnl_c  = "#4ade80" if pnl >= 0 else "#f87171"
     dl_c   = c3(daily_loss_pct, 10, 18)
-    scan_c = "#4ade80" if (not paused and scan_active) else ("#fbbf24" if paused else "#f87171")
-    scan_t = "SCANNING" if (not paused and scan_active) else ("PAUSED" if paused else "HALTED")
+    scan_c = "#a78bfa" if BOT_PAUSED else ("#4ade80" if (not paused and scan_active) else ("#fbbf24" if paused else "#f87171"))
+    scan_t = "MAINTENANCE" if BOT_PAUSED else ("SCANNING" if (not paused and scan_active) else ("PAUSED" if paused else "HALTED"))
 
     day_rows = ""
     for d in reversed(_week_day_logs[-7:]):
@@ -6758,15 +6761,22 @@ if __name__ == "__main__":
         log("warn", "⚠️  No Redis configured — capital saved to /tmp only (wiped on redeploy). "
             "Set UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN in Railway for safe persistence.")
 
-    threading.Thread(target=_notify_worker,    daemon=True).start()
-    threading.Thread(target=monitor_loop,      daemon=True).start()
-    threading.Thread(target=scanner_loop,      daemon=True).start()
-    threading.Thread(target=daily_summary_loop, daemon=True).start()
-    if COPY_TRADE:
-        threading.Thread(target=copy_trade_loop, daemon=True).start()
-    t_signals = threading.Thread(target=run_signal_refresh_loop, daemon=True)
-    t_signals.start()
-    threading.Thread(target=run_dsc_refresh_loop, daemon=True).start()
+    threading.Thread(target=_notify_worker, daemon=True).start()
+
+    if BOT_PAUSED:
+        log("warn", "=" * 55)
+        log("warn", "BOT IS PAUSED — set BOT_PAUSED=false in Railway to resume")
+        log("warn", "UI is live. Zero trading activity.")
+        log("warn", "=" * 55)
+    else:
+        threading.Thread(target=monitor_loop,       daemon=True).start()
+        threading.Thread(target=scanner_loop,       daemon=True).start()
+        threading.Thread(target=daily_summary_loop, daemon=True).start()
+        if COPY_TRADE:
+            threading.Thread(target=copy_trade_loop, daemon=True).start()
+        t_signals = threading.Thread(target=run_signal_refresh_loop, daemon=True)
+        t_signals.start()
+        threading.Thread(target=run_dsc_refresh_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
     log("ok", "=" * 55)
     log("ok", f"Mode      : {'PAPER' if PAPER_MODE else 'LIVE'}")
