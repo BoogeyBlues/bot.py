@@ -142,6 +142,11 @@ USDC_MINT  = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 WSOL_MINT  = "So11111111111111111111111111111111111111112"
 GMGN_ROUTE = "https://gmgn.ai/defi/router/v1/sol/tx/get_swap_route"
 
+# Jupiter Quote API — price impact filter
+JUPITER_QUOTE_URL  = "https://api.jup.ag/swap/v1/quote"
+JUPITER_API_KEY    = os.environ.get("JUPITER_API_KEY", "")       # optional — free without key
+JUP_IMPACT_MAX_PCT = float(os.environ.get("JUP_IMPACT_MAX_PCT", "3.0"))  # skip if buying our size costs >3%
+
 # Copy trading via GMGN smart wallets
 COPY_TRADE        = os.environ.get("COPY_TRADE", "true").lower() == "true"
 COPY_WINRATE_MIN  = float(os.environ.get("COPY_WINRATE_MIN",  "65"))  # was 60 — only elite wallets
@@ -1083,6 +1088,56 @@ def get_sol_price():
     except Exception:
         pass
     return None
+
+# ── JUPITER PRICE IMPACT ────────────────────────────────────────
+_jup_impact_cache = {}   # mint -> (timestamp, impact_pct)
+_JUP_CACHE_TTL    = 30   # seconds
+
+def jup_price_impact(mint: str, usd_amount: float) -> float:
+    """
+    GET /swap/v1/quote — returns priceImpactPct for buying `usd_amount` USD
+    worth of `mint` using SOL as input.  Returns 0.0 on any failure so the
+    caller never blocks an entry just because Jupiter has no route (e.g. a
+    token still on the pump.fun bonding curve that isn't on Raydium yet).
+    Returns a large number only when Jupiter explicitly quotes a high impact.
+    """
+    now = time.time()
+    hit = _jup_impact_cache.get(mint)
+    if hit and now - hit[0] < _JUP_CACHE_TTL:
+        return hit[1]
+    try:
+        sol_price = get_sol_price()
+        if not sol_price or sol_price <= 0:
+            return 0.0
+        lamports = int((usd_amount / sol_price) * 1_000_000_000)
+        if lamports <= 0:
+            return 0.0
+        hdrs = {"Accept": "application/json"}
+        if JUPITER_API_KEY:
+            hdrs["x-api-key"] = JUPITER_API_KEY
+        r = _session.get(
+            JUPITER_QUOTE_URL,
+            params={
+                "inputMint":                 WSOL_MINT,
+                "outputMint":                mint,
+                "amount":                    lamports,
+                "swapMode":                  "ExactIn",
+                "slippageBps":               50,
+                "restrictIntermediateTokens":"true",
+                "maxAccounts":               64,
+                "instructionVersion":        "V1",
+            },
+            headers=hdrs,
+            timeout=6
+        )
+        if r.status_code == 200:
+            impact = float(r.json().get("priceImpactPct", 0) or 0)
+            _jup_impact_cache[mint] = (now, impact)
+            return impact
+    except Exception:
+        pass
+    _jup_impact_cache[mint] = (now, 0.0)
+    return 0.0
 
 # ── RUGCHECK ────────────────────────────────────────────────────
 _rug_cache    = {}  # mint -> (timestamp, result)
@@ -2195,6 +2250,10 @@ def _eval_coin(coin):
         if market.get("change5m", 0) < -3 and market.get("pair_address", ""):
             _log_scan(symbol, mint, bond, _sig_pre, "mom", 8, f"5M DOWN {market['change5m']:.1f}%")
             return None
+        impact = jup_price_impact(mint, trade_size())
+        if impact > JUP_IMPACT_MAX_PCT:
+            _log_scan(symbol, mint, bond, _sig_pre, "liq", 9, f"IMPACT {impact:.1f}%")
+            return None
         return {"action": "trade", "strategy": "bond", "mint": mint, "symbol": symbol,
                 "price": market["price"], "bond": bond, "sig_score": sig_score,
                 "pump_swap": coin.get("pump_swap", False), "market": market}
@@ -2222,6 +2281,10 @@ def _eval_coin(coin):
                 market = {"price": (_vsol / max(_vtok_whole, 1)) * _sp, "liq": 0, "change1h": 0, "age_h": 0}
             else:
                 return None
+        impact = jup_price_impact(mint, trade_size())
+        if impact > JUP_IMPACT_MAX_PCT:
+            _log_scan(symbol, mint, bond, _sig_pre, "liq", 9, f"IMPACT {impact:.1f}%")
+            return None
         return {"action": "trade", "strategy": "trench", "mint": mint, "symbol": symbol,
                 "price": market["price"], "bond": bond, "sig_score": sig_score,
                 "pump_swap": coin.get("pump_swap", False), "market": market}
@@ -2253,6 +2316,9 @@ def _eval_coin(coin):
             if sig_score < 1:
                 return None
             if not is_1m_trending_up(market.get("pair_address", "")):
+                return None
+            impact = jup_price_impact(mint, trade_size())
+            if impact > JUP_IMPACT_MAX_PCT:
                 return None
             return {"action": "trade", "strategy": "spike", "mint": mint, "symbol": symbol,
                     "price": market["price"], "bond": bond, "sig_score": sig_score,
