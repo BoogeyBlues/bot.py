@@ -144,6 +144,13 @@ COPY_MAX_WALLETS  = int(os.environ.get("COPY_MAX_WALLETS",    "5"))
 COPY_MAX_AGE_SECS = int(os.environ.get("COPY_MAX_AGE_SECS",  "120"))  # ignore trades older than 2 min
 # Manually tracked wallets — comma-separated Solana addresses; merged with GMGN auto-discovered wallets
 TRACKED_WALLETS   = [w.strip() for w in os.environ.get("TRACKED_WALLETS", "").split(",") if w.strip()]
+# Pinned wallets — always monitored, mirror their exact USD trade size, use bot's own TP/SL/exits
+PINNED_WALLETS = [
+    "4Be9CvxqHW6BYiRAxW9Q3xu1ycTMWaL5z8NX4HR3ha7t",
+    "CxgPWvH2GoEDENELne2XKAR2z2Fr4shG2uaeyqZceGve",
+    "2X4H5Y9C4Fy6Pf3wpq8Q4gMvLcWvfrrwDv2bdR8AAwQv",
+]
+COPY_MIRROR_MAX = float(os.environ.get("COPY_MIRROR_MAX", "50"))  # cap mirrored size at $50
 COPY_REFRESH_MINS = int(os.environ.get("COPY_REFRESH_MINS",  "60"))   # refresh wallet list hourly
 COPY_TP_PCT       = float(os.environ.get("COPY_TP_PCT",       "100"))  # was 40 — let copy trades run
 COPY_SL_PCT       = float(os.environ.get("COPY_SL_PCT",       "15"))
@@ -1779,6 +1786,10 @@ def copy_trade_loop():
             for addr in TRACKED_WALLETS:
                 if addr not in tracked_addrs:
                     wallets.append({"address": addr, "winrate": 100.0})
+            # Always include pinned wallets — mirror exact size, bot's own TP/SL
+            for addr in PINNED_WALLETS:
+                if addr not in tracked_addrs:
+                    wallets.append({"address": addr, "winrate": 100.0, "pinned": True})
 
             if not wallets:
                 time.sleep(60)
@@ -1844,9 +1855,19 @@ def copy_trade_loop():
                             continue
                         with _copy_lock:
                             _copied_mints[mint] = time.time()
-                        amt = trade_size()
-                        log("ok", f"COPY {addr[:8]}... WR:{w['winrate']}% 5m={market.get('change5m',0):+.1f}% | ${amt:.2f} | sig={sig_score}", symbol)
-                        notify(f"📋 COPY {symbol}",
+                        # Pinned wallets: mirror their exact USD trade size (capped at COPY_MIRROR_MAX)
+                        if w.get("pinned"):
+                            raw_usd = float(
+                                act.get("cost_usd") or act.get("usd_value") or
+                                act.get("value_usd") or act.get("cost") or 0
+                            )
+                            amt = min(max(raw_usd, MIN_TRADE), COPY_MIRROR_MAX) if raw_usd > 0 else trade_size()
+                            tag = f"PINNED {addr[:8]}..."
+                        else:
+                            amt = trade_size()
+                            tag = f"COPY {addr[:8]}..."
+                        log("ok", f"{tag} WR:{w['winrate']}% 5m={market.get('change5m',0):+.1f}% | ${amt:.2f} | sig={sig_score}", symbol)
+                        notify(f"📋 {'PINNED' if w.get('pinned') else 'COPY'} {symbol}",
                                f"Wallet: {addr[:8]}...\nWin rate: {w['winrate']}%\nAmount: ${amt:.2f}")
                         enter_trade(mint, symbol, market["price"], amt, "copy", 0, 0)
                     time.sleep(0.5)
