@@ -151,7 +151,7 @@ PINNED_WALLETS = [
     "2X4H5Y9C4Fy6Pf3wpq8Q4gMvLcWvfrrwDv2bdR8AAwQv",
 ]
 COPY_REFRESH_MINS = int(os.environ.get("COPY_REFRESH_MINS",  "60"))   # refresh wallet list hourly
-COPY_TP_PCT       = float(os.environ.get("COPY_TP_PCT",       "100"))  # was 40 — let copy trades run
+COPY_TP_PCT       = float(os.environ.get("COPY_TP_PCT",       "20"))
 COPY_SL_PCT       = float(os.environ.get("COPY_SL_PCT",       "15"))
 COPY_MAX_SECS     = int(os.environ.get("COPY_MAX_SECS",       "180"))
 GMGN_RANK         = "https://gmgn.ai/defi/quotation/v1/rank/sol/wallets/7d"
