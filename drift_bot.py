@@ -1,4 +1,4 @@
-import os, time, threading, requests, json, hmac, hashlib
+import os, time, threading, requests, json
 from collections import deque
 from flask import Flask, jsonify, request as flask_request
 
@@ -34,9 +34,6 @@ DRIFT_TUNE_EVERY   = int(os.environ.get("DRIFT_TUNE_EVERY",   "3")) # retune aft
 DRIFT_COMPOUND_PCT = float(os.environ.get("DRIFT_COMPOUND_PCT", "0.10"))  # % of profit reinvested
 REDIS_URL          = os.environ.get("UPSTASH_REDIS_REST_URL", "")
 REDIS_TOKEN        = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
-BYBIT_API_KEY      = os.environ.get("BYBIT_API_KEY", "")
-BYBIT_API_SECRET   = os.environ.get("BYBIT_API_SECRET", "")
-BYBIT_BASE_URL     = "https://api.bybit.com"
 
 MILESTONES = [250, 500, 1000, 2500, 5000, 10000, 25000]
 
@@ -192,7 +189,7 @@ def _notify_worker():
         else:
             time.sleep(0.2)
 
-# ── PRICE FEEDS (Pyth primary → OKX fallback → Bybit last resort) ─────────────
+# ── PRICE FEEDS (Pyth primary → OKX fallback → Binance last resort) ──────────
 # Pyth Network feed IDs — the same oracle Drift Protocol uses for settlement.
 # Verified via https://hermes.pyth.network/v2/price_feeds
 _PYTH_FEEDS = {
@@ -235,9 +232,9 @@ _OKX_SYM = {
     "PYTH":   "PYTH-USDT-SWAP", "SHIB":   "SHIB-USDT-SWAP",
 }
 
-# Bybit last-resort fallback (spot, same symbol convention as OKX minus -SWAP)
-_BYBIT_SYM = {k: v.replace("-USDT-SWAP", "USDT") for k, v in _OKX_SYM.items()}
-_BYBIT_SYM["RNDR"] = "RNDRUSDT"   # Bybit uses RNDR, not RENDER
+# Binance last-resort fallback (spot, no API key needed)
+_BINANCE_SYM = {k: v.replace("-USDT-SWAP", "USDT") for k, v in _OKX_SYM.items()}
+_BINANCE_SYM["RNDR"] = "RNDRUSDT"
 
 # Per-market price cache: {market: (price, fetched_at)}
 _price_cache      = {}
@@ -300,23 +297,21 @@ def _fetch_all_prices_okx(markets):
     except Exception:
         return {}
 
-def _fetch_price_bybit(market):
-    """Last-resort single-market Bybit fetch."""
-    sym = _BYBIT_SYM.get(market.upper())
+def _fetch_price_binance(market):
+    """Last-resort single-market Binance spot fetch (no API key required)."""
+    sym = _BINANCE_SYM.get(market.upper())
     if not sym:
         return None
     try:
         r = _session.get(
-            "https://api.bybit.com/v5/market/tickers",
-            params={"category": "spot", "symbol": sym},
+            "https://api.binance.com/api/v3/ticker/price",
+            params={"symbol": sym},
             timeout=8
         )
         if r.status_code == 200:
-            items = r.json().get("result", {}).get("list", [])
-            if items:
-                price = float(items[0].get("lastPrice", 0))
-                if price > 0:
-                    return price
+            price = float(r.json().get("price", 0))
+            if price > 0:
+                return price
     except Exception:
         pass
     return None
@@ -324,9 +319,9 @@ def _fetch_price_bybit(market):
 def refresh_price_cache(markets):
     """
     Called once per trading loop tick.
-    1. Pyth batch  — one request, all markets with known feed IDs
-    2. OKX batch   — one request for remaining markets (perp mark prices)
-    3. Bybit individual — last resort for anything still missing
+    1. Pyth batch    — one request, all markets with known feed IDs
+    2. OKX batch     — one request for remaining markets (perp mark prices)
+    3. Binance spot  — last resort for anything still missing
     """
     now    = time.time()
     prices = _fetch_all_prices_pyth(markets)
@@ -336,13 +331,13 @@ def refresh_price_cache(markets):
     if missing:
         prices.update(_fetch_all_prices_okx(missing))
 
-    # Bybit for anything still missing
+    # Binance for anything still missing
     still_missing = [m for m in markets if m not in prices]
     for market in still_missing:
-        p = _fetch_price_bybit(market)
+        p = _fetch_price_binance(market)
         if p:
             prices[market] = p
-            log("info", f"Bybit fallback: ${p:.4f}", market)
+            log("info", f"Binance fallback: ${p:.4f}", market)
 
     with _price_cache_lock:
         for market, price in prices.items():
@@ -375,7 +370,7 @@ def _prefetch_price_history(markets):
             log("warn", f"Candle pre-fetch failed: {e}", market)
 
 def get_market_price(market):
-    """Return cached price if fresh, otherwise fetch individually via Pyth → OKX → Bybit."""
+    """Return cached price if fresh, otherwise fetch individually via Pyth → OKX → Binance."""
     market = market.upper()
     with _price_cache_lock:
         cached = _price_cache.get(market)
@@ -403,7 +398,7 @@ def get_market_price(market):
         with _price_cache_lock:
             _price_cache[market] = (price, time.time())
         return price
-    price = _fetch_price_bybit(market)
+    price = _fetch_price_binance(market)
     if price:
         with _price_cache_lock:
             _price_cache[market] = (price, time.time())
@@ -676,87 +671,6 @@ def _execute_zeta_order(market, side, size_usd, leverage) -> bool:
         log("err", f"Zeta order error: {e}")
     return False
 
-# ── BYBIT EXECUTION ──────────────────────────────────────────────
-def _bybit_headers(ts, body_str):
-    recv = "5000"
-    sig  = hmac.new(BYBIT_API_SECRET.encode(),
-                    f"{ts}{BYBIT_API_KEY}{recv}{body_str}".encode(),
-                    hashlib.sha256).hexdigest()
-    return {
-        "X-BAPI-API-KEY":     BYBIT_API_KEY,
-        "X-BAPI-SIGN":        sig,
-        "X-BAPI-SIGN-TYPE":   "2",
-        "X-BAPI-TIMESTAMP":   ts,
-        "X-BAPI-RECV-WINDOW": recv,
-        "Content-Type":       "application/json",
-    }
-
-def _bybit_qty(price, size_usd):
-    qty = size_usd / price
-    if price >= 100:
-        return round(qty, 3)
-    if price >= 1:
-        return round(qty, 1)
-    if price >= 0.001:
-        return int(qty)
-    return int(qty / 1000) * 1000  # PEPE/BONK — nearest thousand
-
-def _execute_bybit_order(market, side, size_usd, leverage) -> bool:
-    if not BYBIT_API_KEY or not BYBIT_API_SECRET:
-        log("err", "BYBIT_API_KEY / BYBIT_API_SECRET not set")
-        return False
-    symbol = _BYBIT_SYM.get(market.upper())
-    if not symbol:
-        log("err", f"No Bybit symbol for {market}")
-        return False
-    price = get_market_price(market)
-    if not price:
-        log("err", f"Cannot get price for {market}")
-        return False
-    qty = _bybit_qty(price, size_usd)
-    # set leverage (non-fatal)
-    ts       = str(int(time.time() * 1000))
-    lev_body = json.dumps({"category": "linear", "symbol": symbol,
-                            "buyLeverage": str(int(leverage)),
-                            "sellLeverage": str(int(leverage))})
-    try:
-        _session.post(f"{BYBIT_BASE_URL}/v5/position/set-leverage",
-                      headers=_bybit_headers(ts, lev_body),
-                      data=lev_body, timeout=10)
-    except Exception:
-        pass
-    # place market order
-    ts         = str(int(time.time() * 1000))
-    order_body = json.dumps({"category": "linear", "symbol": symbol,
-                              "side": "Buy" if side == "long" else "Sell",
-                              "orderType": "Market", "qty": str(qty)})
-    r    = _session.post(f"{BYBIT_BASE_URL}/v5/order/create",
-                         headers=_bybit_headers(ts, order_body),
-                         data=order_body, timeout=15)
-    data = r.json()
-    if data.get("retCode") != 0:
-        log("err", f"Bybit order failed: {data.get('retMsg')} [{data.get('retCode')}]", market)
-        return False
-    log("ok", f"Bybit {side} {market} qty={qty} orderId={data['result'].get('orderId','')[:16]}", market)
-    return True
-
-def _close_bybit_position(market, side) -> bool:
-    symbol = _BYBIT_SYM.get(market.upper())
-    if not symbol or not BYBIT_API_KEY:
-        return False
-    ts   = str(int(time.time() * 1000))
-    body = json.dumps({"category": "linear", "symbol": symbol,
-                       "side": "Sell" if side == "long" else "Buy",
-                       "orderType": "Market", "qty": "0", "reduceOnly": True})
-    r    = _session.post(f"{BYBIT_BASE_URL}/v5/order/create",
-                         headers=_bybit_headers(ts, body),
-                         data=body, timeout=15)
-    data = r.json()
-    if data.get("retCode") != 0:
-        log("err", f"Bybit close failed: {data.get('retMsg')}", market)
-        return False
-    return True
-
 # ── JUPITER PERPS EXECUTION ────────────────────────────────────────
 # Markets: SOL, ETH, BTC only (JLP pool composition)
 _JPERP_PROGRAM   = "PERPHjGBqRHArX4DySjwM6UJHiR3sWAatqfdBS2qQJu"
@@ -1026,8 +940,6 @@ def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=N
     if not DRIFT_PAPER_MODE:
         if DRIFT_EXCHANGE == "zeta":
             ok = _execute_zeta_order(market, side, size_usd, leverage)
-        elif DRIFT_EXCHANGE == "bybit":
-            ok = _execute_bybit_order(market, side, size_usd, leverage)
         elif DRIFT_EXCHANGE == "jupiter":
             ok = _execute_jupiter_perp_order(market, side, size_usd, leverage)
         else:
@@ -1064,9 +976,7 @@ def close_position(market, exit_price, reason=""):
     if not pos:
         return
     if not DRIFT_PAPER_MODE:
-        if DRIFT_EXCHANGE == "bybit":
-            _close_bybit_position(market, pos["side"])
-        elif DRIFT_EXCHANGE == "jupiter":
+        if DRIFT_EXCHANGE == "jupiter":
             _close_jupiter_perp_position(market, pos["side"], pos["size"])
 
     if pos["side"] == "long":
@@ -3097,11 +3007,7 @@ setInterval(pollLogs,   3000);
 # ── ENTRY POINT ───────────────────────────────────────────────────
 if __name__ == "__main__":
     if not DRIFT_PAPER_MODE:
-        if DRIFT_EXCHANGE == "bybit":
-            if not BYBIT_API_KEY or not BYBIT_API_SECRET:
-                log("err", "DRIFT_EXCHANGE=bybit requires BYBIT_API_KEY and BYBIT_API_SECRET env vars.")
-                raise SystemExit(1)
-        elif DRIFT_EXCHANGE == "jupiter":
+        if DRIFT_EXCHANGE == "jupiter":
             if not WALLET_PRIVATE_KEY:
                 log("err", "DRIFT_EXCHANGE=jupiter requires WALLET_PRIVATE_KEY env var.")
                 raise SystemExit(1)
