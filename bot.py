@@ -68,10 +68,11 @@ MAX_TRADE         = float(os.environ.get("MAX_TRADE",   "500"))
 FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "0"))   # 0 = use tiered % sizing
 
 # Capital tiers per risk level: (min_capital, trade_pct, daily_max_trades)
+# daily_max set to 9999 = no cap — bot runs 24/7
 _RISK_TIERS = {
-    "conservative": [(5_000,0.12,6),(500,0.10,6),(100,0.08,6),(0,0.05,6)],
-    "standard":     [(5_000,0.18,10),(500,0.15,10),(100,0.12,10),(0,0.08,10)],
-    "aggressive":   [(5_000,0.22,6),(500,0.18,6),(100,0.15,6),(0,0.12,6)],
+    "conservative": [(5_000,0.12,9999),(500,0.10,9999),(100,0.08,9999),(0,0.05,9999)],
+    "standard":     [(5_000,0.18,9999),(500,0.15,9999),(100,0.12,9999),(0,0.08,9999)],
+    "aggressive":   [(5_000,0.22,9999),(500,0.18,9999),(100,0.15,9999),(0,0.12,9999)],
 }
 _CAP_TIERS = _RISK_TIERS.get(RISK_LEVEL, _RISK_TIERS["standard"])
 
