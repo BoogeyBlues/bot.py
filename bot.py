@@ -201,9 +201,12 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 NTFY_TOPIC       = os.environ.get("NTFY_TOPIC", "")
 
 # Social / quality gates
-MIN_REPLIES  = int(os.environ.get("MIN_REPLIES",  "8"))    # be earlier — 8 replies is enough signal
-MIN_SOCIALS  = int(os.environ.get("MIN_SOCIALS",   "1"))    # Twitter alone is enough — Telegram/website follows
-MIN_LIQ      = float(os.environ.get("MIN_LIQ",    "500"))   # was 300 — need real liquidity to sustain moves
+MIN_REPLIES      = int(os.environ.get("MIN_REPLIES",      "8"))
+MIN_SOCIALS      = int(os.environ.get("MIN_SOCIALS",       "1"))
+MIN_LIQ          = float(os.environ.get("MIN_LIQ",        "500"))
+MIN_VOL_5M       = float(os.environ.get("MIN_VOL_5M",     "5000"))  # $5k 5-min volume — no volume = no momentum
+MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "1"))     # require ≥1 GMGN signal point to enter
+MAX_RUG_SCORE    = int(os.environ.get("MAX_RUG_SCORE",    "400"))   # rugcheck score ceiling (higher = riskier)
 
 # General
 MAX_OPEN      = int(os.environ.get("MAX_OPEN",      "10"))
@@ -259,6 +262,7 @@ _copied_mints     = {}   # mint -> timestamp, to avoid double-copy
 _copy_lock        = threading.Lock()
 _gmgn_backoff     = 0    # seconds to wait before retrying GMGN rank
 _sold_mints       = {}   # mint -> timestamp, cooldown after selling to prevent re-buy
+_bond_prev        = {}   # mint -> (bond_pct, timestamp) — velocity check: skip stalled bonds
 _gmgn_sm_signal_mints  = set()   # smart money buy signal mints (type 12)
 _gmgn_surge_mints      = set()   # price surge signal mints (type 6)
 _gmgn_kol_mints        = set()   # KOL buy mints
@@ -1140,6 +1144,7 @@ def run_rugcheck(mint):
             "has_mint_auth":   any("mint" in r for r in risks),
             "has_freeze_auth": any("freeze" in r for r in risks),
             "is_bundled":      any("insider" in r or "bundle" in r for r in risks),
+            "score":           int(data.get("score", 0) or 0),
         }
         _rug_cache[mint] = (now, result)
         return result
@@ -1147,7 +1152,7 @@ def run_rugcheck(mint):
         return None
 
 def check_holder_concentration(mint) -> tuple:
-    """(ok, reason) — ok=False if top-10 wallets hold >50% of supply."""
+    """(ok, reason) — ok=False if top-10 wallets hold >35% of supply."""
     now = time.time()
     hit = _holder_cache.get(mint)
     if hit and now - hit[0] < _CACHE_TTL:
@@ -1162,7 +1167,7 @@ def check_holder_concentration(mint) -> tuple:
         data = r.json().get("data") or {}
         holders = data.get("holders") or data if isinstance(data, list) else []
         top10_pct = sum(float(h.get("amount_percentage") or h.get("percent") or 0) for h in holders[:10])
-        result = (False, f"top10={top10_pct:.0f}%") if top10_pct > 50 else (True, "")
+        result = (False, f"top10={top10_pct:.0f}%") if top10_pct > 35 else (True, "")
         _holder_cache[mint] = (now, result)
         return result
     except Exception:
@@ -2356,6 +2361,9 @@ def _eval_coin(coin):
             return {"action": "blacklist", "mint": mint}
         if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
             return None
+        if rug and rug.get("score", 0) > MAX_RUG_SCORE:
+            _log_scan(symbol, mint, bond, _sig_pre, "rug", 3, f"RUG SCORE {rug['score']}")
+            return None
         jup_ok, jup_reason = jup_audit_ok(mint)
         if not jup_ok:
             _log_scan(symbol, mint, bond, _sig_pre, "jup", 3, jup_reason[:18].upper())
@@ -2373,6 +2381,16 @@ def _eval_coin(coin):
             _log_scan(symbol, mint, bond, _sig_pre, "sm", 6, "SMART $ SELLING")
             return None
         sig_score = gmgn_signal_score(mint) + dsc_signal_score(mint) + jup_token_signal_score(mint)
+        if sig_score < MIN_SIGNAL_SCORE:
+            _log_scan(symbol, mint, bond, _sig_pre, "sig", 7, f"SIG {sig_score}<{MIN_SIGNAL_SCORE}")
+            return None
+        # Bond velocity: skip if bond hasn't moved ≥0.5% in the last 2 scans
+        _now_ts = time.time()
+        _prev_bond, _prev_ts = _bond_prev.get(mint, (None, 0))
+        _bond_prev[mint] = (bond, _now_ts)
+        if _prev_bond is not None and abs(bond - _prev_bond) < 0.5 and _now_ts - _prev_ts < 120:
+            _log_scan(symbol, mint, bond, _sig_pre, "vel", 7, "BOND STALLED")
+            return None
         market = get_market_data(mint)
         if not market or market["price"] <= 0:
             _vsol = coin.get("vsol", 0); _vtok = coin.get("vtok", 0); _sp = get_sol_price()
@@ -2381,6 +2399,10 @@ def _eval_coin(coin):
                 market = {"price": (_vsol / max(_vtok_whole, 1)) * _sp, "liq": 0, "change1h": 0, "age_h": 0, "change5m": 0}
             else:
                 return None
+        # Volume gate — only enforce when DexScreener has indexed the pair
+        if market.get("pair_address") and market.get("vol_m5", 0) < MIN_VOL_5M:
+            _log_scan(symbol, mint, bond, _sig_pre, "vol", 8, f"VOL ${market['vol_m5']:.0f}<{MIN_VOL_5M:.0f}")
+            return None
         if market.get("change5m", 0) < -3 and market.get("pair_address", ""):
             _log_scan(symbol, mint, bond, _sig_pre, "mom", 8, f"5M DOWN {market['change5m']:.1f}%")
             return None
@@ -2399,6 +2421,9 @@ def _eval_coin(coin):
             return {"action": "blacklist", "mint": mint}
         if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
             return None
+        if rug and rug.get("score", 0) > MAX_RUG_SCORE:
+            _log_scan(symbol, mint, bond, _sig_pre, "rug", 3, f"RUG SCORE {rug['score']}")
+            return None
         if gmgn_smart_money_selling(mint):
             _log_scan(symbol, mint, bond, _sig_pre, "sm", 6, "SMART $ SELLING")
             return None
@@ -2407,6 +2432,9 @@ def _eval_coin(coin):
             _log_scan(symbol, mint, bond, _sig_pre, "holder", 4, holder_reason[:18].upper())
             return None
         sig_score = gmgn_signal_score(mint) + dsc_signal_score(mint) + jup_token_signal_score(mint)
+        if sig_score < MIN_SIGNAL_SCORE:
+            _log_scan(symbol, mint, bond, _sig_pre, "sig", 7, f"SIG {sig_score}<{MIN_SIGNAL_SCORE}")
+            return None
         market = get_market_data(mint)
         if not market or market["price"] <= 0:
             _vsol = coin.get("vsol", 0); _vtok = coin.get("vtok", 0); _sp = get_sol_price()
@@ -2415,6 +2443,9 @@ def _eval_coin(coin):
                 market = {"price": (_vsol / max(_vtok_whole, 1)) * _sp, "liq": 0, "change1h": 0, "age_h": 0}
             else:
                 return None
+        if market.get("pair_address") and market.get("vol_m5", 0) < MIN_VOL_5M:
+            _log_scan(symbol, mint, bond, _sig_pre, "vol", 8, f"VOL ${market['vol_m5']:.0f}<{MIN_VOL_5M:.0f}")
+            return None
         impact = jup_price_impact(mint, trade_size())
         if impact > JUP_IMPACT_MAX_PCT:
             _log_scan(symbol, mint, bond, _sig_pre, "liq", 9, f"IMPACT {impact:.1f}%")
@@ -2431,11 +2462,13 @@ def _eval_coin(coin):
         if not market:
             return None
         if (market["change1h"] >= SPIKE_MIN_1H and market["liq"] >= MIN_LIQ
-                and market["price"] > 0 and market.get("vol_m5", 0) >= 1000):
+                and market["price"] > 0 and market.get("vol_m5", 0) >= MIN_VOL_5M):
             rug = run_rugcheck(mint)
             if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
                 return {"action": "blacklist", "mint": mint}
             if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
+                return None
+            if rug and rug.get("score", 0) > MAX_RUG_SCORE:
                 return None
             holder_ok, holder_reason = check_holder_concentration(mint)
             if not holder_ok:
