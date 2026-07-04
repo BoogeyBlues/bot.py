@@ -178,6 +178,11 @@ GMGN_SM_TRACK      = "https://gmgn.ai/defi/quotation/v1/tracks/smartmoney/sol"
 GMGN_TRENDING_URL  = "https://gmgn.ai/defi/quotation/v1/tokens/trending/sol"
 GMGN_HOT_SEARCH    = "https://gmgn.ai/defi/quotation/v1/tokens/hot_search/sol"
 
+# DexScreener endpoints
+DSC_BASE              = "https://api.dexscreener.com"
+DSC_REFRESH_SECS      = int(os.environ.get("DSC_REFRESH_SECS", "120"))
+DSC_META_MAX          = int(os.environ.get("DSC_META_MAX",     "3"))    # top N trending metas to expand
+
 # Notifications
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -250,6 +255,15 @@ _gmgn_trending_mints   = set()   # trending tokens (1h price movers on GMGN)
 _gmgn_hot_mints        = set()   # hot search tokens (what people are searching on GMGN)
 _gmgn_signal_time      = 0.0     # last signal refresh time
 _signal_lock           = threading.Lock()
+# DexScreener signal sets
+_dsc_boosted_mints     = set()   # tokens currently receiving boost orders
+_dsc_top_mints         = set()   # tokens with most total boost spend
+_dsc_profile_mints     = set()   # tokens that have/recently updated a DSC profile
+_dsc_ad_mints          = set()   # tokens running paid ads on DSC
+_dsc_takeover_mints    = set()   # community takeover tokens
+_dsc_meta_mints        = set()   # tokens in the top trending metas/narratives
+_dsc_signal_time       = 0.0
+_dsc_lock              = threading.Lock()
 scan_log               = []
 _scan_log_lock         = threading.Lock()
 
@@ -1223,6 +1237,200 @@ def gmgn_smart_money_selling(mint) -> bool:
     with _signal_lock:
         return mint in _gmgn_sm_sell_mints
 
+# ── DEXSCREENER INTEGRATIONS ─────────────────────────────────────
+
+def _refresh_dsc_signals():
+    """Pull all DexScreener signal sets: boosts, profiles, ads, takeovers, trending metas."""
+    global _dsc_boosted_mints, _dsc_top_mints, _dsc_profile_mints
+    global _dsc_ad_mints, _dsc_takeover_mints, _dsc_meta_mints, _dsc_signal_time
+    hdrs = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+
+    def _sol_addrs(data, addr_key="tokenAddress", chain_key="chainId"):
+        items = data if isinstance(data, list) else (data or {}).get("pairs", [])
+        return {
+            item.get(addr_key) or item.get("baseToken", {}).get("address", "")
+            for item in (items or [])
+            if (item.get(chain_key, "solana") or "").lower() in ("solana", "")
+            and (item.get(addr_key) or item.get("baseToken", {}).get("address", ""))
+        }
+
+    try:
+        # /token-boosts/latest/v1 — tokens currently receiving boost payments
+        r1 = _session.get(f"{DSC_BASE}/token-boosts/latest/v1", headers=hdrs, timeout=8)
+        boosted = set()
+        if r1.status_code == 200:
+            for item in (r1.json() or []):
+                if (item.get("chainId", "solana") or "").lower() in ("solana", ""):
+                    a = item.get("tokenAddress", "")
+                    if a:
+                        boosted.add(a)
+
+        # /token-boosts/top/v1 — tokens with most total boost spend
+        r2 = _session.get(f"{DSC_BASE}/token-boosts/top/v1", headers=hdrs, timeout=8)
+        top = set()
+        if r2.status_code == 200:
+            for item in (r2.json() or []):
+                if (item.get("chainId", "solana") or "").lower() in ("solana", ""):
+                    a = item.get("tokenAddress", "")
+                    if a:
+                        top.add(a)
+
+        # /token-profiles/latest/v1 — tokens that just created a DSC profile
+        r3 = _session.get(f"{DSC_BASE}/token-profiles/latest/v1", headers=hdrs, timeout=8)
+        profiles = set()
+        if r3.status_code == 200:
+            for item in (r3.json() or []):
+                if (item.get("chainId", "solana") or "").lower() in ("solana", ""):
+                    a = item.get("tokenAddress", "")
+                    if a:
+                        profiles.add(a)
+
+        # /token-profiles/recent-updates/v1 — tokens that recently updated their profile
+        r4 = _session.get(f"{DSC_BASE}/token-profiles/recent-updates/v1", headers=hdrs, timeout=8)
+        if r4.status_code == 200:
+            for item in (r4.json() or []):
+                if (item.get("chainId", "solana") or "").lower() in ("solana", ""):
+                    a = item.get("tokenAddress", "")
+                    if a:
+                        profiles.add(a)
+
+        # /ads/latest/v1 — tokens running paid DexScreener ads
+        r5 = _session.get(f"{DSC_BASE}/ads/latest/v1", headers=hdrs, timeout=8)
+        ads = set()
+        if r5.status_code == 200:
+            data5 = r5.json() or {}
+            for item in (data5 if isinstance(data5, list) else data5.get("ads", [])):
+                if (item.get("chainId", "solana") or "").lower() in ("solana", ""):
+                    a = item.get("tokenAddress", "")
+                    if a:
+                        ads.add(a)
+
+        # /community-takeovers/latest/v1 — community-revived tokens
+        r6 = _session.get(f"{DSC_BASE}/community-takeovers/latest/v1", headers=hdrs, timeout=8)
+        takeovers = set()
+        if r6.status_code == 200:
+            for item in (r6.json() or []):
+                if (item.get("chainId", "solana") or "").lower() in ("solana", ""):
+                    a = item.get("tokenAddress", "")
+                    if a:
+                        takeovers.add(a)
+
+        # /metas/trending/v1 → expand top N metas into token mints
+        r7 = _session.get(f"{DSC_BASE}/metas/trending/v1", headers=hdrs, timeout=8)
+        meta_mints = set()
+        if r7.status_code == 200:
+            metas = r7.json() or []
+            for meta in metas[:DSC_META_MAX]:
+                slug = meta.get("slug", "")
+                if not slug:
+                    continue
+                try:
+                    rm = _session.get(f"{DSC_BASE}/metas/meta/v1/{slug}", headers=hdrs, timeout=8)
+                    if rm.status_code == 200:
+                        for p in (rm.json() or {}).get("pairs", []):
+                            if p.get("chainId", "").lower() == "solana":
+                                a = p.get("baseToken", {}).get("address", "")
+                                if a:
+                                    meta_mints.add(a)
+                except Exception:
+                    pass
+
+        with _dsc_lock:
+            _dsc_boosted_mints  = boosted
+            _dsc_top_mints      = top
+            _dsc_profile_mints  = profiles
+            _dsc_ad_mints       = ads
+            _dsc_takeover_mints = takeovers
+            _dsc_meta_mints     = meta_mints
+            _dsc_signal_time    = time.time()
+        log("info",
+            f"DSC: boost={len(boosted)} top={len(top)} profiles={len(profiles)} "
+            f"ads={len(ads)} takeovers={len(takeovers)} meta={len(meta_mints)}", "DSC")
+    except Exception as e:
+        log("warn", f"DSC signal refresh: {e}", "DSC")
+
+def run_dsc_refresh_loop():
+    """Background thread: refresh DexScreener signals every DSC_REFRESH_SECS seconds."""
+    time.sleep(20)  # stagger from GMGN refresh
+    while True:
+        if time.time() - _dsc_signal_time >= DSC_REFRESH_SECS:
+            _refresh_dsc_signals()
+        time.sleep(60)
+
+def dsc_signal_score(mint) -> int:
+    """
+    Returns 0-6 signal score based on DexScreener paid/organic activity:
+      +2 currently boosted (dev paying for promotion RIGHT NOW)
+      +2 running paid ads
+      +1 top boost list (most total spend)
+      +1 has DSC profile (dev invested in presentation)
+      +1 in a trending narrative meta
+      +1 community takeover
+    """
+    with _dsc_lock:
+        return (
+            (2 if mint in _dsc_boosted_mints   else 0) +
+            (2 if mint in _dsc_ad_mints         else 0) +
+            (1 if mint in _dsc_top_mints        else 0) +
+            (1 if mint in _dsc_profile_mints    else 0) +
+            (1 if mint in _dsc_meta_mints       else 0) +
+            (1 if mint in _dsc_takeover_mints   else 0)
+        )
+
+def dsc_has_orders(mint) -> bool:
+    """/orders/v1 — True if this token has at least one approved paid DSC order."""
+    try:
+        r = _session.get(f"{DSC_BASE}/orders/v1/solana/{mint}",
+                         headers={"User-Agent": "Mozilla/5.0"}, timeout=6)
+        if r.status_code == 200:
+            return any(o.get("status") == "approved" for o in (r.json() or []))
+    except Exception:
+        pass
+    return False
+
+def dsc_get_pairs(mint) -> list:
+    """/token-pairs/v1 — all Solana trading pairs for a given token address."""
+    try:
+        r = _session.get(f"{DSC_BASE}/token-pairs/v1/solana/{mint}",
+                         headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+        if r.status_code == 200:
+            return (r.json() or {}).get("pairs", [])
+    except Exception:
+        pass
+    return []
+
+def dsc_batch_tokens(mints: list) -> dict:
+    """/tokens/v1 — batch-fetch up to 30 token addresses, return {mint: best_pair}."""
+    if not mints:
+        return {}
+    addrs = ",".join(mints[:30])
+    try:
+        r = _session.get(f"{DSC_BASE}/tokens/v1/solana/{addrs}",
+                         headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        if r.status_code == 200:
+            result = {}
+            for p in ((r.json() or {}).get("pairs", [])):
+                addr = (p.get("baseToken") or {}).get("address", "")
+                if addr and addr not in result:
+                    result[addr] = p
+            return result
+    except Exception:
+        pass
+    return {}
+
+def dsc_search(query: str) -> list:
+    """/latest/dex/search — search by token name/symbol, returns Solana pairs only."""
+    try:
+        r = _session.get(f"{DSC_BASE}/latest/dex/search",
+                         params={"q": query},
+                         headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+        if r.status_code == 200:
+            return [p for p in ((r.json() or {}).get("pairs", []))
+                    if p.get("chainId", "").lower() == "solana"]
+    except Exception:
+        pass
+    return []
+
 # ── USDC PROFIT LOCK ─────────────────────────────────────────────
 def lock_profit_to_usdc(profit_usd):
     """Swap profit_usd worth of SOL into USDC via GMGN after winning trade."""
@@ -1956,7 +2164,7 @@ def _eval_coin(coin):
         if gmgn_smart_money_selling(mint):
             _log_scan(symbol, mint, bond, _sig_pre, "sm", 6, "SMART $ SELLING")
             return None
-        sig_score = gmgn_signal_score(mint)
+        sig_score = gmgn_signal_score(mint) + dsc_signal_score(mint)
         market = get_market_data(mint)
         if not market or market["price"] <= 0:
             _vsol = coin.get("vsol", 0); _vtok = coin.get("vtok", 0); _sp = get_sol_price()
@@ -1986,7 +2194,7 @@ def _eval_coin(coin):
         if not holder_ok:
             _log_scan(symbol, mint, bond, _sig_pre, "holder", 4, holder_reason[:18].upper())
             return None
-        sig_score = gmgn_signal_score(mint)
+        sig_score = gmgn_signal_score(mint) + dsc_signal_score(mint)
         market = get_market_data(mint)
         if not market or market["price"] <= 0:
             _vsol = coin.get("vsol", 0); _vtok = coin.get("vtok", 0); _sp = get_sol_price()
@@ -2022,7 +2230,7 @@ def _eval_coin(coin):
                 return None
             if gmgn_smart_money_selling(mint):
                 return None
-            sig_score = gmgn_signal_score(mint)
+            sig_score = gmgn_signal_score(mint) + dsc_signal_score(mint)
             if sig_score < 1:
                 return None
             if not is_1m_trending_up(market.get("pair_address", "")):
@@ -2106,7 +2314,7 @@ def scanner_loop():
                         if gmgn_smart_money_selling(mint):
                             log("warn", "SKIP: smart money selling", symbol)
                             continue
-                        sig_score = gmgn_signal_score(mint)
+                        sig_score = gmgn_signal_score(mint) + dsc_signal_score(mint)
                         market = get_market_data(mint)
                         if market and market["price"] > 0 and market["liq"] >= MIN_LIQ:
                             with trades_lock:
@@ -2201,9 +2409,9 @@ def scanner_loop():
                 if not dev_ok:
                     log("warn", f"SKIP: {dev_reason}", gc["symbol"])
                     continue
-                sig_score = gmgn_signal_score(gmint)
+                sig_score = gmgn_signal_score(gmint) + dsc_signal_score(gmint)
                 if sig_score < 1:
-                    log("info", f"MIGRATION SKIP: sig={sig_score} (no GMGN backing)", gc["symbol"])
+                    log("info", f"MIGRATION SKIP: sig={sig_score} (no signal backing)", gc["symbol"])
                     continue
                 if not is_1m_trending_up(market.get("pair_address", "")):
                     log("info", f"MIGRATION SKIP: 1m not trending up", gc["symbol"])
@@ -2253,7 +2461,7 @@ def scanner_loop():
                     continue
                 with _copy_lock:
                     _copied_mints[sig_mint] = time.time()
-                sig_score = gmgn_signal_score(sig_mint)
+                sig_score = gmgn_signal_score(sig_mint) + dsc_signal_score(sig_mint)
                 sig_sym   = sig_mint[:8]
                 amt       = trade_size()
                 log("ok", f"GMGN SIGNAL | liq=${market['liq']:.0f} 5m={market.get('change5m',0):+.1f}% | sig={sig_score}", sig_sym)
@@ -2263,6 +2471,59 @@ def scanner_loop():
                 time.sleep(0.5)
             if n_signal_entered:
                 log("info", f"GMGN signal scan: entered {n_signal_entered} | pool={len(signal_mints)}")
+
+            # ── DexScreener Boost / Ad / Meta Scan ───────────────────
+            # Enter tokens where devs are actively spending money on DSC
+            # (boosts, ads, trending meta). Stronger signal = dev backing it publicly.
+            with _dsc_lock:
+                dsc_signal_pool = list(
+                    (_dsc_boosted_mints | _dsc_ad_mints | _dsc_meta_mints
+                     | _dsc_top_mints | _dsc_takeover_mints) - blacklisted_mints
+                )
+            n_dsc_entered = 0
+            for dsc_mint in dsc_signal_pool:
+                with trades_lock:
+                    if len(open_trades) >= MAX_OPEN:
+                        break
+                    if dsc_mint in open_trades:
+                        continue
+                with _copy_lock:
+                    if dsc_mint in _copied_mints:
+                        continue
+                if daily_limit_reached():
+                    break
+                market = get_market_data(dsc_mint)
+                if not market or market["price"] <= 0 or market["liq"] < MIN_LIQ:
+                    continue
+                rug = run_rugcheck(dsc_mint)
+                if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
+                    blacklisted_mints.add(dsc_mint)
+                    continue
+                if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
+                    continue
+                if gmgn_smart_money_selling(dsc_mint):
+                    continue
+                if not is_1m_trending_up(market.get("pair_address", "")):
+                    continue
+                with _copy_lock:
+                    _copied_mints[dsc_mint] = time.time()
+                sig_score = gmgn_signal_score(dsc_mint) + dsc_signal_score(dsc_mint)
+                dsc_sym = dsc_mint[:8]
+                amt = trade_size()
+                # Label by which DSC signal triggered
+                with _dsc_lock:
+                    _why = ("BOOST" if dsc_mint in _dsc_boosted_mints else
+                            "ADS"   if dsc_mint in _dsc_ad_mints       else
+                            "META"  if dsc_mint in _dsc_meta_mints      else
+                            "TOP"   if dsc_mint in _dsc_top_mints       else "TAKEOVER")
+                log("ok", f"DSC {_why} | liq=${market['liq']:.0f} 5m={market.get('change5m',0):+.1f}% | sig={sig_score}", dsc_sym)
+                notify(f"📊 DSC {_why} {dsc_sym}",
+                       f"DexScreener signal entry\nLiq: ${market['liq']:.0f}\nSig: {sig_score}\nAmount: ${amt:.2f}")
+                enter_trade(dsc_mint, dsc_sym, market["price"], amt, "copy", 0, 0)
+                n_dsc_entered += 1
+                time.sleep(0.5)
+            if n_dsc_entered:
+                log("info", f"DSC boost scan: entered {n_dsc_entered} | pool={len(dsc_signal_pool)}")
 
         except Exception as e:
             log("err", f"Scanner: {e}")
@@ -6487,6 +6748,7 @@ if __name__ == "__main__":
         threading.Thread(target=copy_trade_loop, daemon=True).start()
     t_signals = threading.Thread(target=run_signal_refresh_loop, daemon=True)
     t_signals.start()
+    threading.Thread(target=run_dsc_refresh_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
     log("ok", "=" * 55)
     log("ok", f"Mode      : {'PAPER' if PAPER_MODE else 'LIVE'}")
