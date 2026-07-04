@@ -76,7 +76,8 @@ _RISK_TIERS = {
 }
 _CAP_TIERS = _RISK_TIERS.get(RISK_LEVEL, _RISK_TIERS["standard"])
 
-MAX_DAILY_LOSS_PCT = float(os.environ.get("MAX_DAILY_LOSS_PCT", "20"))  # stop day if down >20% of start capital
+MAX_DAILY_LOSS_PCT  = float(os.environ.get("MAX_DAILY_LOSS_PCT",  "20"))  # stop day if down >20% of start capital
+SOLD_COOLDOWN_SECS = int(os.environ.get("SOLD_COOLDOWN_SECS", "300"))  # was 1800 — 5 min re-entry window
 
 # Risk limits
 DAILY_LOSS_MAX    = int(os.environ.get("DAILY_LOSS_MAX",  "6"))   # retune after N consecutive losses
@@ -84,10 +85,12 @@ LOSS_COOLDOWN_HRS = float(os.environ.get("LOSS_COOLDOWN_HRS", "0.083")) # 5-min 
 ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # retune every 5 trades for faster learning
 
 # Bond Runner strategy
-BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "42"))  # earlier entry = more upside to graduation
+BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "42"))  # earlier entry = more upside to TP
 BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "60"))
-BOND_TP         = float(os.environ.get("BOND_TP",        "93"))  # closer to graduation spike
+BOND_TP_PCT     = float(os.environ.get("BOND_TP_PCT",    "20"))  # price % TP (was bond-level 93 — never fired)
 BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "8"))
+BOND_GRAD_BOND  = float(os.environ.get("BOND_GRAD_BOND", "90"))  # graduation imminent — tighten TSL
+BOND_GRAD_TSL   = float(os.environ.get("BOND_GRAD_TSL",  "3"))   # tight TSL % near graduation
 BOND_MAX_SECS       = int(os.environ.get("BOND_MAX_SECS",       "600"))  # 10 min — early runners need time
 BOND_STALE_SECS     = int(os.environ.get("BOND_STALE_SECS",     "180"))  # 3 min — allow brief consolidations
 DEAD_PAIR_SECS      = int(os.environ.get("DEAD_PAIR_SECS",       "20"))  # exit if zero bond movement in 20s
@@ -96,7 +99,7 @@ VOL_STALE_SECS      = int(os.environ.get("VOL_STALE_SECS",       "60"))  # exit 
 # Dormant Spike strategy
 SPIKE_MIN_AGE_H = float(os.environ.get("SPIKE_MIN_AGE_H", "12"))
 SPIKE_MIN_1H    = float(os.environ.get("SPIKE_MIN_1H",    "30"))
-SPIKE_TP_PCT    = float(os.environ.get("SPIKE_TP_PCT",    "120"))  # was 40 — let spikes run
+SPIKE_TP_PCT    = float(os.environ.get("SPIKE_TP_PCT",    "20"))   # scalp the spike — most peak at 20-40%
 SPIKE_SL_PCT    = float(os.environ.get("SPIKE_SL_PCT",    "15"))
 SPIKE_MAX_SECS  = int(os.environ.get("SPIKE_MAX_SECS",    "180"))   # 3 min hard cap
 
@@ -109,7 +112,7 @@ TRENCH_MAX_SECS  = int(os.environ.get("TRENCH_MAX_SECS",    "90"))  # 90s — ve
 
 # Migration bounce — coins that just graduated to Raydium (first 2 min momentum)
 MIGRATE_MAX_AGE  = int(os.environ.get("MIGRATE_MAX_AGE",    "120")) # enter within 2 min of graduation
-MIGRATE_TP_PCT   = float(os.environ.get("MIGRATE_TP_PCT",   "400"))  # was 100 — ride Raydium pumps to 5x
+MIGRATE_TP_PCT   = float(os.environ.get("MIGRATE_TP_PCT",   "40"))  # realistic Raydium bounce (was 400 — fantasy)
 MIGRATE_SL_PCT   = float(os.environ.get("MIGRATE_SL_PCT",   "12"))
 MIGRATE_MAX_SECS = int(os.environ.get("MIGRATE_MAX_SECS",   "300"))
 GRAD_THROUGH     = os.environ.get("GRAD_THROUGH", "true").lower() != "false"  # hold bond positions through graduation to Raydium
@@ -124,9 +127,9 @@ TSL_ACTIVATE_PCT = float(os.environ.get("TSL_ACTIVATE_PCT", "15"))  # lock-in st
 SHARP_DROP_PCT = float(os.environ.get("SHARP_DROP_PCT", "4"))
 
 # Partial take-profit — scale out to lock gains without killing the run
-# TP1: +50% → sell 40% (locks ~$5 on a $10 trade); TP2: +100% → sell 40% of remaining; final 36% rides with TSL
-PARTIAL_TP1_PCT  = float(os.environ.get("PARTIAL_TP1_PCT",  "50"))
-PARTIAL_TP2_PCT  = float(os.environ.get("PARTIAL_TP2_PCT",  "100"))
+# TP1: +12% → sell 30%; TP2: +25% → sell 30% of remaining; final ~50% rides with TSL
+PARTIAL_TP1_PCT  = float(os.environ.get("PARTIAL_TP1_PCT",  "12"))
+PARTIAL_TP2_PCT  = float(os.environ.get("PARTIAL_TP2_PCT",  "25"))
 
 # Bundle mode: "avoid" or "ride"
 BUNDLE_MODE    = os.environ.get("BUNDLE_MODE", "avoid").lower()
@@ -751,7 +754,7 @@ def record_trade(trade_data):
         log("warn", f"Learning record: {e}")
 
 def auto_tune(history):
-    global BOND_ENTRY_MIN, BOND_ENTRY_MAX, SPIKE_TP_PCT, BOND_STALE_SECS, BOND_SL_PCT, BOND_MAX_SECS
+    global BOND_ENTRY_MIN, BOND_ENTRY_MAX, BOND_TP_PCT, SPIKE_TP_PCT, BOND_STALE_SECS, BOND_SL_PCT, BOND_MAX_SECS
     try:
         recent = history[-60:]
         wins   = [t for t in recent if t.get("pnl", 0) > 0]
@@ -791,10 +794,17 @@ def auto_tune(history):
         if len(sl_losses) > len(bond_losses) * 0.6 and BOND_SL_PCT > 6:
             BOND_SL_PCT = round(BOND_SL_PCT - 1, 1)  # tighten SL to cut losses faster
 
-        # Spike tuning
-        if spike_wr > bond_wr + 0.2 and SPIKE_TP_PCT < 80:
+        # Tune BOND_TP_PCT toward where winners actually peaked
+        bond_tp_wins = [t for t in bond_wins if t.get("pnl", 0) > 0]
+        if bond_tp_wins:
+            avg_win_pnl_pct = sum((t["pnl"] / max(t["amount"], 0.01)) * 100 for t in bond_tp_wins) / len(bond_tp_wins)
+            # Nudge TP toward actual winner peak — stay in 10-35% range for scalping
+            BOND_TP_PCT = round(max(10, min(35, avg_win_pnl_pct * 0.85)), 1)
+
+        # Spike tuning — keep within scalping range
+        if spike_wr > bond_wr + 0.2 and SPIKE_TP_PCT < 40:
             SPIKE_TP_PCT = round(SPIKE_TP_PCT * 1.1, 1)
-        elif spike_wr < 0.3 and SPIKE_TP_PCT > 25:
+        elif spike_wr < 0.3 and SPIKE_TP_PCT > 12:
             SPIKE_TP_PCT = round(SPIKE_TP_PCT * 0.9, 1)
 
         overall_wr = round(len(wins) / max(len(recent), 1) * 100, 1)
@@ -805,12 +815,13 @@ def auto_tune(history):
             "bond_wr":         f"{round(bond_wr*100,1)}%",
             "spike_wr":        f"{round(spike_wr*100,1)}%",
             "bond_entry":      f"{BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%",
+            "bond_tp_pct":     BOND_TP_PCT,
             "bond_stale_secs": BOND_STALE_SECS,
             "bond_max_secs":   BOND_MAX_SECS,
             "bond_sl_pct":     BOND_SL_PCT,
             "spike_tp_pct":    SPIKE_TP_PCT,
         }
-        log("ok", f"Auto-tuned: bond={BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% "
+        log("ok", f"Auto-tuned: bond={BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% tp={BOND_TP_PCT}% "
                   f"stale={BOND_STALE_SECS}s sl={BOND_SL_PCT}% wr={overall_wr}%", "TUNE")
         notify("🧠 Auto-Tuned",
                f"Analyzed {len(recent)} trades\n"
@@ -1613,10 +1624,10 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
     with trades_lock:
         if mint in open_trades or len(open_trades) >= MAX_OPEN:
             return False
-    # Skip recently sold coins (30 min cooldown)
+    # Skip recently sold coins — configurable cooldown (default 5 min)
     with _copy_lock:
         sold_at = _sold_mints.get(mint, 0)
-        if sold_at and time.time() - sold_at < 1800:
+        if sold_at and time.time() - sold_at < SOLD_COOLDOWN_SECS:
             return False
     with capital_lock:
         if capital < amount:
@@ -1854,15 +1865,15 @@ def monitor_loop():
                 partial_done = trade.get("partial_tp_done", 0)
     
                 if partial_done == 0 and move_pct >= PARTIAL_TP1_PCT:
-                    _partial_exit(mint, price, 0.40, "PARTIAL_TP1")   # lock 40% of position at +50%
+                    _partial_exit(mint, price, 0.30, "PARTIAL_TP1")   # lock 30% at +12%
                     with trades_lock:
                         if mint not in open_trades:
                             continue
                         trade        = dict(open_trades[mint])
                     partial_done = 1
-    
+
                 if partial_done == 1 and move_pct >= PARTIAL_TP2_PCT:
-                    _partial_exit(mint, price, 0.40, "PARTIAL_TP2")   # lock 40% of remaining at +100%
+                    _partial_exit(mint, price, 0.30, "PARTIAL_TP2")   # lock 30% of remaining at +25%
                     with trades_lock:
                         if mint not in open_trades:
                             continue
@@ -1870,9 +1881,16 @@ def monitor_loop():
     
                 # Bond Runner exits
                 if strategy == "bond":
-                    if bond >= BOND_TP:
+                    move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
+                    if move >= BOND_TP_PCT:
                         exit_trade(mint, price, "BOND_TP", bond)
                         continue
+                    # Near graduation: tighten TSL to protect from graduation pump-and-dump
+                    if bond >= BOND_GRAD_BOND and entry_gain_pct >= 3:
+                        tight_tsl = price_high * (1 - BOND_GRAD_TSL / 100)
+                        if price <= tight_tsl:
+                            exit_trade(mint, price, "BOND_GRAD_TSL", bond)
+                            continue
                     if price <= tsl_price:
                         reason = "BOND_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "BOND_SL"
                         exit_trade(mint, price, reason, bond)
@@ -2244,7 +2262,7 @@ def _eval_coin(coin):
 def scanner_loop():
     log("ok", "=" * 55)
     log("ok", "PumpFun Sniper — Bond Runner + Dormant Spike")
-    log("ok", f"Bond entry: {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% | TP: {BOND_TP}%")
+    log("ok", f"Bond entry: {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% | TP: +{BOND_TP_PCT}% price")
     log("ok", f"Spike: {SPIKE_MIN_AGE_H}h+ dormant, {SPIKE_MIN_1H}%+ 1h move")
     with capital_lock:
         _sp, _ = _cap_tier(capital)
@@ -4603,7 +4621,7 @@ def learn_api():
         return jsonify({
             "params": {
                 "bond_entry":      f"{BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%",
-                "bond_tp":         f"{BOND_TP}%",
+                "bond_tp":         f"+{BOND_TP_PCT}%",
                 "bond_sl":         f"{BOND_SL_PCT}%",
                 "bond_stale_secs": BOND_STALE_SECS,
                 "bond_max_secs":   BOND_MAX_SECS,
