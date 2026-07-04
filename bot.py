@@ -29,7 +29,7 @@ def _redis_cmd(*args):
     if not REDIS_URL or not REDIS_TOKEN:
         return None
     try:
-        r = requests.post(
+        r = _session.post(
             REDIS_URL,
             headers={"Authorization": f"Bearer {REDIS_TOKEN}"},
             json=list(args),
@@ -461,7 +461,7 @@ def _load_daily_state():
 
 def _reset_daily_if_needed():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses, _pause_until
-    global _week_start_date, _week_day_logs, _day_start_cap
+    global _week_start_date, _week_day_logs, _day_start_cap, _daily_cap_notified
     # Rollover key = "YYYY-MM-DD@HH" where HH is TRADE_START_HOUR.
     # This means the "trading day" starts at TRADE_START_HOUR (not midnight).
     now = time.gmtime()
@@ -1030,48 +1030,19 @@ def get_market_data(mint):
     except Exception:
         return None
 
-def get_1m_candles(pair_address, count=6):
-    """Fetch the last `count` 1-minute candles from DexScreener for a pair."""
-    if not pair_address:
-        return []
-    try:
-        now     = int(time.time())
-        from_ms = (now - count * 90) * 1000   # a bit more than count minutes of buffer
-        to_ms   = now * 1000
-        res = _session.get(
-            f"https://api.dexscreener.com/latest/dex/candles/solana/{pair_address}",
-            params={"from": from_ms, "to": to_ms, "resolution": 1},
-            timeout=8
-        )
-        if res.status_code != 200:
-            return []
-        raw = res.json()
-        candles = raw.get("candles", raw) if isinstance(raw, dict) else raw
-        return candles[-count:] if isinstance(candles, list) else []
-    except Exception:
-        return []
-
-def is_1m_trending_up(pair_address) -> bool:
+def is_1m_trending_up(pair_address, market=None) -> bool:
     """
-    Returns True if 1-min chart shows clear upward momentum:
-      - Most recent closed candle is green (close >= open)
-      - Price now is >= price 3 candles ago (not making lower lows)
-      - Fails open when data is unavailable — don't block on API downtime
+    Returns True if price momentum is up or neutral.
+    Uses change5m from already-fetched market data — DexScreener has no candles endpoint.
+    Fails open (True) when no data so API downtime doesn't block all entries.
+    Pass market dict from get_market_data to avoid a redundant fetch.
     """
-    candles = get_1m_candles(pair_address, count=6)
-    if not candles or len(candles) < 3:
-        return True   # no data → don't block entry
     try:
-        last   = candles[-1]
-        c3_ago = candles[-3]
-        close      = float(last.get("close",   0) or 0)
-        open_      = float(last.get("open",    0) or 0)
-        close_3ago = float(c3_ago.get("close", 0) or 0)
-        if close <= 0 or open_ <= 0 or close_3ago <= 0:
-            return True
-        green_candle = close >= open_            # last candle closed up
-        not_lower    = close >= close_3ago * 0.98  # within 2% of where we were 3 min ago
-        return green_candle and not_lower
+        if market is None:
+            return True  # caller should pass market — don't do a free fetch here
+        change5m = float(market.get("change5m", 0) or 0)
+        # Allow slight dips (-2%) to avoid filtering out brief consolidations
+        return change5m >= -2.0
     except Exception:
         return True
 
@@ -1583,8 +1554,9 @@ def _refresh_jup_signals():
             r = _session.get(url, headers=hdrs, timeout=8)
             if r.status_code == 200:
                 data = r.json() or []
-                return {(item.get("mint") or item) for item in data
-                        if isinstance(item, dict) and item.get("mint")
+                return {item.get("mint") if isinstance(item, dict) else item
+                        for item in data
+                        if (isinstance(item, dict) and item.get("mint"))
                         or isinstance(item, str)}
         except Exception:
             pass
@@ -2047,13 +2019,21 @@ def monitor_loop():
                     exit_trade(mint, price, "STALE", bond)
                     continue
     
-                # Compute trailing SL level for all strategies
-                # Once trade is up TSL_ACTIVATE_PCT, stop trails below price_high
+                # Compute trailing SL level — use strategy-specific SL %
                 entry_gain_pct = ((price_high - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
+                _sl_pct = {
+                    "bond":    BOND_SL_PCT,
+                    "bundle":  BOND_SL_PCT,
+                    "trench":  TRENCH_SL_PCT,
+                    "spike":   SPIKE_SL_PCT,
+                    "copy":    COPY_SL_PCT,
+                    "fast":    FAST_SL_PCT,
+                    "migrate": MIGRATE_SL_PCT,
+                }.get(strategy, BOND_SL_PCT)
                 if entry_gain_pct >= TSL_ACTIVATE_PCT:
-                    tsl_price = price_high * (1 - BOND_SL_PCT / 100)
+                    tsl_price = price_high * (1 - _sl_pct / 100)
                 else:
-                    tsl_price = trade["entry"] * (1 - BOND_SL_PCT / 100)
+                    tsl_price = trade["entry"] * (1 - _sl_pct / 100)
     
                 # Graduation follow-through: bond position graduated — ride on Raydium via migrate rules
                 if strategy == "bond" and GRAD_THROUGH and details and details.get("complete"):
@@ -2251,18 +2231,19 @@ def copy_trade_loop():
                 for m in expired:
                     _copied_mints.pop(m, None)
 
-            # Always include manually tracked wallets (from TRACKED_WALLETS env var)
+            # Merge tracked/pinned/fast wallets — keep dedup set updated as we add
             tracked_addrs = {w["address"] for w in wallets}
             for addr in TRACKED_WALLETS:
                 if addr not in tracked_addrs:
+                    tracked_addrs.add(addr)
                     wallets.append({"address": addr, "winrate": 100.0})
-            # Always include pinned wallets — mirror exact size, bot's own TP/SL
             for addr in PINNED_WALLETS:
                 if addr not in tracked_addrs:
+                    tracked_addrs.add(addr)
                     wallets.append({"address": addr, "winrate": 100.0, "pinned": True})
-            # Fast wallets — no filters, get in/out before the wallet does
             for addr in FAST_WALLETS:
                 if addr not in tracked_addrs:
+                    tracked_addrs.add(addr)
                     wallets.append({"address": addr, "winrate": 100.0, "fast": True})
 
             if not wallets:
@@ -2328,7 +2309,7 @@ def copy_trade_loop():
                             continue
                         if not is_fast and market["liq"] < MIN_LIQ:
                             continue
-                        if not is_fast and not is_1m_trending_up(market.get("pair_address", "")):
+                        if not is_fast and not is_1m_trending_up(market.get("pair_address", ""), market):
                             log("info", f"COPY SKIP: 1m not trending up", symbol)
                             continue
                         with _copy_lock:
@@ -2468,7 +2449,7 @@ def _eval_coin(coin):
             sig_score = gmgn_signal_score(mint) + dsc_signal_score(mint) + jup_token_signal_score(mint)
             if sig_score < 1:
                 return None
-            if not is_1m_trending_up(market.get("pair_address", "")):
+            if not is_1m_trending_up(market.get("pair_address", ""), market):
                 return None
             impact = jup_price_impact(mint, trade_size())
             if impact > JUP_IMPACT_MAX_PCT:
@@ -2654,7 +2635,7 @@ def scanner_loop():
                 if sig_score < 1:
                     log("info", f"MIGRATION SKIP: sig={sig_score} (no signal backing)", gc["symbol"])
                     continue
-                if not is_1m_trending_up(market.get("pair_address", "")):
+                if not is_1m_trending_up(market.get("pair_address", ""), market):
                     log("info", f"MIGRATION SKIP: 1m not trending up", gc["symbol"])
                     continue
                 with _copy_lock:
@@ -2697,7 +2678,7 @@ def scanner_loop():
                     continue
                 if gmgn_smart_money_selling(sig_mint):
                     continue
-                if not is_1m_trending_up(market.get("pair_address", "")):
+                if not is_1m_trending_up(market.get("pair_address", ""), market):
                     log("info", f"SIGNAL SKIP: 1m not trending up", sig_mint[:8])
                     continue
                 with _copy_lock:
@@ -2744,7 +2725,7 @@ def scanner_loop():
                     continue
                 if gmgn_smart_money_selling(dsc_mint):
                     continue
-                if not is_1m_trending_up(market.get("pair_address", "")):
+                if not is_1m_trending_up(market.get("pair_address", ""), market):
                     continue
                 with _copy_lock:
                     _copied_mints[dsc_mint] = time.time()
@@ -2801,7 +2782,7 @@ def scanner_loop():
                     continue
                 if gmgn_smart_money_selling(jup_mint):
                     continue
-                if not is_1m_trending_up(market.get("pair_address", "")):
+                if not is_1m_trending_up(market.get("pair_address", ""), market):
                     continue
                 impact = jup_price_impact(jup_mint, trade_size())
                 if impact > JUP_IMPACT_MAX_PCT:
