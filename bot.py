@@ -88,8 +88,10 @@ BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "42"))  # earlier entry
 BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "60"))
 BOND_TP         = float(os.environ.get("BOND_TP",        "93"))  # closer to graduation spike
 BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "8"))
-BOND_MAX_SECS   = int(os.environ.get("BOND_MAX_SECS",    "600"))  # 10 min — early runners need time
-BOND_STALE_SECS = int(os.environ.get("BOND_STALE_SECS",  "180")) # 3 min — allow brief consolidations
+BOND_MAX_SECS       = int(os.environ.get("BOND_MAX_SECS",       "600"))  # 10 min — early runners need time
+BOND_STALE_SECS     = int(os.environ.get("BOND_STALE_SECS",     "180"))  # 3 min — allow brief consolidations
+DEAD_PAIR_SECS      = int(os.environ.get("DEAD_PAIR_SECS",       "20"))  # exit if zero bond movement in 20s
+VOL_STALE_SECS      = int(os.environ.get("VOL_STALE_SECS",       "60"))  # exit if had volume but stalled 60s
 
 # Dormant Spike strategy
 SPIKE_MIN_AGE_H = float(os.environ.get("SPIKE_MIN_AGE_H", "12"))
@@ -1590,8 +1592,21 @@ def monitor_loop():
                     exit_trade(mint, price, "BUNDLE_TP", bond)
                     continue
     
-                # Stale exit: bond hasn't moved in BOND_STALE_SECS — momentum dead
+                # Dead pair: zero bond movement since entry — no volume at all
+                bond_moved = bond_last_moved > trade["opened_at"] + 5
+                if not bond_moved and elapsed >= DEAD_PAIR_SECS:
+                    log("warn", f"Dead pair — no volume in {elapsed:.0f}s — exiting", symbol)
+                    exit_trade(mint, price, "DEAD", bond)
+                    continue
+
+                # Volume stale: had movement but stalled — 60s of no bond activity
                 stale_secs = time.time() - bond_last_moved
+                if bond_moved and stale_secs >= VOL_STALE_SECS:
+                    log("warn", f"Volume stale {stale_secs:.0f}s — exiting", symbol)
+                    exit_trade(mint, price, "STALE", bond)
+                    continue
+
+                # Slow stale: fallback for bond/bundle — bond hasn't moved in BOND_STALE_SECS
                 if strategy in ("bond", "bundle") and elapsed > 30 and stale_secs >= BOND_STALE_SECS:
                     log("warn", f"Bond stale {stale_secs:.0f}s — exiting", symbol)
                     exit_trade(mint, price, "STALE", bond)
