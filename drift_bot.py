@@ -593,6 +593,15 @@ def get_signal(market):
         confidence += 1  # fresh Supertrend flip — highest quality entry
 
     _st_prev[market] = st_bull
+
+    # ── Factor 3: GMGN smart money confirmation ───────────────────
+    gmgn = _get_gmgn_signal(market)
+    if gmgn == trend:
+        confidence += 1  # smart money agrees — highest quality tier
+
+    if confidence < 2:
+        return None, 0, None
+
     return trend, confidence, atr
 
 # ── LIVE EXECUTION STUBS ──────────────────────────────────────────
