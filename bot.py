@@ -151,6 +151,10 @@ PINNED_WALLETS = [
     "4Be9CvxqHW6BYiRAxW9Q3xu1ycTMWaL5z8NX4HR3ha7t",
     "CxgPWvH2GoEDENELne2XKAR2z2Fr4shG2uaeyqZceGve",
     "2X4H5Y9C4Fy6Pf3wpq8Q4gMvLcWvfrrwDv2bdR8AAwQv",
+    "J1mLoDATxKwi2ohBhrLbViqXo7yQu44tWxHfD6gAZX3J",
+    "HqZBJ2zK6zRhFg7WmaFBG6Y3ntCxwK99RwzCSAQPReyh",
+    "2fg5QD1eD7rzNNCsvnhmXFm5hqNgwTTG8p7kQ6f3rx6f",
+    "CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o",
 ]
 COPY_REFRESH_MINS = int(os.environ.get("COPY_REFRESH_MINS",  "60"))   # refresh wallet list hourly
 COPY_TP_PCT       = float(os.environ.get("COPY_TP_PCT",       "20"))
