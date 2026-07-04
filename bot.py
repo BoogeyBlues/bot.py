@@ -154,8 +154,15 @@ PINNED_WALLETS = [
     "J1mLoDATxKwi2ohBhrLbViqXo7yQu44tWxHfD6gAZX3J",
     "HqZBJ2zK6zRhFg7WmaFBG6Y3ntCxwK99RwzCSAQPReyh",
     "2fg5QD1eD7rzNNCsvnhmXFm5hqNgwTTG8p7kQ6f3rx6f",
-    "CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o",
 ]
+# Fast wallets — skip ALL safety filters, exit before the wallet does (tight TP/SL)
+FAST_WALLETS = [
+    "CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o",
+    "5t9xBNuDdGTGpjaPTx6hKd7sdRJbvtKS8Mhq6qVbo8Qz",
+]
+FAST_TP_PCT       = float(os.environ.get("FAST_TP_PCT",       "8"))
+FAST_SL_PCT       = float(os.environ.get("FAST_SL_PCT",       "10"))
+FAST_MAX_SECS     = int(os.environ.get("FAST_MAX_SECS",       "90"))
 COPY_REFRESH_MINS = int(os.environ.get("COPY_REFRESH_MINS",  "60"))   # refresh wallet list hourly
 COPY_TP_PCT       = float(os.environ.get("COPY_TP_PCT",       "20"))
 COPY_SL_PCT       = float(os.environ.get("COPY_SL_PCT",       "15"))
@@ -1693,6 +1700,20 @@ def monitor_loop():
                     if elapsed >= COPY_MAX_SECS:
                         exit_trade(mint, price, "COPY_TIME", bond)
                         continue
+
+                # Fast wallet exits — tight TP/SL, exit before the wallet does
+                if strategy == "fast":
+                    move = ((price - trade["entry"]) / trade["entry"]) * 100
+                    if move >= FAST_TP_PCT:
+                        exit_trade(mint, price, "FAST_TP", bond)
+                        continue
+                    sl_price = trade["entry"] * (1 - FAST_SL_PCT / 100)
+                    if price <= sl_price:
+                        exit_trade(mint, price, "FAST_SL", bond)
+                        continue
+                    if elapsed >= FAST_MAX_SECS:
+                        exit_trade(mint, price, "FAST_TIME", bond)
+                        continue
     
                 # Trench exits — near-graduation play, very fast window
                 if strategy == "trench":
@@ -1808,6 +1829,10 @@ def copy_trade_loop():
             for addr in PINNED_WALLETS:
                 if addr not in tracked_addrs:
                     wallets.append({"address": addr, "winrate": 100.0, "pinned": True})
+            # Fast wallets — no filters, get in/out before the wallet does
+            for addr in FAST_WALLETS:
+                if addr not in tracked_addrs:
+                    wallets.append({"address": addr, "winrate": 100.0, "fast": True})
 
             if not wallets:
                 time.sleep(60)
@@ -1845,40 +1870,50 @@ def copy_trade_loop():
                                 continue
                         if mint in blacklisted_mints:
                             continue
-                        # Safety check
-                        rug = run_rugcheck(mint)
-                        if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
-                            blacklisted_mints.add(mint)
-                            continue
-                        if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
-                            continue
-                        holder_ok, holder_reason = check_holder_concentration(mint)
-                        if not holder_ok:
-                            log("warn", f"SKIP: {holder_reason}", symbol)
-                            continue
-                        dev_wallet = act.get("creator", "") or act.get("dev", "")
-                        dev_ok, dev_reason = check_dev_history(dev_wallet)
-                        if not dev_ok:
-                            log("warn", f"SKIP: {dev_reason}", symbol)
-                            continue
-                        if gmgn_smart_money_selling(mint):
-                            log("warn", "SKIP: smart money selling", symbol)
-                            continue
-                        sig_score = gmgn_signal_score(mint)
+                        is_fast = w.get("fast", False)
+                        if not is_fast:
+                            # Safety checks — skipped entirely for fast wallets
+                            rug = run_rugcheck(mint)
+                            if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
+                                blacklisted_mints.add(mint)
+                                continue
+                            if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
+                                continue
+                            holder_ok, holder_reason = check_holder_concentration(mint)
+                            if not holder_ok:
+                                log("warn", f"SKIP: {holder_reason}", symbol)
+                                continue
+                            dev_wallet = act.get("creator", "") or act.get("dev", "")
+                            dev_ok, dev_reason = check_dev_history(dev_wallet)
+                            if not dev_ok:
+                                log("warn", f"SKIP: {dev_reason}", symbol)
+                                continue
+                            if gmgn_smart_money_selling(mint):
+                                log("warn", "SKIP: smart money selling", symbol)
+                                continue
+                        sig_score = gmgn_signal_score(mint) if not is_fast else 0
                         market = get_market_data(mint)
-                        if not market or market["price"] <= 0 or market["liq"] < MIN_LIQ:
+                        if not market or market["price"] <= 0:
                             continue
-                        if not is_1m_trending_up(market.get("pair_address", "")):
+                        if not is_fast and market["liq"] < MIN_LIQ:
+                            continue
+                        if not is_fast and not is_1m_trending_up(market.get("pair_address", "")):
                             log("info", f"COPY SKIP: 1m not trending up", symbol)
                             continue
                         with _copy_lock:
                             _copied_mints[mint] = time.time()
                         amt = trade_size()
-                        tag = f"PINNED {addr[:8]}..." if w.get("pinned") else f"COPY {addr[:8]}..."
-                        log("ok", f"{tag} WR:{w['winrate']}% 5m={market.get('change5m',0):+.1f}% | ${amt:.2f} | sig={sig_score}", symbol)
-                        notify(f"📋 {'PINNED' if w.get('pinned') else 'COPY'} {symbol}",
-                               f"Wallet: {addr[:8]}...\nWin rate: {w['winrate']}%\nAmount: ${amt:.2f}")
-                        enter_trade(mint, symbol, market["price"], amt, "copy", 0, 0)
+                        if is_fast:
+                            tag = f"FAST {addr[:8]}..."
+                            log("ok", f"{tag} NO-FILTER | ${amt:.2f}", symbol)
+                            notify(f"⚡ FAST {symbol}", f"Wallet: {addr[:8]}...\nAmount: ${amt:.2f}")
+                            enter_trade(mint, symbol, market["price"], amt, "fast", 0, 0)
+                        else:
+                            tag = f"PINNED {addr[:8]}..." if w.get("pinned") else f"COPY {addr[:8]}..."
+                            log("ok", f"{tag} WR:{w['winrate']}% 5m={market.get('change5m',0):+.1f}% | ${amt:.2f} | sig={sig_score}", symbol)
+                            notify(f"📋 {'PINNED' if w.get('pinned') else 'COPY'} {symbol}",
+                                   f"Wallet: {addr[:8]}...\nWin rate: {w['winrate']}%\nAmount: ${amt:.2f}")
+                            enter_trade(mint, symbol, market["price"], amt, "copy", 0, 0)
                     time.sleep(0.5)
                 except Exception as e:
                     log("warn", f"Wallet {addr[:8]} activity: {e}", "COPY")
