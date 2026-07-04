@@ -142,10 +142,13 @@ USDC_MINT  = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 WSOL_MINT  = "So11111111111111111111111111111111111111112"
 GMGN_ROUTE = "https://gmgn.ai/defi/router/v1/sol/tx/get_swap_route"
 
-# Jupiter Quote API — price impact filter
-JUPITER_QUOTE_URL  = "https://api.jup.ag/swap/v1/quote"
-JUPITER_API_KEY    = os.environ.get("JUPITER_API_KEY", "")       # optional — free without key
-JUP_IMPACT_MAX_PCT = float(os.environ.get("JUP_IMPACT_MAX_PCT", "3.0"))  # skip if buying our size costs >3%
+# Jupiter APIs (agent-skills suite)
+JUPITER_API_KEY        = os.environ.get("JUPITER_API_KEY", "")
+JUPITER_QUOTE_URL      = "https://api.jup.ag/swap/v1/quote"
+JUP_TOKENS_URL         = "https://api.jup.ag/tokens/v2"
+JUP_PRICE_V3_URL       = "https://api.jup.ag/price/v3/price"
+JUP_IMPACT_MAX_PCT     = float(os.environ.get("JUP_IMPACT_MAX_PCT",     "3.0"))
+JUP_SIGNAL_REFRESH_SECS= int(os.environ.get("JUP_SIGNAL_REFRESH_SECS", "120"))
 
 # Copy trading via GMGN smart wallets
 COPY_TRADE        = os.environ.get("COPY_TRADE", "true").lower() == "true"
@@ -273,6 +276,15 @@ _dsc_takeover_mints    = set()   # community takeover tokens
 _dsc_meta_mints        = set()   # tokens in the top trending metas/narratives
 _dsc_signal_time       = 0.0
 _dsc_lock              = threading.Lock()
+# Jupiter agent-skills signal sets
+_jup_trending_mints    = set()   # toptrending/5m — actively pumping right now
+_jup_organic_mints     = set()   # toporganicscore/5m — real volume, not bots
+_jup_toptraded_mints   = set()   # toptraded/5m — highest volume tokens
+_jup_verified_mints    = set()   # Jupiter-verified token list
+_jup_token_cache       = {}      # mint -> (timestamp, token_data) for audit checks
+_jup_signal_time       = 0.0
+_jup_lock              = threading.Lock()
+_JUP_TOKEN_CACHE_TTL   = 120
 scan_log               = []
 _scan_log_lock         = threading.Lock()
 
@@ -1498,6 +1510,143 @@ def dsc_search(query: str) -> list:
         pass
     return []
 
+# ── JUPITER AGENT SKILLS ─────────────────────────────────────────
+
+def _jup_headers() -> dict:
+    h = {"Accept": "application/json"}
+    if JUPITER_API_KEY:
+        h["x-api-key"] = JUPITER_API_KEY
+    return h
+
+def jup_tokens_search(mints: list) -> dict:
+    """
+    /tokens/v2/search?query={mints} — batch fetch token data for up to 100 mints.
+    Populates _jup_token_cache. Returns {mint: token_data}.
+    Each token_data contains: organicScore, isVerified, audit.{mintAuthorityAddress,
+    freezeAuthorityAddress, isTop10HoldersNotContract, isTop10HoldersNotBridge}.
+    """
+    if not mints:
+        return {}
+    now = time.time()
+    result, to_fetch = {}, []
+    for m in mints[:100]:
+        hit = _jup_token_cache.get(m)
+        if hit and now - hit[0] < _JUP_TOKEN_CACHE_TTL:
+            result[m] = hit[1]
+        else:
+            to_fetch.append(m)
+    if not to_fetch:
+        return result
+    try:
+        r = _session.get(
+            f"{JUP_TOKENS_URL}/search",
+            params={"query": ",".join(to_fetch)},
+            headers=_jup_headers(), timeout=8
+        )
+        if r.status_code == 200:
+            for item in (r.json() if isinstance(r.json(), list) else []):
+                m = item.get("mint", "")
+                if m:
+                    _jup_token_cache[m] = (now, item)
+                    result[m] = item
+    except Exception:
+        pass
+    return result
+
+def jup_price_v3(mints: list) -> dict:
+    """
+    /price/v3/price?ids={mints} — batch prices for up to 50 mints.
+    Returns {mint: {usdPrice, priceChange24h, liquidity}}.
+    """
+    if not mints:
+        return {}
+    try:
+        r = _session.get(
+            JUP_PRICE_V3_URL,
+            params={"ids": ",".join(mints[:50])},
+            headers=_jup_headers(), timeout=8
+        )
+        if r.status_code == 200:
+            return r.json().get("data", {})
+    except Exception:
+        pass
+    return {}
+
+def _refresh_jup_signals():
+    """Refresh Jupiter trending, organic score, and top-traded token sets (all /5m windows)."""
+    global _jup_trending_mints, _jup_organic_mints, _jup_toptraded_mints
+    global _jup_verified_mints, _jup_signal_time
+    hdrs = _jup_headers()
+
+    def _mints_from(url):
+        try:
+            r = _session.get(url, headers=hdrs, timeout=8)
+            if r.status_code == 200:
+                data = r.json() or []
+                return {(item.get("mint") or item) for item in data
+                        if isinstance(item, dict) and item.get("mint")
+                        or isinstance(item, str)}
+        except Exception:
+            pass
+        return set()
+
+    try:
+        trending  = _mints_from(f"{JUP_TOKENS_URL}/toptrending/5m")
+        organic   = _mints_from(f"{JUP_TOKENS_URL}/toporganicscore/5m")
+        toptraded = _mints_from(f"{JUP_TOKENS_URL}/toptraded/5m")
+        verified  = _mints_from(f"{JUP_TOKENS_URL}/tag/verified")
+
+        with _jup_lock:
+            _jup_trending_mints  = trending
+            _jup_organic_mints   = organic
+            _jup_toptraded_mints = toptraded
+            _jup_verified_mints  = verified
+            _jup_signal_time     = time.time()
+        log("info",
+            f"JUP: trending={len(trending)} organic={len(organic)} "
+            f"toptraded={len(toptraded)} verified={len(verified)}", "JUP")
+    except Exception as e:
+        log("warn", f"JUP signal refresh: {e}", "JUP")
+
+def run_jup_refresh_loop():
+    """Background thread: refresh Jupiter signals every JUP_SIGNAL_REFRESH_SECS seconds."""
+    time.sleep(30)
+    while True:
+        if time.time() - _jup_signal_time >= JUP_SIGNAL_REFRESH_SECS:
+            _refresh_jup_signals()
+        time.sleep(60)
+
+def jup_token_signal_score(mint: str) -> int:
+    """
+    0-5 signal score from Jupiter token signals:
+      +2 in toptrending/5m  (actively pumping right now)
+      +2 in toporganicscore/5m  (real traders, not bots)
+      +1 in toptraded/5m  (highest volume)
+      +1 Jupiter-verified
+    """
+    with _jup_lock:
+        return (
+            (2 if mint in _jup_trending_mints  else 0) +
+            (2 if mint in _jup_organic_mints    else 0) +
+            (1 if mint in _jup_toptraded_mints  else 0) +
+            (1 if mint in _jup_verified_mints   else 0)
+        )
+
+def jup_audit_ok(mint: str) -> tuple:
+    """
+    Check Jupiter's audit data (from token cache).
+    Returns (ok, reason). Never blocks if token not in cache.
+    """
+    hit = _jup_token_cache.get(mint)
+    if not hit:
+        return True, ""
+    audit = (hit[1] or {}).get("audit") or {}
+    if audit.get("mintAuthorityAddress"):
+        return False, "mint authority active"
+    if audit.get("freezeAuthorityAddress"):
+        return False, "freeze authority active"
+    return True, ""
+
 # ── USDC PROFIT LOCK ─────────────────────────────────────────────
 def lock_profit_to_usdc(profit_usd):
     """Swap profit_usd worth of SOL into USDC via GMGN after winning trade."""
@@ -2226,6 +2375,10 @@ def _eval_coin(coin):
             return {"action": "blacklist", "mint": mint}
         if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
             return None
+        jup_ok, jup_reason = jup_audit_ok(mint)
+        if not jup_ok:
+            _log_scan(symbol, mint, bond, _sig_pre, "jup", 3, jup_reason[:18].upper())
+            return {"action": "blacklist", "mint": mint}
         holder_ok, holder_reason = check_holder_concentration(mint)
         if not holder_ok:
             _log_scan(symbol, mint, bond, _sig_pre, "holder", 4, holder_reason[:18].upper())
@@ -2238,7 +2391,7 @@ def _eval_coin(coin):
         if gmgn_smart_money_selling(mint):
             _log_scan(symbol, mint, bond, _sig_pre, "sm", 6, "SMART $ SELLING")
             return None
-        sig_score = gmgn_signal_score(mint) + dsc_signal_score(mint)
+        sig_score = gmgn_signal_score(mint) + dsc_signal_score(mint) + jup_token_signal_score(mint)
         market = get_market_data(mint)
         if not market or market["price"] <= 0:
             _vsol = coin.get("vsol", 0); _vtok = coin.get("vtok", 0); _sp = get_sol_price()
@@ -2272,7 +2425,7 @@ def _eval_coin(coin):
         if not holder_ok:
             _log_scan(symbol, mint, bond, _sig_pre, "holder", 4, holder_reason[:18].upper())
             return None
-        sig_score = gmgn_signal_score(mint) + dsc_signal_score(mint)
+        sig_score = gmgn_signal_score(mint) + dsc_signal_score(mint) + jup_token_signal_score(mint)
         market = get_market_data(mint)
         if not market or market["price"] <= 0:
             _vsol = coin.get("vsol", 0); _vtok = coin.get("vtok", 0); _sp = get_sol_price()
@@ -2312,7 +2465,7 @@ def _eval_coin(coin):
                 return None
             if gmgn_smart_money_selling(mint):
                 return None
-            sig_score = gmgn_signal_score(mint) + dsc_signal_score(mint)
+            sig_score = gmgn_signal_score(mint) + dsc_signal_score(mint) + jup_token_signal_score(mint)
             if sig_score < 1:
                 return None
             if not is_1m_trending_up(market.get("pair_address", "")):
@@ -2399,7 +2552,7 @@ def scanner_loop():
                         if gmgn_smart_money_selling(mint):
                             log("warn", "SKIP: smart money selling", symbol)
                             continue
-                        sig_score = gmgn_signal_score(mint) + dsc_signal_score(mint)
+                        sig_score = gmgn_signal_score(mint) + dsc_signal_score(mint) + jup_token_signal_score(mint)
                         market = get_market_data(mint)
                         if market and market["price"] > 0 and market["liq"] >= MIN_LIQ:
                             with trades_lock:
@@ -2418,6 +2571,9 @@ def scanner_loop():
 
             # ── Phase 2: parallel I/O evaluation ──────────────────────
             if candidates:
+                # Warm Jupiter token cache for all candidates in one batch call
+                # so jup_audit_ok() hits cache instead of making per-coin requests
+                jup_tokens_search([coin["mint"] for _, coin in candidates])
                 workers = min(len(candidates), 12)
                 ordered_results = [None] * len(candidates)
                 with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="scan") as pool:
@@ -2609,6 +2765,63 @@ def scanner_loop():
                 time.sleep(0.5)
             if n_dsc_entered:
                 log("info", f"DSC boost scan: entered {n_dsc_entered} | pool={len(dsc_signal_pool)}")
+
+            # ── Jupiter Signal Scan ───────────────────────────────────
+            # Tokens trending on Jupiter right now — real organic volume,
+            # not bots. Most reliable "something is happening" signal.
+            with _jup_lock:
+                jup_signal_pool = list(
+                    (_jup_trending_mints | _jup_organic_mints | _jup_toptraded_mints)
+                    - blacklisted_mints
+                )
+            n_jup_entered = 0
+            for jup_mint in jup_signal_pool:
+                with trades_lock:
+                    if len(open_trades) >= MAX_OPEN:
+                        break
+                    if jup_mint in open_trades:
+                        continue
+                with _copy_lock:
+                    if jup_mint in _copied_mints:
+                        continue
+                if daily_limit_reached():
+                    break
+                market = get_market_data(jup_mint)
+                if not market or market["price"] <= 0 or market["liq"] < MIN_LIQ:
+                    continue
+                rug = run_rugcheck(jup_mint)
+                if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
+                    blacklisted_mints.add(jup_mint)
+                    continue
+                jup_ok, _ = jup_audit_ok(jup_mint)
+                if not jup_ok:
+                    blacklisted_mints.add(jup_mint)
+                    continue
+                if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
+                    continue
+                if gmgn_smart_money_selling(jup_mint):
+                    continue
+                if not is_1m_trending_up(market.get("pair_address", "")):
+                    continue
+                impact = jup_price_impact(jup_mint, trade_size())
+                if impact > JUP_IMPACT_MAX_PCT:
+                    continue
+                with _copy_lock:
+                    _copied_mints[jup_mint] = time.time()
+                sig_score = gmgn_signal_score(jup_mint) + dsc_signal_score(jup_mint) + jup_token_signal_score(jup_mint)
+                jup_sym = jup_mint[:8]
+                amt = trade_size()
+                with _jup_lock:
+                    _why = ("TRENDING" if jup_mint in _jup_trending_mints else
+                            "ORGANIC"  if jup_mint in _jup_organic_mints   else "TOP_VOL")
+                log("ok", f"JUP {_why} | liq=${market['liq']:.0f} 5m={market.get('change5m',0):+.1f}% | sig={sig_score}", jup_sym)
+                notify(f"⚡ JUP {_why} {jup_sym}",
+                       f"Jupiter signal entry\nLiq: ${market['liq']:.0f}\nSig: {sig_score}\nAmount: ${amt:.2f}")
+                enter_trade(jup_mint, jup_sym, market["price"], amt, "copy", 0, 0)
+                n_jup_entered += 1
+                time.sleep(0.5)
+            if n_jup_entered:
+                log("info", f"JUP signal scan: entered {n_jup_entered} | pool={len(jup_signal_pool)}")
 
         except Exception as e:
             log("err", f"Scanner: {e}")
@@ -6843,6 +7056,7 @@ if __name__ == "__main__":
         t_signals = threading.Thread(target=run_signal_refresh_loop, daemon=True)
         t_signals.start()
         threading.Thread(target=run_dsc_refresh_loop, daemon=True).start()
+        threading.Thread(target=run_jup_refresh_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
     log("ok", "=" * 55)
     log("ok", f"Mode      : {'PAPER' if PAPER_MODE else 'LIVE'}")
