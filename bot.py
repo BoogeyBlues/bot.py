@@ -407,6 +407,14 @@ def _save_daily_state():
         "week_logs":      _week_day_logs,
         "day_start_cap":       _day_start_cap,
         "tune_paused_until":   TUNE_PAUSED_UNTIL,
+        "bond_entry_min":      BOND_ENTRY_MIN,
+        "bond_entry_max":      BOND_ENTRY_MAX,
+        "bond_tp_pct":         BOND_TP_PCT,
+        "bond_sl_pct":         BOND_SL_PCT,
+        "bond_stale_secs":     BOND_STALE_SECS,
+        "bond_max_secs":       BOND_MAX_SECS,
+        "spike_tp_pct":        SPIKE_TP_PCT,
+        "trench_tp_pct":       TRENCH_TP_PCT,
         "blacklist":      list(blacklisted_mints),
         "sold_mints":     sold_snapshot,
         "watchlist":      wl_snapshot,
@@ -425,6 +433,8 @@ def _load_daily_state():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses
     global _pause_until, capital, _week_start_date, _week_day_logs, completed_trades
     global _day_start_cap, TUNE_PAUSED_UNTIL
+    global BOND_ENTRY_MIN, BOND_ENTRY_MAX, BOND_TP_PCT, BOND_SL_PCT
+    global BOND_STALE_SECS, BOND_MAX_SECS, SPIKE_TP_PCT, TRENCH_TP_PCT
     today = time.strftime("%Y-%m-%d")
 
     # Try Redis first (survives redeploys), fall back to local file
@@ -453,6 +463,15 @@ def _load_daily_state():
             if s.get("day_start_cap", 0) > 0:
                 _day_start_cap = float(s["day_start_cap"])
             TUNE_PAUSED_UNTIL = float(s.get("tune_paused_until", _next_monday_7am()))
+            # Restore tuner parameters — env vars are initial defaults only; Redis wins
+            if "bond_entry_min"  in s: BOND_ENTRY_MIN  = float(s["bond_entry_min"])
+            if "bond_entry_max"  in s: BOND_ENTRY_MAX  = float(s["bond_entry_max"])
+            if "bond_tp_pct"     in s: BOND_TP_PCT     = float(s["bond_tp_pct"])
+            if "bond_sl_pct"     in s: BOND_SL_PCT     = float(s["bond_sl_pct"])
+            if "bond_stale_secs" in s: BOND_STALE_SECS = int(s["bond_stale_secs"])
+            if "bond_max_secs"   in s: BOND_MAX_SECS   = int(s["bond_max_secs"])
+            if "spike_tp_pct"    in s: SPIKE_TP_PCT    = float(s["spike_tp_pct"])
+            if "trench_tp_pct"   in s: TRENCH_TP_PCT   = float(s["trench_tp_pct"])
             # Restore blacklist — persists across days
             for m in s.get("blacklist", []):
                 blacklisted_mints.add(m)
