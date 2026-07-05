@@ -86,7 +86,7 @@ LOSS_COOLDOWN_HRS = float(os.environ.get("LOSS_COOLDOWN_HRS", "0.083")) # 5-min 
 ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # retune every 5 trades for faster learning
 
 # Bond Runner strategy
-BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "42"))  # earlier entry = more upside to TP
+BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "50"))  # 50%+ = confirmed momentum, less stall risk
 BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "60"))
 BOND_TP_PCT     = float(os.environ.get("BOND_TP_PCT",    "20"))  # price % TP (was bond-level 93 — never fired)
 BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "8"))
