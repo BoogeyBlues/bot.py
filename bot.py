@@ -205,7 +205,7 @@ MIN_REPLIES      = int(os.environ.get("MIN_REPLIES",      "8"))
 MIN_SOCIALS      = int(os.environ.get("MIN_SOCIALS",       "1"))
 MIN_LIQ          = float(os.environ.get("MIN_LIQ",        "500"))
 MIN_VOL_5M       = float(os.environ.get("MIN_VOL_5M",     "5000"))  # $5k 5-min volume — no volume = no momentum
-MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "1"))     # require ≥1 GMGN signal point to enter
+MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "2"))     # require ≥2 signal points to enter (1 = too easy, any hot_search token passes)
 MAX_RUG_SCORE    = int(os.environ.get("MAX_RUG_SCORE",    "400"))   # rugcheck score ceiling (higher = riskier)
 
 # General
@@ -2312,6 +2312,14 @@ def copy_trade_loop():
                         market = get_market_data(mint)
                         if not market or market["price"] <= 0:
                             continue
+                        # Require DexScreener indexing — no pair_address = no real volume data
+                        if not market.get("pair_address"):
+                            log("info", f"COPY SKIP: not indexed", symbol)
+                            continue
+                        # Volume gate — same threshold as scanner strategies
+                        if market.get("vol_m5", 0) < MIN_VOL_5M:
+                            log("info", f"COPY SKIP: vol ${market.get('vol_m5',0):.0f}<{MIN_VOL_5M:.0f}", symbol)
+                            continue
                         if not is_fast and market["liq"] < MIN_LIQ:
                             continue
                         if not is_fast and not is_1m_trending_up(market.get("pair_address", ""), market):
@@ -2451,10 +2459,10 @@ def _eval_coin(coin):
     age_h = (time.time() - created_at / 1000) / 3600 if created_at > 0 else 0
     if age_h >= SPIKE_MIN_AGE_H:
         market = get_market_data(mint)
-        if not market:
+        if not market or not market.get("pair_address") or market["price"] <= 0:
             return None
         if (market["change1h"] >= SPIKE_MIN_1H and market["liq"] >= MIN_LIQ
-                and market["price"] > 0 and market.get("vol_m5", 0) >= MIN_VOL_5M):
+                and market.get("vol_m5", 0) >= MIN_VOL_5M):
             rug = run_rugcheck(mint)
             if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
                 return {"action": "blacklist", "mint": mint}
@@ -2472,7 +2480,7 @@ def _eval_coin(coin):
             if gmgn_smart_money_selling(mint):
                 return None
             sig_score = gmgn_signal_score(mint) + dsc_signal_score(mint) + jup_token_signal_score(mint)
-            if sig_score < 1:
+            if sig_score < MIN_SIGNAL_SCORE:
                 return None
             if not is_1m_trending_up(market.get("pair_address", ""), market):
                 return None
