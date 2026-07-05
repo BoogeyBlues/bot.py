@@ -486,6 +486,11 @@ def _load_daily_state():
         completed_trades.extend(trades_data)
         log("ok", f"Reloaded {len(completed_trades)} completed trades")
 
+    # Ensure TUNE_PAUSED_UNTIL is always set to a future Monday — never left at 0.0
+    if TUNE_PAUSED_UNTIL <= 0:
+        TUNE_PAUSED_UNTIL = _next_monday_7am()
+        log("ok", f"Tune schedule initialised: next retune {time.strftime('%a %b %d 07:00 UTC', time.gmtime(TUNE_PAUSED_UNTIL))}", "TUNE")
+
     # Restore open positions so bot doesn't re-buy after crash/redeploy
     saved_open = redis_load("bot_open_trades")
     if saved_open:
