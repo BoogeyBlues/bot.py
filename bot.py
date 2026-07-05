@@ -3516,14 +3516,14 @@ async function pollStats(){{
     if(pnlEl){{
       const sign=d.total_pnl>=0?'+':'';
       pnlEl.textContent=sign+'$'+Math.abs(d.total_pnl).toFixed(2);
-      pnlEl.style.color=d.total_pnl>=0?'var(--green)':'var(--red)';
+      pnlEl.style.color=d.total_pnl>=0?'#4ade80':'#f87171';
     }}
     const pnlSub=document.getElementById('h-pnl-sub');
     if(pnlSub) pnlSub.textContent=d.total_trades+' trades closed';
     const wrEl=document.getElementById('h-wr');
     if(wrEl){{
       wrEl.textContent=d.win_rate+'%';
-      wrEl.style.color=d.win_rate>=50?'var(--green)':'var(--red)';
+      wrEl.style.color=d.win_rate>=50?'#4ade80':'#f87171';
     }}
     const wrSub=document.getElementById('h-wr-sub');
     if(wrSub) wrSub.innerHTML=d.wins+'W &nbsp;/&nbsp; '+d.losses+'L';
@@ -3656,34 +3656,34 @@ def _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
     <a href="https://solscan.io" target="_blank">🔍 SCAN</a>
   </nav>
   <div class="mode-strip">
-    <span class="left">Refreshes 30s · Goal ${PROFIT_GOAL:,.0f}</span>
+    <span class="left">Live updates · Goal ${PROFIT_GOAL:,.0f}</span>
     <span class="mode-pill">{mode}</span>
   </div>
   <div class="hero">
     <div class="hero-lbl">Current Capital</div>
-    <div class="hero-cap">${cap:.2f}</div>
-    <div class="hero-pnl">{sign}${pnl:.2f} total PnL</div>
-    <div class="hero-sub">Started ${STARTING_CAPITAL:.2f} &nbsp;·&nbsp; {total} trades closed</div>
+    <div id="pk-cap" class="hero-cap">${cap:.2f}</div>
+    <div id="pk-pnl" class="hero-pnl">{sign}${pnl:.2f} total PnL</div>
+    <div id="pk-hero-sub" class="hero-sub">Started ${STARTING_CAPITAL:.2f} &nbsp;·&nbsp; {total} trades closed</div>
   </div>
   <div class="grid">
     <div class="stat">
       <div class="lbl">Win Rate</div>
-      <div class="val" style="color:{wr_color}">{wr}%</div>
-      <div class="sub">{len(wins)}W / {total-len(wins)}L</div>
+      <div id="pk-wr" class="val" style="color:{wr_color}">{wr}%</div>
+      <div id="pk-wr-sub" class="sub">{len(wins)}W / {total-len(wins)}L</div>
     </div>
     <div class="stat">
       <div class="lbl">Trade Size</div>
-      <div class="val cyan">${trade_size():.2f}</div>
+      <div id="pk-size" class="val cyan">${trade_size():.2f}</div>
       <div class="sub">{pct*100:.0f}% tier</div>
     </div>
     <div class="stat">
       <div class="lbl">Open Now</div>
-      <div class="val {'green' if open_list else 'yellow'}">{len(open_list)}<span style="font-size:1.1rem;color:#888">/{MAX_OPEN}</span></div>
-      <div class="sub">{'active' if open_list else 'scanning'}</div>
+      <div id="pk-open" class="val {'green' if open_list else 'yellow'}">{len(open_list)}<span style="font-size:1.1rem;color:#888">/{MAX_OPEN}</span></div>
+      <div id="pk-open-sub" class="sub">{'active' if open_list else 'scanning'}</div>
     </div>
     <div class="stat">
       <div class="lbl">USDC Locked</div>
-      <div class="val cyan">${locked:.2f}</div>
+      <div id="pk-locked" class="val cyan">${locked:.2f}</div>
       <div class="sub">Secured</div>
     </div>
     <div class="stat">
@@ -3753,6 +3753,39 @@ new Chart(document.getElementById('capChart'),{{
     }}
   }}
 }});
+
+async function pollPunk(){{
+  try{{
+    const d=await(await fetch('/status/api')).json();
+    const capEl=document.getElementById('pk-cap');
+    if(capEl) capEl.textContent='$'+d.capital.toFixed(2);
+    const pnlEl=document.getElementById('pk-pnl');
+    if(pnlEl){{
+      const sign=d.total_pnl>=0?'+':'';
+      pnlEl.textContent=sign+'$'+Math.abs(d.total_pnl).toFixed(2)+' total PnL';
+      pnlEl.style.color=d.total_pnl>=0?'#39ff14':'#ff006e';
+    }}
+    const subEl=document.getElementById('pk-hero-sub');
+    if(subEl) subEl.innerHTML='Started ${STARTING_CAPITAL:.2f} &nbsp;·&nbsp; '+d.total_trades+' trades closed';
+    const wrEl=document.getElementById('pk-wr');
+    if(wrEl){{
+      wrEl.textContent=d.win_rate+'%';
+      wrEl.style.color=d.win_rate>=50?'#39ff14':'#ff006e';
+    }}
+    const wrSub=document.getElementById('pk-wr-sub');
+    if(wrSub) wrSub.textContent=d.wins+'W / '+d.losses+'L';
+    const sizeEl=document.getElementById('pk-size');
+    if(sizeEl) sizeEl.textContent='$'+d.trade_size.toFixed(2);
+    const openEl=document.getElementById('pk-open');
+    if(openEl) openEl.innerHTML=d.open_trades+'<span style="font-size:1.1rem;color:#888">/{MAX_OPEN}</span>';
+    const openSub=document.getElementById('pk-open-sub');
+    if(openSub) openSub.textContent=d.scanning?(d.open_trades?'active':'scanning'):'paused';
+    const lockedEl=document.getElementById('pk-locked');
+    if(lockedEl) lockedEl.textContent='$'+d.usdc_locked.toFixed(2);
+  }}catch(e){{}}
+}}
+pollPunk();
+setInterval(pollPunk,5000);
 </script>
 </body></html>"""
     return html, 200
