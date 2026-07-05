@@ -167,6 +167,11 @@ PINNED_WALLETS = [
     "J1mLoDATxKwi2ohBhrLbViqXo7yQu44tWxHfD6gAZX3J",
     "HqZBJ2zK6zRhFg7WmaFBG6Y3ntCxwK99RwzCSAQPReyh",
     "2fg5QD1eD7rzNNCsvnhmXFm5hqNgwTTG8p7kQ6f3rx6f",
+    "89HbgWduLwoxcofWpmn1EiF9wEdpgkNDEyPjzZ72mkDi",
+    "9iaawVBEsFG35PSwd4PahwT8fYNQe9XYuRdWm872dUqY",
+    "J23qr98GjGJJqKq9CBEnyRhHbmkaVxtTJNNxKu597wsA",
+    "9yYya3F5EJoLnBNKW6z4bZvyQytMXzDcpU5D6yYr4jqL",
+    "4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9",
 ]
 # Fast wallets — skip ALL safety filters, exit before the wallet does (tight TP/SL)
 FAST_WALLETS = [
@@ -233,6 +238,9 @@ capital_lock      = threading.Lock()
 open_trades       = {}
 trades_lock       = threading.Lock()
 blacklisted_mints = set()
+_blacklist_ts     = {}   # mint -> timestamp added; for 24h TTL expiry
+_bundle_deployers = {}   # deployer wallet -> {"count": int, "first_seen": float}
+BUNDLE_DEPLOYER_THRESHOLD = 2  # block deployer after N bundled launches
 trade_log         = []
 completed_trades  = []
 log_lock          = threading.Lock()
@@ -416,6 +424,8 @@ def _save_daily_state():
         "spike_tp_pct":        SPIKE_TP_PCT,
         "trench_tp_pct":       TRENCH_TP_PCT,
         "blacklist":      list(blacklisted_mints),
+        "blacklist_ts":   _blacklist_ts,
+        "bundle_deployers": _bundle_deployers,
         "sold_mints":     sold_snapshot,
         "watchlist":      wl_snapshot,
     }
@@ -472,9 +482,17 @@ def _load_daily_state():
             if "bond_max_secs"   in s: BOND_MAX_SECS   = int(s["bond_max_secs"])
             if "spike_tp_pct"    in s: SPIKE_TP_PCT    = float(s["spike_tp_pct"])
             if "trench_tp_pct"   in s: TRENCH_TP_PCT   = float(s["trench_tp_pct"])
-            # Restore blacklist — persists across days
+            # Restore blacklist with 24h TTL
+            saved_bl_ts = s.get("blacklist_ts", {})
+            _now_bl = time.time()
             for m in s.get("blacklist", []):
-                blacklisted_mints.add(m)
+                ts = float(saved_bl_ts.get(m, 0))
+                if ts == 0 or _now_bl - ts < 86400:  # keep if <24h old or no timestamp
+                    blacklisted_mints.add(m)
+                    _blacklist_ts[m] = ts or _now_bl
+            # Restore bundle deployer history
+            for dev, info in s.get("bundle_deployers", {}).items():
+                _bundle_deployers[dev] = info
             # Restore sold cooldowns still within window
             _now = time.time()
             with _copy_lock:
@@ -627,6 +645,29 @@ def record_daily_trade(won):
         log("ok" if won else "info",
             f"Daily: {_daily_trades} trades | {_daily_wins}W {_daily_losses}L")
     _save_daily_state()
+
+def _record_bundle_deployer(dev_wallet: str, symbol: str):
+    """Track wallets that repeatedly deploy bundled tokens. Blocks them after BUNDLE_DEPLOYER_THRESHOLD launches."""
+    if not dev_wallet:
+        return
+    if dev_wallet not in _bundle_deployers:
+        _bundle_deployers[dev_wallet] = {"count": 0, "first_seen": time.time()}
+    _bundle_deployers[dev_wallet]["count"] += 1
+    count = _bundle_deployers[dev_wallet]["count"]
+    if count >= BUNDLE_DEPLOYER_THRESHOLD:
+        log("warn", f"Bundle deployer flagged ({count} bundled launches) — {dev_wallet[:8]}...", symbol)
+
+def _is_bundle_deployer(dev_wallet: str) -> bool:
+    """Return True if this deployer has hit the bundle threshold."""
+    if not dev_wallet:
+        return False
+    info = _bundle_deployers.get(dev_wallet)
+    return bool(info and info.get("count", 0) >= BUNDLE_DEPLOYER_THRESHOLD)
+
+def _blacklist_add(mint: str):
+    """Add mint to blacklist with timestamp for 24h TTL."""
+    blacklisted_mints.add(mint)
+    _blacklist_ts[mint] = time.time()
 
 def _next_monday_7am():
     """Returns Unix timestamp of next Monday at 07:00 UTC (pure arithmetic, no datetime import)."""
@@ -2374,7 +2415,7 @@ def copy_trade_loop():
                             # Safety checks — skipped entirely for fast wallets
                             rug = run_rugcheck(mint)
                             if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
-                                blacklisted_mints.add(mint)
+                                _blacklist_add(mint)
                                 continue
                             if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
                                 continue
@@ -2449,11 +2490,17 @@ def _eval_coin(coin):
                 return None
         if not (BOND_ENTRY_MIN <= bond <= BOND_ENTRY_MAX):
             return None
+        dev_wallet = coin.get("creator", "") or coin.get("dev", "")
+        if _is_bundle_deployer(dev_wallet):
+            _log_scan(symbol, mint, bond, _sig_pre, "dev", 2, "SERIAL BUNDLER")
+            return None
         rug = run_rugcheck(mint)
         if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
             return {"action": "blacklist", "mint": mint}
-        if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
-            return None
+        if rug and rug.get("is_bundled"):
+            _record_bundle_deployer(dev_wallet, symbol)
+            if BUNDLE_MODE == "avoid":
+                return None
         if rug and rug.get("score", 0) > MAX_RUG_SCORE:
             _log_scan(symbol, mint, bond, _sig_pre, "rug", 3, f"RUG SCORE {rug['score']}")
             return None
@@ -2465,7 +2512,6 @@ def _eval_coin(coin):
         if not holder_ok:
             _log_scan(symbol, mint, bond, _sig_pre, "holder", 4, holder_reason[:18].upper())
             return None
-        dev_wallet = coin.get("creator", "") or coin.get("dev", "")
         dev_ok, dev_reason = check_dev_history(dev_wallet)
         if not dev_ok:
             _log_scan(symbol, mint, bond, _sig_pre, "dev", 5, dev_reason[:18].upper())
@@ -2477,12 +2523,12 @@ def _eval_coin(coin):
         if sig_score < MIN_SIGNAL_SCORE:
             _log_scan(symbol, mint, bond, _sig_pre, "sig", 7, f"SIG {sig_score}<{MIN_SIGNAL_SCORE}")
             return None
-        # Bond velocity: skip if bond hasn't moved ≥0.5% in the last 2 scans
+        # Bond velocity: skip if bond hasn't moved ≥0.2% in last 30s (loosened from 0.5%/2s)
         _now_ts = time.time()
         with _bond_prev_lock:
             _prev_bond, _prev_ts = _bond_prev.get(mint, (None, 0))
             _bond_prev[mint] = (bond, _now_ts)
-        if _prev_bond is not None and abs(bond - _prev_bond) < 0.5 and _now_ts - _prev_ts < 120:
+        if _prev_bond is not None and abs(bond - _prev_bond) < 0.2 and _now_ts - _prev_ts < 30:
             _log_scan(symbol, mint, bond, _sig_pre, "vel", 7, "BOND STALLED")
             return None
         market = get_market_data(mint)
@@ -2506,11 +2552,16 @@ def _eval_coin(coin):
 
     # Trench Runner
     if TRENCH_ENTRY_MIN <= bond <= TRENCH_ENTRY_MAX:
+        _trench_dev = coin.get("creator", "") or coin.get("dev", "")
+        if _is_bundle_deployer(_trench_dev):
+            return None
         rug = run_rugcheck(mint)
         if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
             return {"action": "blacklist", "mint": mint}
-        if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
-            return None
+        if rug and rug.get("is_bundled"):
+            _record_bundle_deployer(_trench_dev, symbol)
+            if BUNDLE_MODE == "avoid":
+                return None
         if rug and rug.get("score", 0) > MAX_RUG_SCORE:
             _log_scan(symbol, mint, bond, _sig_pre, "rug", 3, f"RUG SCORE {rug['score']}")
             return None
@@ -2549,17 +2600,21 @@ def _eval_coin(coin):
             return None
         if (market["change1h"] >= SPIKE_MIN_1H and market["liq"] >= MIN_LIQ
                 and market.get("vol_m5", 0) >= MIN_VOL_5M):
+            dev_wallet = coin.get("creator", "") or coin.get("dev", "")
+            if _is_bundle_deployer(dev_wallet):
+                return None
             rug = run_rugcheck(mint)
             if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
                 return {"action": "blacklist", "mint": mint}
-            if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
-                return None
+            if rug and rug.get("is_bundled"):
+                _record_bundle_deployer(dev_wallet, symbol)
+                if BUNDLE_MODE == "avoid":
+                    return None
             if rug and rug.get("score", 0) > MAX_RUG_SCORE:
                 return None
             holder_ok, holder_reason = check_holder_concentration(mint)
             if not holder_ok:
                 return None
-            dev_wallet = coin.get("creator", "") or coin.get("dev", "")
             dev_ok, _ = check_dev_history(dev_wallet)
             if not dev_ok:
                 return None
@@ -2719,14 +2774,17 @@ def scanner_loop():
 
                 # ── Bundle ride — handled inline (special path) ────────
                 if BUNDLE_MODE == "ride" and 0 < bond < 75:
+                    _br_dev = coin.get("creator", "") or coin.get("dev", "")
+                    if _is_bundle_deployer(_br_dev):
+                        continue
                     rug = run_rugcheck(mint)
                     if rug and rug.get("is_bundled") and not rug.get("has_mint_auth") and not rug.get("has_freeze_auth"):
+                        _record_bundle_deployer(_br_dev, symbol)
                         holder_ok, holder_reason = check_holder_concentration(mint)
                         if not holder_ok:
                             log("warn", f"SKIP: {holder_reason}", symbol)
                             continue
-                        dev_wallet = coin.get("creator", "") or coin.get("dev", "")
-                        dev_ok, dev_reason = check_dev_history(dev_wallet)
+                        dev_ok, dev_reason = check_dev_history(_br_dev)
                         if not dev_ok:
                             log("warn", f"SKIP: {dev_reason}", symbol)
                             continue
@@ -2734,14 +2792,17 @@ def scanner_loop():
                             log("warn", "SKIP: smart money selling", symbol)
                             continue
                         sig_score = gmgn_signal_score(mint) + dsc_signal_score(mint) + jup_token_signal_score(mint)
+                        if sig_score < 1:
+                            continue
                         market = get_market_data(mint)
-                        if market and market["price"] > 0 and market["liq"] >= MIN_LIQ:
+                        if (market and market["price"] > 0 and market["liq"] >= MIN_LIQ
+                                and market.get("vol_m5", 0) >= MIN_VOL_5M):
                             with trades_lock:
                                 if len(open_trades) < MAX_OPEN and mint not in open_trades:
                                     amt = trade_size()
                                     log("ok", f"BUNDLE RIDE | bond={bond:.1f}% | sig={sig_score}", symbol)
                                     enter_trade(mint, symbol, market["price"], amt, "bundle", bond, 0, pump_swap=coin.get("pump_swap", False))
-                        continue
+                    continue
 
                 if BOND_ENTRY_MIN <= bond <= BOND_ENTRY_MAX:
                     n_bond_range += 1
@@ -2771,7 +2832,7 @@ def scanner_loop():
                     if not res:
                         continue
                     if res.get("action") == "blacklist":
-                        blacklisted_mints.add(res["mint"])
+                        _blacklist_add(res["mint"])
                         continue
                     if res.get("action") != "trade":
                         continue
@@ -2828,7 +2889,7 @@ def scanner_loop():
                     continue
                 rug = run_rugcheck(gmint)
                 if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
-                    blacklisted_mints.add(gmint)
+                    _blacklist_add(gmint)
                     continue
                 if gmgn_smart_money_selling(gmint):
                     continue
@@ -2870,25 +2931,34 @@ def scanner_loop():
                 with _copy_lock:
                     if sig_mint in _copied_mints:
                         continue
+                if time.time() - _sold_mints.get(sig_mint, 0) < 1800:
+                    continue
                 if daily_limit_reached():
                     break
                 market = get_market_data(sig_mint)
                 if not market or market["price"] <= 0 or market["liq"] < MIN_LIQ:
                     continue
+                _gmgn_dev = None
                 rug = run_rugcheck(sig_mint)
                 if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
-                    blacklisted_mints.add(sig_mint)
+                    _blacklist_add(sig_mint)
                     continue
-                if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
+                if rug and rug.get("is_bundled"):
+                    _gmgn_dev = rug.get("creator") or rug.get("dev") or ""
+                    _record_bundle_deployer(_gmgn_dev, sig_mint[:8])
+                    if BUNDLE_MODE == "avoid":
+                        continue
+                if _gmgn_dev and _is_bundle_deployer(_gmgn_dev):
+                    log("info", f"GMGN SKIP: serial bundler {_gmgn_dev[:8]}", sig_mint[:8])
                     continue
                 if gmgn_smart_money_selling(sig_mint):
                     continue
-                if market.get("vol_m5", 0) < 5000:
-                    log("info", f"GMGN SKIP: vol ${market.get('vol_m5',0):.0f}<5000", sig_mint[:8])
+                if market.get("vol_m5", 0) < MIN_VOL_5M:
+                    log("info", f"GMGN SKIP: vol ${market.get('vol_m5',0):.0f}<{MIN_VOL_5M}", sig_mint[:8])
                     continue
                 sig_score = gmgn_signal_score(sig_mint) + dsc_signal_score(sig_mint)
-                if sig_score < 1:
-                    log("info", f"GMGN SKIP: sig={sig_score}<1", sig_mint[:8])
+                if sig_score < MIN_SIGNAL_SCORE:
+                    log("info", f"GMGN SKIP: sig={sig_score}<{MIN_SIGNAL_SCORE}", sig_mint[:8])
                     continue
                 if not is_1m_trending_up(market.get("pair_address", ""), market):
                     log("info", f"SIGNAL SKIP: 1m not trending up", sig_mint[:8])
@@ -2923,25 +2993,34 @@ def scanner_loop():
                 with _copy_lock:
                     if dsc_mint in _copied_mints:
                         continue
+                if time.time() - _sold_mints.get(dsc_mint, 0) < 1800:
+                    continue
                 if daily_limit_reached():
                     break
                 market = get_market_data(dsc_mint)
                 if not market or market["price"] <= 0 or market["liq"] < MIN_LIQ:
                     continue
+                _dsc_dev = None
                 rug = run_rugcheck(dsc_mint)
                 if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
-                    blacklisted_mints.add(dsc_mint)
+                    _blacklist_add(dsc_mint)
                     continue
-                if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
+                if rug and rug.get("is_bundled"):
+                    _dsc_dev = rug.get("creator") or rug.get("dev") or ""
+                    _record_bundle_deployer(_dsc_dev, dsc_mint[:8])
+                    if BUNDLE_MODE == "avoid":
+                        continue
+                if _dsc_dev and _is_bundle_deployer(_dsc_dev):
+                    log("info", f"DSC SKIP: serial bundler {_dsc_dev[:8]}", dsc_mint[:8])
                     continue
                 if gmgn_smart_money_selling(dsc_mint):
                     continue
-                if market.get("vol_m5", 0) < 5000:
-                    log("info", f"DSC SKIP: vol ${market.get('vol_m5',0):.0f}<5000", dsc_mint[:8])
+                if market.get("vol_m5", 0) < MIN_VOL_5M:
+                    log("info", f"DSC SKIP: vol ${market.get('vol_m5',0):.0f}<{MIN_VOL_5M}", dsc_mint[:8])
                     continue
                 sig_score = gmgn_signal_score(dsc_mint) + dsc_signal_score(dsc_mint)
-                if sig_score < 1:
-                    log("info", f"DSC SKIP: sig={sig_score}<1", dsc_mint[:8])
+                if sig_score < MIN_SIGNAL_SCORE:
+                    log("info", f"DSC SKIP: sig={sig_score}<{MIN_SIGNAL_SCORE}", dsc_mint[:8])
                     continue
                 if not is_1m_trending_up(market.get("pair_address", ""), market):
                     continue
@@ -2982,6 +3061,8 @@ def scanner_loop():
                 with _copy_lock:
                     if jup_mint in _copied_mints:
                         continue
+                if time.time() - _sold_mints.get(jup_mint, 0) < 1800:
+                    continue
                 if daily_limit_reached():
                     break
                 market = get_market_data(jup_mint)
@@ -2989,22 +3070,28 @@ def scanner_loop():
                     continue
                 rug = run_rugcheck(jup_mint)
                 if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
-                    blacklisted_mints.add(jup_mint)
+                    _blacklist_add(jup_mint)
                     continue
                 jup_ok, _ = jup_audit_ok(jup_mint)
                 if not jup_ok:
-                    blacklisted_mints.add(jup_mint)
+                    _blacklist_add(jup_mint)
                     continue
-                if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
-                    continue
+                if rug and rug.get("is_bundled"):
+                    _jup_dev = rug.get("creator") or rug.get("dev") or ""
+                    _record_bundle_deployer(_jup_dev, jup_mint[:8])
+                    if BUNDLE_MODE == "avoid":
+                        continue
+                    if _is_bundle_deployer(_jup_dev):
+                        log("info", f"JUP SKIP: serial bundler {_jup_dev[:8]}", jup_mint[:8])
+                        continue
                 if gmgn_smart_money_selling(jup_mint):
                     continue
-                if market.get("vol_m5", 0) < 5000:
-                    log("info", f"JUP SKIP: vol ${market.get('vol_m5',0):.0f}<5000", jup_mint[:8])
+                if market.get("vol_m5", 0) < MIN_VOL_5M:
+                    log("info", f"JUP SKIP: vol ${market.get('vol_m5',0):.0f}<{MIN_VOL_5M}", jup_mint[:8])
                     continue
                 sig_score = gmgn_signal_score(jup_mint) + dsc_signal_score(jup_mint) + jup_token_signal_score(jup_mint)
-                if sig_score < 1:
-                    log("info", f"JUP SKIP: sig={sig_score}<1", jup_mint[:8])
+                if sig_score < MIN_SIGNAL_SCORE:
+                    log("info", f"JUP SKIP: sig={sig_score}<{MIN_SIGNAL_SCORE}", jup_mint[:8])
                     continue
                 if not is_1m_trending_up(market.get("pair_address", ""), market):
                     continue
@@ -6333,7 +6420,7 @@ def wallets_status():
 
 @app.route("/blacklist/<mint>", methods=["GET"])
 def blacklist_route(mint):
-    blacklisted_mints.add(mint)
+    _blacklist_add(mint)
     return jsonify({"blacklisted": mint})
 
 @app.route("/telegram_setup", methods=["GET"])
