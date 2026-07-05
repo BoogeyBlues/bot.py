@@ -268,6 +268,7 @@ _bond_prev_lock   = threading.Lock()
 _watchlist        = {}   # mint -> {"res": action_result, "added_at": float} — qualified but couldn't enter
 _watchlist_lock   = threading.Lock()
 WATCHLIST_TTL_SECS = int(os.environ.get("WATCHLIST_TTL_SECS", "300"))  # 5 min before watchlist entry expires
+TUNE_PAUSED_UNTIL  = 0.0   # Unix timestamp — auto-tune blocked until this time (0 = use Monday schedule)
 _gmgn_sm_signal_mints  = set()   # smart money buy signal mints (type 12)
 _gmgn_surge_mints      = set()   # price surge signal mints (type 6)
 _gmgn_kol_mints        = set()   # KOL buy mints
@@ -404,7 +405,8 @@ def _save_daily_state():
         "capital":        capital,
         "week_start":     _week_start_date,
         "week_logs":      _week_day_logs,
-        "day_start_cap":  _day_start_cap,
+        "day_start_cap":       _day_start_cap,
+        "tune_paused_until":   TUNE_PAUSED_UNTIL,
         "blacklist":      list(blacklisted_mints),
         "sold_mints":     sold_snapshot,
         "watchlist":      wl_snapshot,
@@ -422,7 +424,7 @@ def _save_daily_state():
 def _load_daily_state():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses
     global _pause_until, capital, _week_start_date, _week_day_logs, completed_trades
-    global _day_start_cap
+    global _day_start_cap, TUNE_PAUSED_UNTIL
     today = time.strftime("%Y-%m-%d")
 
     # Try Redis first (survives redeploys), fall back to local file
@@ -450,6 +452,7 @@ def _load_daily_state():
             _week_day_logs   = s.get("week_logs",  [])
             if s.get("day_start_cap", 0) > 0:
                 _day_start_cap = float(s["day_start_cap"])
+            TUNE_PAUSED_UNTIL = float(s.get("tune_paused_until", _next_monday_7am()))
             # Restore blacklist — persists across days
             for m in s.get("blacklist", []):
                 blacklisted_mints.add(m)
@@ -603,11 +606,27 @@ def record_daily_trade(won):
             resume_ts   = time.time() + LOSS_COOLDOWN_HRS * 3600
             _pause_until = resume_ts
             resume_str   = time.strftime("%H:%M", time.localtime(resume_ts))
-            log("warn", f"{_daily_losses} losses — pausing 30min to retune. Resumes {resume_str}")
-            notify("🔧 Retuning",
-                   f"{_daily_losses} losses hit.\nPausing 30min, retuning strategy.\nResumes: {resume_str}")
-            threading.Thread(target=_retune_strategies, daemon=True).start()
+            if time.time() >= TUNE_PAUSED_UNTIL:
+                log("warn", f"{_daily_losses} losses — pausing to retune. Resumes {resume_str}")
+                notify("🔧 Retuning",
+                       f"{_daily_losses} losses hit.\nPausing, retuning strategy.\nResumes: {resume_str}")
+                threading.Thread(target=_retune_strategies, daemon=True).start()
+            else:
+                log("warn", f"{_daily_losses} losses — pausing (retune suppressed until Monday). Resumes {resume_str}")
+                notify("⏸ Paused",
+                       f"{_daily_losses} losses hit.\nPausing (no retune — scheduled Monday 7am).\nResumes: {resume_str}")
     _save_daily_state()
+
+def _next_monday_7am():
+    """Returns Unix timestamp of next Monday at 07:00 UTC (pure arithmetic, no datetime import)."""
+    now = time.time()
+    t   = time.gmtime(now)
+    secs_today       = t.tm_hour * 3600 + t.tm_min * 60 + t.tm_sec
+    today_midnight   = now - secs_today
+    days_until_mon   = (7 - t.tm_wday) % 7   # Monday = weekday 0
+    if days_until_mon == 0 and t.tm_hour >= 7:
+        days_until_mon = 7  # already past 7am Monday — aim for next week
+    return today_midnight + days_until_mon * 86400 + 7 * 3600
 
 def _retune_strategies():
     """Run after hitting daily loss limit — analyze history and adjust params."""
@@ -798,7 +817,7 @@ def record_trade(trade_data):
         with open(LEARN_FILE, "w") as f:
             json.dump(trimmed, f)
         redis_save("bot_trades", trimmed)
-        if len(history) % ANALYZE_EVERY == 0:
+        if len(history) % ANALYZE_EVERY == 0 and time.time() >= TUNE_PAUSED_UNTIL:
             log("ok", f"Analyzing last {ANALYZE_EVERY} trades — retuning strategy...", "TUNE")
             auto_tune(history)
             log("ok", f"Tuned: bond={BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% stale={BOND_STALE_SECS}s SL={BOND_SL_PCT}% spikeTP={SPIKE_TP_PCT}%", "TUNE")
@@ -2626,6 +2645,19 @@ def scanner_loop():
 
     while scan_active:
         try:
+            # Weekly Monday 7am retune
+            if TUNE_PAUSED_UNTIL > 0 and time.time() >= TUNE_PAUSED_UNTIL:
+                log("ok", "Monday 7am — weekly retune firing", "TUNE")
+                with trades_lock:
+                    history_snap = list(completed_trades)
+                auto_tune(history_snap or [])
+                TUNE_PAUSED_UNTIL = _next_monday_7am()
+                _save_daily_state()
+                log("ok", f"Next retune scheduled: {time.strftime('%a %b %d %H:%M UTC', time.gmtime(TUNE_PAUSED_UNTIL))}", "TUNE")
+                notify("🧠 Weekly Retune Complete",
+                       f"Next retune: Monday {time.strftime('%b %d', time.gmtime(TUNE_PAUSED_UNTIL))} at 07:00 UTC\n"
+                       f"Bond: {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% | TP: {BOND_TP_PCT}% | SL: {BOND_SL_PCT}%")
+
             _drain_watchlist()
             with trades_lock:
                 num_open = len(open_trades)
@@ -3223,6 +3255,7 @@ def _home_inner():
     <a href="/" class="btn btn-gold">⚡ Refresh Now</a>
     <a href="/live" class="btn btn-ghost">📡 Live Feed</a>
     <a href="/trades" class="btn btn-ghost">💼 All Trades</a>
+    <button class="btn btn-ghost" style="border-color:rgba(0,229,255,.4);color:#00e5ff" onclick="if(confirm('Run retune now and lock auto-tuning until next Monday 7am?'))fetch('/admin/tune-now',{{method:'POST'}}).then(r=>r.json()).then(d=>alert(d.msg)).catch(()=>alert('Failed'))">🧠 Tune Now</button>
     <button class="btn btn-ghost" onclick="fetch('/admin/reset-daily',{{method:'POST'}}).then(r=>r.json()).then(d=>alert(d.msg)).catch(()=>alert('Failed'))">🔄 Reset Daily</button>
     <button class="btn btn-ghost" onclick="if(confirm('Reset capital to ${STARTING_CAPITAL:.2f}?'))fetch('/admin/reset-capital',{{method:'POST'}}).then(r=>r.json()).then(d=>alert(d.msg)).catch(()=>alert('Failed'))">💰 Reset Capital</button>
     <button class="btn btn-ghost" style="border-color:#ff3355;color:#ff3355" onclick="if(confirm('FULL RESET — wipes ALL trades, PNL history, and restores capital to ${STARTING_CAPITAL:.2f}. Cannot be undone. Continue?'))fetch('/admin/reset-all',{{method:'POST'}}).then(r=>r.json()).then(d=>{{alert(d.msg);location.reload()}}).catch(()=>alert('Failed'))">🗑️ Reset All</button>
@@ -4693,6 +4726,19 @@ setInterval(tickHists,3000);
 </script>
 </body></html>"""
     return html, 200
+
+@app.route("/admin/tune-now", methods=["POST"])
+def admin_tune_now():
+    global TUNE_PAUSED_UNTIL
+    with trades_lock:
+        history_snap = list(completed_trades)
+    auto_tune(history_snap or [])
+    TUNE_PAUSED_UNTIL = _next_monday_7am()
+    _save_daily_state()
+    next_str = time.strftime("%a %b %d at 07:00 UTC", time.gmtime(TUNE_PAUSED_UNTIL))
+    log("ok", f"Manual retune complete — next auto-retune {next_str}", "TUNE")
+    return jsonify({"ok": True, "msg": f"Tuned. Next auto-retune: {next_str}. "
+                                       f"Bond {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% | TP {BOND_TP_PCT}% | SL {BOND_SL_PCT}%"})
 
 @app.route("/admin/reset-daily", methods=["POST"])
 def admin_reset_daily():
