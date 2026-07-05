@@ -2652,20 +2652,27 @@ def scanner_loop():
 
     while scan_active:
         try:
-            # Weekly Monday 7am retune
+            # Weekly Monday 7am retune — run in background thread, never block scanner
             if TUNE_PAUSED_UNTIL > 0 and time.time() >= TUNE_PAUSED_UNTIL:
-                log("ok", "Monday 7am — weekly retune firing", "TUNE")
+                TUNE_PAUSED_UNTIL = _next_monday_7am()  # reset first so loop can't re-fire
+                _save_daily_state()
+                log("ok", f"Monday 7am retune firing in background. Next: {time.strftime('%a %b %d', time.gmtime(TUNE_PAUSED_UNTIL))}", "TUNE")
                 with trades_lock:
                     history_snap = list(completed_trades)
-                auto_tune(history_snap or [])
-                TUNE_PAUSED_UNTIL = _next_monday_7am()
-                _save_daily_state()
-                log("ok", f"Next retune scheduled: {time.strftime('%a %b %d %H:%M UTC', time.gmtime(TUNE_PAUSED_UNTIL))}", "TUNE")
-                notify("🧠 Weekly Retune Complete",
-                       f"Next retune: Monday {time.strftime('%b %d', time.gmtime(TUNE_PAUSED_UNTIL))} at 07:00 UTC\n"
-                       f"Bond: {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% | TP: {BOND_TP_PCT}% | SL: {BOND_SL_PCT}%")
+                def _do_weekly_tune(h):
+                    auto_tune(h)
+                    notify("🧠 Weekly Retune Complete",
+                           f"Next retune: Monday {time.strftime('%b %d', time.gmtime(TUNE_PAUSED_UNTIL))} at 07:00 UTC\n"
+                           f"Bond: {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% | TP: {BOND_TP_PCT}% | SL: {BOND_SL_PCT}%")
+                threading.Thread(target=_do_weekly_tune, args=(history_snap or [],), daemon=True).start()
 
             _drain_watchlist()
+            # Expire _copied_mints regardless of whether copy_trade_loop is running
+            _now_ts = time.time()
+            with _copy_lock:
+                expired_c = [m for m, ts in _copied_mints.items() if _now_ts - ts > 1800]
+                for m in expired_c:
+                    _copied_mints.pop(m, None)
             with trades_lock:
                 num_open = len(open_trades)
             if num_open >= MAX_OPEN:
