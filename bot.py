@@ -161,17 +161,8 @@ COPY_MIN_WHALE_USD   = float(os.environ.get("COPY_MIN_WHALE_USD",  "100"))  # sk
 TRACKED_WALLETS   = [w.strip() for w in os.environ.get("TRACKED_WALLETS", "").split(",") if w.strip()]
 # Pinned wallets — always monitored, mirror their exact USD trade size, use bot's own TP/SL/exits
 PINNED_WALLETS = [
-    "4Be9CvxqHW6BYiRAxW9Q3xu1ycTMWaL5z8NX4HR3ha7t",
-    "CxgPWvH2GoEDENELne2XKAR2z2Fr4shG2uaeyqZceGve",
-    "2X4H5Y9C4Fy6Pf3wpq8Q4gMvLcWvfrrwDv2bdR8AAwQv",
-    "J1mLoDATxKwi2ohBhrLbViqXo7yQu44tWxHfD6gAZX3J",
-    "HqZBJ2zK6zRhFg7WmaFBG6Y3ntCxwK99RwzCSAQPReyh",
-    "2fg5QD1eD7rzNNCsvnhmXFm5hqNgwTTG8p7kQ6f3rx6f",
-    "89HbgWduLwoxcofWpmn1EiF9wEdpgkNDEyPjzZ72mkDi",
-    "9iaawVBEsFG35PSwd4PahwT8fYNQe9XYuRdWm872dUqY",
-    "J23qr98GjGJJqKq9CBEnyRhHbmkaVxtTJNNxKu597wsA",
-    "9yYya3F5EJoLnBNKW6z4bZvyQytMXzDcpU5D6yYr4jqL",
-    "4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9",
+    "CxgPWvH2GoEDENELne2XKAR2z2Fr4shG2uaeyqZceGve",  # 41% exit rate, 80% pump.fun
+    "2X4H5Y9C4Fy6Pf3wpq8Q4gMvLcWvfrrwDv2bdR8AAwQv",  # 96% exit rate, disciplined
 ]
 # Fast wallets — skip ALL safety filters, exit before the wallet does (tight TP/SL)
 FAST_WALLETS = [
