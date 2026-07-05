@@ -2633,6 +2633,7 @@ def _drain_watchlist():
 
 # ── SCANNER LOOP ─────────────────────────────────────────────────
 def scanner_loop():
+    global TUNE_PAUSED_UNTIL
     log("ok", "=" * 55)
     log("ok", "PumpFun Sniper — Bond Runner + Dormant Spike")
     log("ok", f"Bond entry: {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% | TP: +{BOND_TP_PCT}% price")
@@ -2869,12 +2870,12 @@ def scanner_loop():
                     continue
                 if gmgn_smart_money_selling(sig_mint):
                     continue
-                if market.get("vol_m5", 0) < MIN_VOL_5M:
-                    log("info", f"GMGN SKIP: vol ${market.get('vol_m5',0):.0f}<{MIN_VOL_5M:.0f}", sig_mint[:8])
+                if market.get("vol_m5", 0) < 5000:
+                    log("info", f"GMGN SKIP: vol ${market.get('vol_m5',0):.0f}<5000", sig_mint[:8])
                     continue
                 sig_score = gmgn_signal_score(sig_mint) + dsc_signal_score(sig_mint)
-                if sig_score < MIN_SIGNAL_SCORE:
-                    log("info", f"GMGN SKIP: sig={sig_score}<{MIN_SIGNAL_SCORE}", sig_mint[:8])
+                if sig_score < 1:
+                    log("info", f"GMGN SKIP: sig={sig_score}<1", sig_mint[:8])
                     continue
                 if not is_1m_trending_up(market.get("pair_address", ""), market):
                     log("info", f"SIGNAL SKIP: 1m not trending up", sig_mint[:8])
@@ -2922,12 +2923,12 @@ def scanner_loop():
                     continue
                 if gmgn_smart_money_selling(dsc_mint):
                     continue
-                if market.get("vol_m5", 0) < MIN_VOL_5M:
-                    log("info", f"DSC SKIP: vol ${market.get('vol_m5',0):.0f}<{MIN_VOL_5M:.0f}", dsc_mint[:8])
+                if market.get("vol_m5", 0) < 5000:
+                    log("info", f"DSC SKIP: vol ${market.get('vol_m5',0):.0f}<5000", dsc_mint[:8])
                     continue
                 sig_score = gmgn_signal_score(dsc_mint) + dsc_signal_score(dsc_mint)
-                if sig_score < MIN_SIGNAL_SCORE:
-                    log("info", f"DSC SKIP: sig={sig_score}<{MIN_SIGNAL_SCORE}", dsc_mint[:8])
+                if sig_score < 1:
+                    log("info", f"DSC SKIP: sig={sig_score}<1", dsc_mint[:8])
                     continue
                 if not is_1m_trending_up(market.get("pair_address", ""), market):
                     continue
@@ -2985,12 +2986,12 @@ def scanner_loop():
                     continue
                 if gmgn_smart_money_selling(jup_mint):
                     continue
-                if market.get("vol_m5", 0) < MIN_VOL_5M:
-                    log("info", f"JUP SKIP: vol ${market.get('vol_m5',0):.0f}<{MIN_VOL_5M:.0f}", jup_mint[:8])
+                if market.get("vol_m5", 0) < 5000:
+                    log("info", f"JUP SKIP: vol ${market.get('vol_m5',0):.0f}<5000", jup_mint[:8])
                     continue
                 sig_score = gmgn_signal_score(jup_mint) + dsc_signal_score(jup_mint) + jup_token_signal_score(jup_mint)
-                if sig_score < MIN_SIGNAL_SCORE:
-                    log("info", f"JUP SKIP: sig={sig_score}<{MIN_SIGNAL_SCORE}", jup_mint[:8])
+                if sig_score < 1:
+                    log("info", f"JUP SKIP: sig={sig_score}<1", jup_mint[:8])
                     continue
                 if not is_1m_trending_up(market.get("pair_address", ""), market):
                     continue
