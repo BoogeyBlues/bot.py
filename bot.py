@@ -83,7 +83,7 @@ SOLD_COOLDOWN_SECS = int(os.environ.get("SOLD_COOLDOWN_SECS", "300"))  # was 180
 # Risk limits
 DAILY_LOSS_MAX    = int(os.environ.get("DAILY_LOSS_MAX",  "6"))   # retune after N consecutive losses
 LOSS_COOLDOWN_HRS = float(os.environ.get("LOSS_COOLDOWN_HRS", "0.083")) # 5-min pause then resume
-ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # retune every 5 trades for faster learning
+ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # kept for reference only — retune is weekly (Monday 07:00 UTC)
 
 # Bond Runner strategy
 BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "50"))  # 50%+ = confirmed momentum, less stall risk
@@ -828,10 +828,6 @@ def record_trade(trade_data):
         with open(LEARN_FILE, "w") as f:
             json.dump(trimmed, f)
         redis_save("bot_trades", trimmed)
-        if len(history) % ANALYZE_EVERY == 0 and time.time() >= TUNE_PAUSED_UNTIL:
-            log("ok", f"Analyzing last {ANALYZE_EVERY} trades — retuning strategy...", "TUNE")
-            auto_tune(history)
-            log("ok", f"Tuned: bond={BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}% stale={BOND_STALE_SECS}s SL={BOND_SL_PCT}% spikeTP={SPIKE_TP_PCT}%", "TUNE")
     except Exception as e:
         log("warn", f"Learning record: {e}")
 
