@@ -88,7 +88,7 @@ ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # retune every
 # Bond Runner strategy
 BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "50"))  # 50%+ = confirmed momentum, less stall risk
 BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "60"))
-BOND_TP_PCT     = float(os.environ.get("BOND_TP_PCT",    "20"))  # price % TP (was bond-level 93 — never fired)
+BOND_TP_PCT     = float(os.environ.get("BOND_TP_PCT",    "30"))  # raised from 20 — needs 3x R:R at low WR
 BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "8"))
 BOND_GRAD_BOND  = float(os.environ.get("BOND_GRAD_BOND", "90"))  # graduation imminent — tighten TSL
 BOND_GRAD_TSL   = float(os.environ.get("BOND_GRAD_TSL",  "3"))   # tight TSL % near graduation
@@ -100,14 +100,14 @@ VOL_STALE_SECS      = int(os.environ.get("VOL_STALE_SECS",       "60"))  # exit 
 # Dormant Spike strategy
 SPIKE_MIN_AGE_H = float(os.environ.get("SPIKE_MIN_AGE_H", "12"))
 SPIKE_MIN_1H    = float(os.environ.get("SPIKE_MIN_1H",    "30"))
-SPIKE_TP_PCT    = float(os.environ.get("SPIKE_TP_PCT",    "20"))   # scalp the spike — most peak at 20-40%
+SPIKE_TP_PCT    = float(os.environ.get("SPIKE_TP_PCT",    "35"))   # raised from 20 — spikes run 30-50% before fading
 SPIKE_SL_PCT    = float(os.environ.get("SPIKE_SL_PCT",    "15"))
 SPIKE_MAX_SECS  = int(os.environ.get("SPIKE_MAX_SECS",    "180"))   # 3 min hard cap
 
 # Trench strategy — coins 85-97% bonded, about to graduate (fast pump at migration)
 TRENCH_ENTRY_MIN = float(os.environ.get("TRENCH_ENTRY_MIN", "85"))
 TRENCH_ENTRY_MAX = float(os.environ.get("TRENCH_ENTRY_MAX", "97"))
-TRENCH_TP_PCT    = float(os.environ.get("TRENCH_TP_PCT",    "35"))
+TRENCH_TP_PCT    = float(os.environ.get("TRENCH_TP_PCT",    "50"))  # raised from 35 — graduation pumps run hard
 TRENCH_SL_PCT    = float(os.environ.get("TRENCH_SL_PCT",    "12"))
 TRENCH_MAX_SECS  = int(os.environ.get("TRENCH_MAX_SECS",    "90"))  # 90s — very fast
 
