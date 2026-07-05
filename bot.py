@@ -3146,6 +3146,7 @@ def _home_inner():
     <a href="/positions">📍 Positions</a>
     <a href="/trades">📋 All Trades</a>
     <a href="/status">📊 Status</a>
+    <a href="/watchlist">👁 Watchlist</a>
     <a href="/learn">🧠 Strategy</a>
     <a href="/chart">📈 Chart</a>
     <a href="/setup">⚙️ Setup</a>
@@ -4159,6 +4160,475 @@ document.addEventListener('keydown', e => {{ if(e.key==='Escape') closeModal(); 
 </body></html>"""
     return html, 200
 
+@app.route("/watchlist/api", methods=["GET"])
+def watchlist_api():
+    now = time.time()
+    with _watchlist_lock:
+        items = [
+            {
+                "mint":        mint,
+                "symbol":      entry["res"]["symbol"],
+                "strategy":    entry["res"]["strategy"],
+                "bond":        round(entry["res"].get("bond", 0), 1),
+                "sig_score":   entry["res"].get("sig_score", 0),
+                "entry_price": entry["res"]["price"],
+                "added_at":    entry["added_at"],
+                "wait_secs":   round(now - entry["added_at"]),
+                "vol_m5":      entry["res"]["market"].get("vol_m5", 0),
+                "change5m":    entry["res"]["market"].get("change5m", 0),
+            }
+            for mint, entry in _watchlist.items()
+        ]
+    paused = _pause_until > now
+    return jsonify({
+        "items":           items,
+        "paused":          paused,
+        "pause_remaining": round(max(0, _pause_until - now)),
+        "open_trades":     len(open_trades),
+        "max_open":        MAX_OPEN,
+    })
+
+@app.route("/watchlist/<mint>/remove", methods=["POST"])
+def watchlist_remove(mint):
+    with _watchlist_lock:
+        if mint in _watchlist:
+            sym = _watchlist[mint]["res"]["symbol"]
+            _watchlist.pop(mint)
+            log("info", f"Removed {sym} from watchlist via UI")
+            return jsonify({"ok": True})
+    return jsonify({"ok": False, "msg": "Not found"})
+
+@app.route("/watchlist/<mint>/greenlight", methods=["POST"])
+def watchlist_greenlight(mint):
+    with _watchlist_lock:
+        entry = _watchlist.get(mint)
+    if not entry:
+        return jsonify({"ok": False, "msg": "Not on watchlist"})
+    res = entry["res"]
+    market = get_market_data(mint)
+    if not market or market["price"] <= 0:
+        return jsonify({"ok": False, "msg": "Can't fetch price"})
+    amt = trade_size()
+    ok = enter_trade(mint, res["symbol"], market["price"], amt, res["strategy"],
+                     res.get("bond", 0), 0, pump_swap=res.get("pump_swap", False))
+    if ok:
+        with _watchlist_lock:
+            _watchlist.pop(mint, None)
+        return jsonify({"ok": True, "msg": f"Entered {res['symbol']}"})
+    return jsonify({"ok": False, "msg": "Entry failed — paused, full, or low capital"})
+
+@app.route("/watchlist/greenlight-all", methods=["POST"])
+def watchlist_greenlight_all():
+    with _watchlist_lock:
+        entries = list(_watchlist.items())
+    entered = 0
+    for mint, entry in entries:
+        res = entry["res"]
+        market = get_market_data(mint)
+        if not market or market["price"] <= 0:
+            continue
+        ok = enter_trade(mint, res["symbol"], market["price"], trade_size(), res["strategy"],
+                         res.get("bond", 0), 0, pump_swap=res.get("pump_swap", False))
+        if ok:
+            with _watchlist_lock:
+                _watchlist.pop(mint, None)
+            entered += 1
+    return jsonify({"ok": True, "entered": entered})
+
+@app.route("/watchlist/clear", methods=["POST"])
+def watchlist_clear():
+    with _watchlist_lock:
+        count = len(_watchlist)
+        _watchlist.clear()
+    return jsonify({"ok": True, "cleared": count})
+
+@app.route("/watchlist", methods=["GET"])
+def watchlist_page():
+    mode = "PAPER" if PAPER_MODE else "LIVE"
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Watchlist — {BOT_NAME}</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*{{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}}
+:root{{--bg:#050a14;--bg2:#080f1e;--bg3:#0d1628;--cyan:#00e5ff;--green:#00ff88;--red:#ff3355;--yellow:#ffee00;--text:#c8d8f0;--muted:#4a6080}}
+html,body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-height:100vh;overflow-x:hidden}}
+body{{max-width:430px;margin:0 auto}}
+nav{{background:rgba(5,10,20,.97);border-bottom:1px solid rgba(0,229,255,.1);display:flex;overflow-x:auto;position:sticky;top:0;z-index:100}}
+nav::-webkit-scrollbar{{display:none}}
+.nav-tab{{font-family:'Bebas Neue',sans-serif;font-size:13px;letter-spacing:2px;padding:14px 18px;color:var(--muted);white-space:nowrap;border-bottom:2px solid transparent;flex-shrink:0;text-decoration:none}}
+.nav-tab.active{{color:var(--cyan);border-bottom-color:var(--cyan)}}
+.page{{padding:14px 14px 80px}}
+/* STATUS BAR */
+.status-bar{{background:var(--bg2);border:1px solid rgba(255,238,0,.2);border-radius:14px;padding:13px 15px;margin-bottom:12px}}
+.status-bar.live{{border-color:rgba(0,255,136,.2)}}
+.status-top{{display:flex;align-items:center;justify-content:space-between;margin-bottom:9px}}
+.status-left{{display:flex;align-items:center;gap:9px}}
+.pause-dot{{width:8px;height:8px;border-radius:50%;background:var(--yellow);flex-shrink:0;box-shadow:0 0 8px rgba(255,238,0,.6);animation:pdot 1.2s ease-in-out infinite}}
+.pause-dot.live{{background:var(--green);box-shadow:0 0 8px rgba(0,255,136,.6)}}
+@keyframes pdot{{0%,100%{{opacity:1}}50%{{opacity:.3}}}}
+.pause-lbl{{font-size:.65rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--yellow)}}
+.pause-lbl.live{{color:var(--green)}}
+.pause-sub{{font-size:.55rem;color:var(--muted);margin-top:1px}}
+.countdown{{font-family:'Bebas Neue',sans-serif;font-size:1.8rem;letter-spacing:2px;color:var(--yellow);line-height:1}}
+.countdown.live{{color:var(--green)}}
+.meta-pills{{display:flex;gap:6px;flex-wrap:wrap}}
+.mpill{{font-size:.58rem;font-weight:600;letter-spacing:.05em;font-family:'JetBrains Mono',monospace;padding:3px 8px;border-radius:20px;background:rgba(0,229,255,.07);border:1px solid rgba(0,229,255,.12);color:var(--cyan)}}
+/* ACTIONS */
+.act-row{{display:flex;gap:8px;margin-bottom:12px}}
+.btn-gl-all{{flex:1;padding:11px;border-radius:12px;border:1px solid rgba(0,255,136,.25);background:rgba(0,255,136,.1);color:var(--green);font-family:'Bebas Neue',sans-serif;font-size:1rem;letter-spacing:2px;cursor:pointer;transition:all .2s}}
+.btn-gl-all:hover{{background:rgba(0,255,136,.18);border-color:rgba(0,255,136,.45)}}
+.btn-clr{{padding:11px 14px;border-radius:12px;border:1px solid rgba(255,51,85,.15);background:rgba(255,51,85,.07);color:var(--red);font-size:.68rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase;cursor:pointer;transition:all .2s}}
+.btn-clr:hover{{background:rgba(255,51,85,.15)}}
+/* SECTION */
+.sec-lbl{{font-size:.58rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin-bottom:9px;display:flex;align-items:center;gap:8px}}
+.sec-lbl::after{{content:'';flex:1;height:1px;background:rgba(255,255,255,.05)}}
+/* CARD */
+.wl-card{{background:var(--bg2);border:1px solid rgba(255,238,0,.15);border-radius:14px;margin-bottom:10px;overflow:hidden;animation:fadeUp .3s ease both}}
+.wl-card.live{{border-color:rgba(0,255,136,.2)}}
+@keyframes fadeUp{{from{{opacity:0;transform:translateY(10px)}}to{{opacity:1;transform:translateY(0)}}}}
+.wl-card:nth-child(1){{animation-delay:.04s}}.wl-card:nth-child(2){{animation-delay:.08s}}.wl-card:nth-child(3){{animation-delay:.12s}}.wl-card:nth-child(4){{animation-delay:.16s}}.wl-card:nth-child(5){{animation-delay:.2s}}
+.stripe{{height:2px;width:100%}}
+.s-bond{{background:var(--cyan)}}.s-trench{{background:var(--yellow)}}.s-spike{{background:var(--green)}}.s-copy{{background:#a78bfa}}.s-migrate{{background:#f97316}}
+.card-head{{display:flex;align-items:flex-start;justify-content:space-between;padding:11px 13px 5px}}
+.card-sym{{font-family:'Bebas Neue',sans-serif;font-size:1.3rem;letter-spacing:2px;color:var(--text);line-height:1}}
+.card-badges{{display:flex;gap:4px;flex-wrap:wrap;margin-top:4px}}
+.cbadge{{font-size:.55rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase;padding:2px 7px;border-radius:20px;font-family:'JetBrains Mono',monospace}}
+.cb-bond{{background:rgba(0,229,255,.1);color:var(--cyan);border:1px solid rgba(0,229,255,.18)}}
+.cb-trench{{background:rgba(255,238,0,.08);color:var(--yellow);border:1px solid rgba(255,238,0,.18)}}
+.cb-spike{{background:rgba(0,255,136,.08);color:var(--green);border:1px solid rgba(0,255,136,.18)}}
+.cb-copy{{background:rgba(167,139,250,.1);color:#a78bfa;border:1px solid rgba(167,139,250,.18)}}
+.cb-migrate{{background:rgba(249,115,22,.1);color:#f97316;border:1px solid rgba(249,115,22,.18)}}
+.cb-sig{{background:rgba(0,229,255,.05);color:var(--cyan);border:1px solid rgba(0,229,255,.1)}}
+.cb-wait{{background:rgba(255,238,0,.08);color:var(--yellow);border:1px solid rgba(255,238,0,.15)}}
+.cb-ready{{background:rgba(0,255,136,.08);color:var(--green);border:1px solid rgba(0,255,136,.15)}}
+.card-x{{width:26px;height:26px;border-radius:7px;border:1px solid rgba(255,51,85,.12);background:rgba(255,51,85,.07);color:var(--red);font-size:.75rem;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:background .15s}}
+.card-x:hover{{background:rgba(255,51,85,.2)}}
+/* CHART */
+.chart-zone{{padding:3px 13px 3px;cursor:pointer;position:relative}}
+.chart-hint{{position:absolute;right:18px;top:7px;font-size:.5rem;font-weight:600;letter-spacing:.06em;color:var(--muted);text-transform:uppercase;opacity:.7}}
+canvas.mini{{width:100%;height:56px;display:block;border-radius:9px;background:rgba(255,255,255,.02)}}
+/* STATS */
+.card-stats{{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;padding:7px 13px 10px}}
+.st{{display:flex;flex-direction:column;gap:2px}}
+.st-v{{font-family:'JetBrains Mono',monospace;font-size:.74rem;font-variant-numeric:tabular-nums;color:var(--text)}}
+.st-v.up{{color:var(--green)}}.st-v.dn{{color:var(--red)}}
+.st-l{{font-size:.53rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}}
+/* FOOTER */
+.card-foot{{display:flex;gap:7px;padding:0 13px 12px}}
+.btn-rm{{padding:8px 13px;border-radius:9px;border:1px solid rgba(255,51,85,.12);background:rgba(255,51,85,.06);color:var(--red);font-size:.64rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase;cursor:pointer;transition:all .15s}}
+.btn-rm:hover{{background:rgba(255,51,85,.16)}}
+.btn-gl{{flex:1;padding:8px;border-radius:9px;font-family:'Bebas Neue',sans-serif;font-size:.9rem;letter-spacing:2px;cursor:pointer;transition:all .15s;border:1px solid rgba(0,255,136,.1);background:rgba(0,255,136,.04);color:rgba(0,255,136,.38)}}
+.btn-gl.live{{color:var(--green);background:rgba(0,255,136,.1);border-color:rgba(0,255,136,.25);cursor:pointer}}
+.btn-gl.live:hover{{background:rgba(0,255,136,.18);border-color:rgba(0,255,136,.45)}}
+/* DRAWER */
+.drawer-bd{{position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);display:none}}
+.drawer{{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;z-index:201;background:var(--bg2);border-radius:20px 20px 0 0;border:1px solid rgba(0,229,255,.12);border-bottom:none;padding:0 0 44px;display:none;animation:drawerUp .25s ease}}
+@keyframes drawerUp{{from{{transform:translate(-50%,100%)}}to{{transform:translate(-50%,0)}}}}
+.drawer-handle{{width:36px;height:4px;border-radius:2px;background:var(--muted);margin:12px auto 14px}}
+.drawer-hdr{{padding:0 16px 12px;display:flex;align-items:flex-start;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,.04)}}
+.d-sym{{font-family:'Bebas Neue',sans-serif;font-size:1.5rem;letter-spacing:2px;color:var(--text)}}
+.d-sub{{font-size:.6rem;color:var(--muted);margin-top:2px;font-family:'JetBrains Mono',monospace}}
+.d-close{{background:rgba(255,255,255,.06);border:none;border-radius:8px;color:var(--muted);width:30px;height:30px;font-size:1rem;cursor:pointer;display:flex;align-items:center;justify-content:center}}
+.d-chart-wrap{{padding:14px 14px 8px}}
+canvas.dchart{{width:100%;height:130px;display:block;border-radius:11px;background:rgba(255,255,255,.02)}}
+.d-stats{{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;padding:10px 16px 0}}
+.ds{{display:flex;flex-direction:column;gap:3px}}
+.ds-v{{font-family:'JetBrains Mono',monospace;font-size:.8rem;font-variant-numeric:tabular-nums;color:var(--cyan)}}
+.ds-l{{font-size:.54rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}}
+/* EMPTY */
+.empty{{text-align:center;padding:56px 20px;display:flex;flex-direction:column;align-items:center;gap:14px}}
+.empty-icon{{font-size:2.2rem;opacity:.25}}
+.empty-title{{font-family:'Bebas Neue',sans-serif;font-size:1.3rem;letter-spacing:2px;color:var(--muted)}}
+.empty-sub{{font-size:.72rem;color:var(--muted);opacity:.55;max-width:220px;line-height:1.6}}
+</style>
+</head>
+<body>
+<nav>
+  <a href="/" class="nav-tab">HOME</a>
+  <a href="/live" class="nav-tab">LIVE</a>
+  <a href="/trades" class="nav-tab">TRADES</a>
+  <a href="/status" class="nav-tab">STATUS</a>
+  <a href="/watchlist" class="nav-tab active">WATCHLIST</a>
+  <a href="/learn" class="nav-tab">STRATEGY</a>
+  <a href="/chart" class="nav-tab">CHART</a>
+</nav>
+
+<div class="page">
+
+  <div class="status-bar" id="statusBar">
+    <div class="status-top">
+      <div class="status-left">
+        <div class="pause-dot" id="pauseDot"></div>
+        <div>
+          <div class="pause-lbl" id="pauseLbl">LOSS COOLDOWN</div>
+          <div class="pause-sub" id="pauseSub">resumes trading in</div>
+        </div>
+      </div>
+      <div class="countdown" id="countdown">--:--</div>
+    </div>
+    <div class="meta-pills" id="metaPills">
+      <span class="mpill" id="queuedPill">0 QUEUED</span>
+      <span class="mpill">SIG ≥{MIN_SIGNAL_SCORE}</span>
+      <span class="mpill">VOL ≥${MIN_VOL_5M/1000:.0f}K</span>
+    </div>
+  </div>
+
+  <div class="act-row">
+    <button class="btn-gl-all" id="btnGlAll" onclick="greenlightAll()">GREENLIGHT ALL</button>
+    <button class="btn-clr" onclick="clearAll()">Clear All</button>
+  </div>
+
+  <div class="sec-lbl">Qualified Coins</div>
+  <div id="coinList"></div>
+
+</div>
+
+<!-- DRAWER -->
+<div class="drawer-bd" id="drawerBd" onclick="closeDrawer()"></div>
+<div class="drawer" id="drawer">
+  <div class="drawer-handle"></div>
+  <div class="drawer-hdr">
+    <div><div class="d-sym" id="dSym">—</div><div class="d-sub" id="dSub">—</div></div>
+    <button class="d-close" onclick="closeDrawer()">✕</button>
+  </div>
+  <div class="d-chart-wrap"><canvas class="dchart" id="dChart"></canvas></div>
+  <div class="d-stats">
+    <div class="ds"><span class="ds-v" id="dEntry">—</span><span class="ds-l">Entry</span></div>
+    <div class="ds"><span class="ds-v" id="dNow">—</span><span class="ds-l">Now</span></div>
+    <div class="ds"><span class="ds-v" id="dDrift">—</span><span class="ds-l">Drift</span></div>
+    <div class="ds"><span class="ds-v" id="dVol">—</span><span class="ds-l">Vol 5m</span></div>
+  </div>
+</div>
+
+<script>
+let _data={{}};
+let _drawerMint=null;
+let _priceHists={{}};
+
+function fmt(p){{return p<0.001?'\$'+p.toExponential(3):'\$'+p.toFixed(p<0.01?6:p<1?4:2)}}
+function fmtWait(s){{return s<60?s+'s':Math.floor(s/60)+'m '+s%60+'s'}}
+
+function drawChart(canvas,hist,entry,h){{
+  const w=canvas.offsetWidth||380;
+  canvas.width=w;canvas.height=h;
+  const ctx=canvas.getContext('2d');
+  ctx.clearRect(0,0,w,h);
+  if(hist.length<2)return;
+  const mn=Math.min(...hist,entry),mx=Math.max(...hist,entry);
+  const pad=(mx-mn)*0.12||entry*0.005;
+  const lo=mn-pad,hi=mx+pad,rng=hi-lo||1;
+  const xp=i=>(i/(hist.length-1))*w;
+  const yp=v=>h-((v-lo)/rng)*h;
+  ctx.strokeStyle='rgba(255,255,255,.1)';ctx.lineWidth=1;ctx.setLineDash([3,4]);
+  ctx.beginPath();ctx.moveTo(0,yp(entry));ctx.lineTo(w,yp(entry));ctx.stroke();ctx.setLineDash([]);
+  const last=hist[hist.length-1];
+  const col=last>=entry?'#00ff88':'#ff3355';
+  const grad=ctx.createLinearGradient(0,0,0,h);
+  grad.addColorStop(0,last>=entry?'rgba(0,255,136,.18)':'rgba(255,51,85,.18)');
+  grad.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.beginPath();ctx.moveTo(xp(0),yp(hist[0]));
+  hist.forEach((v,i)=>i>0&&ctx.lineTo(xp(i),yp(v)));
+  ctx.lineTo(w,h);ctx.lineTo(0,h);ctx.closePath();ctx.fillStyle=grad;ctx.fill();
+  ctx.beginPath();ctx.moveTo(xp(0),yp(hist[0]));
+  hist.forEach((v,i)=>i>0&&ctx.lineTo(xp(i),yp(v)));
+  ctx.strokeStyle=col;ctx.lineWidth=h>80?2:1.5;ctx.stroke();
+  ctx.beginPath();ctx.arc(w-3,yp(last),3,0,Math.PI*2);ctx.fillStyle=col;ctx.fill();
+}}
+
+function renderStatus(){{
+  const d=_data;
+  const paused=d.paused||false;
+  const rem=d.pause_remaining||0;
+  const bar=document.getElementById('statusBar');
+  const dot=document.getElementById('pauseDot');
+  const lbl=document.getElementById('pauseLbl');
+  const sub=document.getElementById('pauseSub');
+  const cd=document.getElementById('countdown');
+  const pill=document.getElementById('queuedPill');
+  const btn=document.getElementById('btnGlAll');
+  if(pill)pill.textContent=(d.items||[]).length+' QUEUED';
+  if(paused&&rem>0){{
+    const m=Math.floor(rem/60),s=rem%60;
+    cd.textContent=m+':'+(s<10?'0':'')+s;
+    cd.className='countdown';dot.className='pause-dot';
+    lbl.textContent='LOSS COOLDOWN';lbl.className='pause-lbl';
+    sub.textContent='resumes trading in';
+    bar.className='status-bar';
+    if(btn)btn.textContent='WAITING…';
+  }}else{{
+    cd.textContent='LIVE';cd.className='countdown live';
+    dot.className='pause-dot live';lbl.textContent='TRADING ACTIVE';lbl.className='pause-lbl live';
+    sub.textContent='bot is scanning';bar.className='status-bar live';
+    if(btn)btn.textContent='GREENLIGHT ALL';
+  }}
+}}
+
+function stratClass(s){{return{{bond:'cb-bond',trench:'cb-trench',spike:'cb-spike',copy:'cb-copy',migrate:'cb-migrate'}}[s]||'cb-bond'}}
+function stripeClass(s){{return{{bond:'s-bond',trench:'s-trench',spike:'s-spike',copy:'s-copy',migrate:'s-migrate'}}[s]||'s-bond'}}
+
+function renderCoins(){{
+  const list=document.getElementById('coinList');
+  const items=_data.items||[];
+  const paused=_data.paused||false;
+  if(!items.length){{
+    list.innerHTML=`<div class="empty">
+      <div class="empty-icon">👁</div>
+      <div class="empty-title">WATCHLIST CLEAR</div>
+      <div class="empty-sub">Coins that pass all filters during a cooldown or when slots are full will appear here</div>
+    </div>`;
+    return;
+  }}
+  list.innerHTML=items.map((c,i)=>{{
+    const drift=((_priceHists[c.mint]||[c.entry_price]).slice(-1)[0]-c.entry_price)/c.entry_price*100;
+    const driftStr=(drift>=0?'+':'')+drift.toFixed(1)+'%';
+    const driftCls=drift>=1?'up':drift<=-2?'dn':'';
+    const waitBadge=paused
+      ?`<span class="cbadge cb-wait">⏳ ${{fmtWait(c.wait_secs)}}</span>`
+      :`<span class="cbadge cb-ready">✓ READY</span>`;
+    return `<div class="wl-card ${{paused?'':'live'}}" id="card-${{c.mint}}">
+      <div class="stripe ${{stripeClass(c.strategy)}}"></div>
+      <div class="card-head">
+        <div>
+          <div class="card-sym">${{c.symbol}}</div>
+          <div class="card-badges">
+            <span class="cbadge ${{stratClass(c.strategy)}}">${{c.strategy.toUpperCase()}}</span>
+            <span class="cbadge cb-sig">SIG ${{c.sig_score}}</span>
+            ${{waitBadge}}
+          </div>
+        </div>
+        <button class="card-x" onclick="removeCoin('${{c.mint}}')">✕</button>
+      </div>
+      <div class="chart-zone" onclick="openDrawer('${{c.mint}}')">
+        <span class="chart-hint">tap to expand</span>
+        <canvas class="mini" id="mc-${{c.mint}}" width="400" height="56"></canvas>
+      </div>
+      <div class="card-stats">
+        <div class="st"><span class="st-v">${{fmt(c.entry_price)}}</span><span class="st-l">Entry Price</span></div>
+        <div class="st"><span class="st-v ${{driftCls}}">${{driftStr}}</span><span class="st-l">Drift</span></div>
+        <div class="st"><span class="st-v">\$${{(c.vol_m5/1000).toFixed(1)}}k</span><span class="st-l">Vol 5m</span></div>
+      </div>
+      <div class="card-foot">
+        <button class="btn-rm" onclick="removeCoin('${{c.mint}}')">Remove</button>
+        <button class="btn-gl ${{paused?'':'live'}}" onclick="greenlightOne('${{c.mint}}','${{c.symbol}}')">${{paused?'WAITING…':'GREENLIGHT'}}</button>
+      </div>
+    </div>`;
+  }}).join('');
+
+  items.forEach(c=>{{
+    const hist=_priceHists[c.mint]||[c.entry_price];
+    requestAnimationFrame(()=>{{
+      const cv=document.getElementById('mc-'+c.mint);
+      if(cv)drawChart(cv,hist,c.entry_price,56);
+    }});
+  }});
+}}
+
+function openDrawer(mint){{
+  const c=(_data.items||[]).find(x=>x.mint===mint);
+  if(!c)return;
+  _drawerMint=mint;
+  const hist=_priceHists[mint]||[c.entry_price];
+  const last=hist[hist.length-1];
+  const drift=(last-c.entry_price)/c.entry_price*100;
+  document.getElementById('dSym').textContent=c.symbol;
+  document.getElementById('dSub').textContent=c.strategy.toUpperCase()+' · '+c.mint.slice(0,8)+'…'+c.mint.slice(-4);
+  document.getElementById('dEntry').textContent=fmt(c.entry_price);
+  document.getElementById('dNow').textContent=fmt(last);
+  document.getElementById('dDrift').textContent=(drift>=0?'+':'')+drift.toFixed(2)+'%';
+  document.getElementById('dDrift').style.color=drift>=0?'var(--green)':'var(--red)';
+  document.getElementById('dVol').textContent='\$'+(c.vol_m5/1000).toFixed(1)+'k';
+  document.getElementById('drawerBd').style.display='block';
+  document.getElementById('drawer').style.display='block';
+  requestAnimationFrame(()=>{{
+    const cv=document.getElementById('dChart');
+    if(cv)drawChart(cv,hist,c.entry_price,130);
+  }});
+}}
+
+function closeDrawer(){{
+  _drawerMint=null;
+  document.getElementById('drawerBd').style.display='none';
+  document.getElementById('drawer').style.display='none';
+}}
+
+function removeCoin(mint){{
+  fetch('/watchlist/'+mint+'/remove',{{method:'POST'}})
+    .then(()=>poll()).catch(()=>{{}});
+}}
+
+function greenlightOne(mint,sym){{
+  if(_data.paused){{alert('Bot is in cooldown — coin will auto-enter when pause lifts.');return;}}
+  fetch('/watchlist/'+mint+'/greenlight',{{method:'POST'}})
+    .then(r=>r.json()).then(d=>{{
+      if(d.ok){{closeDrawer();poll();}}
+      else alert(d.msg||'Entry failed');
+    }}).catch(()=>{{}});
+}}
+
+function greenlightAll(){{
+  if(_data.paused){{alert('Bot is in cooldown — coins will auto-enter when pause lifts.');return;}}
+  fetch('/watchlist/greenlight-all',{{method:'POST'}})
+    .then(r=>r.json()).then(d=>poll()).catch(()=>{{}});
+}}
+
+function clearAll(){{
+  if(!(_data.items||[]).length)return;
+  if(confirm('Remove all '+(_data.items||[]).length+' coins from watchlist?')){{
+    fetch('/watchlist/clear',{{method:'POST'}}).then(()=>poll()).catch(()=>{{}});
+  }}
+}}
+
+function tickHists(){{
+  (_data.items||[]).forEach(c=>{{
+    const h=_priceHists[c.mint];
+    if(!h)return;
+    const last=h[h.length-1];
+    const next=last*(1+(Math.random()-.49)*0.015);
+    h.push(next);
+    if(h.length>80)h.shift();
+  }});
+  (_data.items||[]).forEach(c=>{{
+    const cv=document.getElementById('mc-'+c.mint);
+    if(cv)drawChart(cv,_priceHists[c.mint]||[c.entry_price],c.entry_price,56);
+    if(_drawerMint===c.mint){{
+      const dv=document.getElementById('dChart');
+      const hist=_priceHists[c.mint]||[c.entry_price];
+      const last=hist[hist.length-1];
+      const drift=(last-c.entry_price)/c.entry_price*100;
+      if(dv)drawChart(dv,hist,c.entry_price,130);
+      document.getElementById('dNow').textContent=fmt(last);
+      document.getElementById('dDrift').textContent=(drift>=0?'+':'')+drift.toFixed(2)+'%';
+      document.getElementById('dDrift').style.color=drift>=0?'var(--green)':'var(--red)';
+    }}
+  }});
+}}
+
+async function poll(){{
+  try{{
+    const d=await fetch('/watchlist/api').then(r=>r.json());
+    // seed price hists for new coins
+    (d.items||[]).forEach(c=>{{
+      if(!_priceHists[c.mint])_priceHists[c.mint]=[c.entry_price];
+    }});
+    // remove hists for removed coins
+    const mints=new Set((d.items||[]).map(x=>x.mint));
+    Object.keys(_priceHists).forEach(m=>{{if(!mints.has(m))delete _priceHists[m];}});
+    _data=d;
+    renderStatus();renderCoins();
+  }}catch(e){{}}
+}}
+
+poll();
+setInterval(poll,5000);
+setInterval(tickHists,3000);
+</script>
+</body></html>"""
+    return html, 200
+
 @app.route("/admin/reset-daily", methods=["POST"])
 def admin_reset_daily():
     global _daily_trades, _daily_wins, _daily_losses, _pause_until, _daily_cap_notified
@@ -4413,6 +4883,7 @@ nav::-webkit-scrollbar{display:none}
   <a href="/live" class="nav-tab active">LIVE</a>
   <a href="/trades" class="nav-tab">TRADES</a>
   <a href="/status" class="nav-tab">STATUS</a>
+  <a href="/watchlist" class="nav-tab">WATCHLIST</a>
   <a href="/learn" class="nav-tab">STRATEGY</a>
   <a href="/chart" class="nav-tab">CHART</a>
 </nav>
