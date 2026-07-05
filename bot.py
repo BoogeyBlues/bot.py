@@ -4093,18 +4093,24 @@ def admin_reset_daily():
         _daily_losses        = 0
         _pause_until         = 0.0
         _daily_cap_notified  = False
+    completed_trades.clear()
+    _redis_cmd("DEL", "bot_trades")
+    redis_save("bot_trades", [])
     _save_daily_state()
     log("ok", "Daily state reset via /admin/reset-daily")
-    return jsonify({"ok": True, "msg": "Daily counters reset — bot will resume trading"})
+    return jsonify({"ok": True, "msg": "Daily counters and win rate reset — bot will resume trading"})
 
 @app.route("/admin/reset-capital", methods=["POST"])
 def admin_reset_capital():
     global capital
     with capital_lock:
         capital = STARTING_CAPITAL
+    completed_trades.clear()
+    _redis_cmd("DEL", "bot_trades")
+    redis_save("bot_trades", [])
     _save_daily_state()
     log("ok", f"Capital reset to ${STARTING_CAPITAL:.2f} via /admin/reset-capital")
-    return jsonify({"ok": True, "msg": f"Capital reset to ${STARTING_CAPITAL:.2f}"})
+    return jsonify({"ok": True, "msg": f"Capital reset to ${STARTING_CAPITAL:.2f} and win rate cleared"})
 
 @app.route("/admin/reset-all", methods=["POST"])
 def admin_reset_all():
