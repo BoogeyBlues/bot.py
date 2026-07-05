@@ -626,19 +626,6 @@ def record_daily_trade(won):
             _daily_losses += 1
         log("ok" if won else "info",
             f"Daily: {_daily_trades} trades | {_daily_wins}W {_daily_losses}L")
-        if not won and _daily_losses % DAILY_LOSS_MAX == 0:
-            resume_ts   = time.time() + LOSS_COOLDOWN_HRS * 3600
-            _pause_until = resume_ts
-            resume_str   = time.strftime("%H:%M", time.localtime(resume_ts))
-            if time.time() >= TUNE_PAUSED_UNTIL:
-                log("warn", f"{_daily_losses} losses — pausing to retune. Resumes {resume_str}")
-                notify("🔧 Retuning",
-                       f"{_daily_losses} losses hit.\nPausing, retuning strategy.\nResumes: {resume_str}")
-                threading.Thread(target=_retune_strategies, daemon=True).start()
-            else:
-                log("warn", f"{_daily_losses} losses — pausing (retune suppressed until Monday). Resumes {resume_str}")
-                notify("⏸ Paused",
-                       f"{_daily_losses} losses hit.\nPausing (no retune — scheduled Monday 7am).\nResumes: {resume_str}")
     _save_daily_state()
 
 def _next_monday_7am():
@@ -2407,9 +2394,8 @@ def copy_trade_loop():
                             if gmgn_smart_money_selling(mint):
                                 log("warn", "SKIP: smart money selling", symbol)
                                 continue
-                        sig_score = gmgn_signal_score(mint) if not is_fast else 0
-                        # Signal gate — enforce for non-fast wallets; SIG 0 entries are noise
-                        if not is_fast and sig_score < MIN_SIGNAL_SCORE:
+                        sig_score = gmgn_signal_score(mint)
+                        if sig_score < MIN_SIGNAL_SCORE:
                             log("info", f"COPY SKIP: sig {sig_score}<{MIN_SIGNAL_SCORE}", symbol)
                             continue
                         market = get_market_data(mint)
@@ -3114,7 +3100,6 @@ def _home_inner():
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="30">
 <title>{BOT_NAME}</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <style>
@@ -3289,32 +3274,32 @@ def _home_inner():
   <div class="cards">
     <div class="card gold-card glow">
       <div class="lbl">Capital</div>
-      <div class="val gold">${cap:.2f}</div>
+      <div id="h-cap" class="val gold">${cap:.2f}</div>
       <div class="sub">Started at ${STARTING_CAPITAL:.2f}</div>
     </div>
     <div class="card">
       <div class="lbl">Total PnL</div>
-      <div class="val {'green' if pnl>=0 else 'red'}">{'+' if pnl>=0 else ''}${pnl:.2f}</div>
-      <div class="sub">{total} trades closed</div>
+      <div id="h-pnl" class="val {'green' if pnl>=0 else 'red'}">{'+' if pnl>=0 else ''}${pnl:.2f}</div>
+      <div id="h-pnl-sub" class="sub">{total} trades closed</div>
     </div>
     <div class="card">
       <div class="lbl">Win Rate</div>
-      <div class="val {'green' if wr>=50 else 'red'}">{wr}%</div>
-      <div class="sub">{len(wins)}W &nbsp;/&nbsp; {total-len(wins)}L</div>
+      <div id="h-wr" class="val {'green' if wr>=50 else 'red'}">{wr}%</div>
+      <div id="h-wr-sub" class="sub">{len(wins)}W &nbsp;/&nbsp; {total-len(wins)}L</div>
     </div>
     <div class="card">
       <div class="lbl">Trade Size</div>
-      <div class="val blue">${trade_size():.2f}</div>
+      <div id="h-size" class="val blue">${trade_size():.2f}</div>
       <div class="sub">{pct*100:.0f}% tier · {_daily_trades}/{limit} today</div>
     </div>
     <div class="card">
       <div class="lbl">Open Trades</div>
-      <div class="val {'green' if open_list else ''}">{len(open_list)}<span style="font-size:1rem;font-weight:500;color:var(--muted)">/{MAX_OPEN}</span></div>
-      <div class="sub">{'🟢 Active' if open_list else '🔍 Scanning...'}</div>
+      <div id="h-open" class="val {'green' if open_list else ''}">{len(open_list)}<span style="font-size:1rem;font-weight:500;color:var(--muted)">/{MAX_OPEN}</span></div>
+      <div id="h-open-sub" class="sub">{'🟢 Active' if open_list else '🔍 Scanning...'}</div>
     </div>
     <div class="card">
       <div class="lbl">USDC Locked</div>
-      <div class="val blue">${locked:.2f}</div>
+      <div id="h-locked" class="val blue">${locked:.2f}</div>
       <div class="sub">Profit secured</div>
     </div>
   </div>
@@ -3360,7 +3345,7 @@ def _home_inner():
   </div>
 
   <footer>
-    Auto-refreshes every 30s &nbsp;·&nbsp; Retuning every {ANALYZE_EVERY} trades &nbsp;·&nbsp;
+    Live updates every 5s &nbsp;·&nbsp; Retuning weekly Mon 07:00 UTC &nbsp;·&nbsp;
     Built by Boogey &nbsp;·&nbsp;
     <a href="https://github.com/BoogeyBlues/bot.py" target="_blank" style="color:var(--gold);text-decoration:none">GitHub ↗</a>
   </footer>
@@ -3520,6 +3505,40 @@ async function miniAction(action){{
     else fetchMiniPos();
   }}catch(e){{}}
 }}
+
+// ── Live stat polling ────────────────────────────────────
+async function pollStats(){{
+  try{{
+    const d=await(await fetch('/status/api')).json();
+    const capEl=document.getElementById('h-cap');
+    if(capEl) capEl.textContent='$'+d.capital.toFixed(2);
+    const pnlEl=document.getElementById('h-pnl');
+    if(pnlEl){{
+      const sign=d.total_pnl>=0?'+':'';
+      pnlEl.textContent=sign+'$'+Math.abs(d.total_pnl).toFixed(2);
+      pnlEl.style.color=d.total_pnl>=0?'var(--green)':'var(--red)';
+    }}
+    const pnlSub=document.getElementById('h-pnl-sub');
+    if(pnlSub) pnlSub.textContent=d.total_trades+' trades closed';
+    const wrEl=document.getElementById('h-wr');
+    if(wrEl){{
+      wrEl.textContent=d.win_rate+'%';
+      wrEl.style.color=d.win_rate>=50?'var(--green)':'var(--red)';
+    }}
+    const wrSub=document.getElementById('h-wr-sub');
+    if(wrSub) wrSub.innerHTML=d.wins+'W &nbsp;/&nbsp; '+d.losses+'L';
+    const sizeEl=document.getElementById('h-size');
+    if(sizeEl) sizeEl.textContent='$'+d.trade_size.toFixed(2);
+    const openEl=document.getElementById('h-open');
+    if(openEl) openEl.innerHTML=d.open_trades+'<span style="font-size:1rem;font-weight:500;color:var(--muted)">'+'/'+d.max_open+'</span>';
+    const openSub=document.getElementById('h-open-sub');
+    if(openSub) openSub.textContent=d.scanning?(d.open_trades?'🟢 Active':'🔍 Scanning...'):'⏸ Paused';
+    const lockedEl=document.getElementById('h-locked');
+    if(lockedEl) lockedEl.textContent='$'+d.usdc_locked.toFixed(2);
+  }}catch(e){{}}
+}}
+pollStats();
+setInterval(pollStats,5000);
 </script>
 </body></html>"""
     return html, 200
@@ -3537,7 +3556,6 @@ def _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<meta http-equiv="refresh" content="30">
 <title>{BOT_NAME}</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
@@ -3748,15 +3766,24 @@ def status_api():
     with capital_lock:
         cap = capital
     sol_price = get_sol_price()
-    next_tune_in = ANALYZE_EVERY - (total % ANALYZE_EVERY) if total > 0 else ANALYZE_EVERY
+    next_tune_str = time.strftime("Mon %b %d · 07:00 UTC", time.gmtime(TUNE_PAUSED_UNTIL)) if TUNE_PAUSED_UNTIL > 0 else "—"
+    with usdc_lock:
+        locked = usdc_locked
     return jsonify({
-        "capital": round(cap, 2), "paper_mode": PAPER_MODE,
-        "open_trades": len(open_trades), "total_trades": total,
-        "wins": len(wins), "losses": total - len(wins),
-        "win_rate": round(len(wins) / max(total, 1) * 100, 1),
-        "total_pnl": round(pnl, 4),
-        "sol_price": round(sol_price, 2) if sol_price else None,
-        "next_tune_in": next_tune_in,
+        "capital":      round(cap, 2),
+        "paper_mode":   PAPER_MODE,
+        "open_trades":  len(open_trades),
+        "max_open":     MAX_OPEN,
+        "total_trades": total,
+        "wins":         len(wins),
+        "losses":       total - len(wins),
+        "win_rate":     round(len(wins) / max(total, 1) * 100, 1),
+        "total_pnl":    round(pnl, 4),
+        "trade_size":   round(trade_size(), 2),
+        "usdc_locked":  round(locked, 2),
+        "sol_price":    round(sol_price, 2) if sol_price else None,
+        "next_tune_str": next_tune_str,
+        "scanning":     scan_active and _pause_until <= time.time(),
         "today": {"trades": _daily_trades, "wins": _daily_wins, "losses": _daily_losses,
                   "paused_until": time.strftime("%H:%M", time.localtime(_pause_until)) if _pause_until > time.time() else None},
     })
@@ -3818,7 +3845,6 @@ def status():
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<meta http-equiv="refresh" content="20">
 <title>Status — {BOT_NAME}</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
@@ -3938,8 +3964,6 @@ def status():
       <span class="row-val">{limit} trades/day</span></div>
     <div class="row"><span class="row-key">Max Daily Loss</span>
       <span class="row-val" style="color:#ff006e">{MAX_DAILY_LOSS_PCT:.0f}% of open capital</span></div>
-    <div class="row"><span class="row-key">Loss Cooldown</span>
-      <span class="row-val">{DAILY_LOSS_MAX} losses → {int(LOSS_COOLDOWN_HRS*60)}min pause + retune</span></div>
     <div class="row"><span class="row-key">SOL Price</span>
       <span class="row-val" id="sol-price">...</span></div>
     <div class="row"><span class="row-key">Bond Entry Range</span>
@@ -3948,8 +3972,8 @@ def status():
       <span class="row-val" style="color:#39ff14">{BOND_TP_PCT}%</span></div>
     <div class="row"><span class="row-key">Stop Loss</span>
       <span class="row-val" style="color:#ff006e">{BOND_SL_PCT}% · Trailing SL at +{TSL_ACTIVATE_PCT}%</span></div>
-    <div class="row"><span class="row-key">Retune Interval</span>
-      <span class="row-val">Every {ANALYZE_EVERY} trades</span></div>
+    <div class="row"><span class="row-key">Retune Schedule</span>
+      <span class="row-val">Weekly · Monday 07:00 UTC</span></div>
     <div class="row"><span class="row-key">Next Auto-Tune</span>
       <span class="row-val" id="next-tune">...</span></div>
   </div>
@@ -3962,17 +3986,18 @@ def status():
     </table></div>
   </div>'''}
 
-  <footer>{BOT_NAME} · Refreshes every 20s</footer>
+  <footer>{BOT_NAME} · Live updates every 5s</footer>
 </div>
 <script>
-fetch('/status/api').then(r=>r.json()).then(d=>{{
-  if(d.sol_price) document.getElementById('sol-price').textContent='$'+d.sol_price.toLocaleString();
-  if(d.next_tune_in !== undefined) {{
-    const el = document.getElementById('next-tune');
-    el.textContent = d.next_tune_in === 1 ? '1 trade away' : d.next_tune_in+' trades away';
-    if(d.next_tune_in <= 2) el.style.color='#39ff14';
-  }}
-}}).catch(()=>{{}});
+function refreshStatus(){{
+  fetch('/status/api').then(r=>r.json()).then(d=>{{
+    if(d.sol_price) document.getElementById('sol-price').textContent='$'+d.sol_price.toLocaleString();
+    const ntEl=document.getElementById('next-tune');
+    if(ntEl && d.next_tune_str) ntEl.textContent=d.next_tune_str;
+  }}).catch(()=>{{}});
+}}
+refreshStatus();
+setInterval(refreshStatus,5000);
 </script>
 </body></html>"""
     return html, 200
@@ -4054,7 +4079,6 @@ def _trades_inner():
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<meta http-equiv="refresh" content="30">
 <title>Trades — {BOT_NAME}</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
@@ -5639,6 +5663,7 @@ def learn_api():
             },
             "last_tune": stats,
             "paper_mode": PAPER_MODE,
+            "next_tune_str": time.strftime("Mon %b %d · 07:00 UTC", time.gmtime(TUNE_PAUSED_UNTIL)) if TUNE_PAUSED_UNTIL > 0 else "—",
         })
     except Exception as e:
         return jsonify({"error": str(e)})
@@ -5738,7 +5763,7 @@ def learn():
 
   <div class="status-bar">
     <div class="pill mode"><span class="dot purple blink"></span><span id="mode-pill">Loading...</span></div>
-    <div class="pill">Tuned every <strong id="tune-every" class="purple">--</strong> trades</div>
+    <div class="pill">Next retune: <strong id="tune-every" class="purple">--</strong></div>
   </div>
 
   <!-- Win Rates -->
@@ -5886,7 +5911,7 @@ def learn():
       <div class="strat-card-body">
         Enters when a token's bonding curve hits <strong id="desc-bond-entry">--</strong>.
         Rides momentum toward 100% graduation. Exits on TP, SL, stale curve, or hard timeout.
-        Parameters auto-tune every <strong id="desc-tune-every">--</strong> trades.
+        Parameters auto-tune weekly every Monday 07:00 UTC.
       </div>
     </div>
 
@@ -5922,7 +5947,7 @@ async function load() {
     const d = await (await fetch('/learn/api')).json();
 
     document.getElementById('mode-pill').textContent = d.paper_mode ? 'Paper Mode' : 'Live Mode';
-    document.getElementById('tune-every').textContent = d.params.analyze_every;
+    document.getElementById('tune-every').textContent = d.next_tune_str || 'Mon 07:00 UTC';
     document.getElementById('overall-wr').textContent = 'Overall ' + d.live.overall_wr + '%';
 
     // Win rate bars
@@ -5954,7 +5979,6 @@ async function load() {
     document.getElementById('desc-bond-entry').textContent = d.params.bond_entry;
     document.getElementById('desc-spike-age').textContent  = d.params.spike_min_age_h;
     document.getElementById('desc-spike-vol').textContent  = d.params.spike_min_1h;
-    document.getElementById('desc-tune-every').textContent = d.params.analyze_every;
 
     // Last tune
     if (d.last_tune) {
