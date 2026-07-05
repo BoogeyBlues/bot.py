@@ -155,7 +155,8 @@ COPY_TRADE        = os.environ.get("COPY_TRADE", "true").lower() == "true"
 COPY_WINRATE_MIN  = float(os.environ.get("COPY_WINRATE_MIN",  "65"))  # was 60 — only elite wallets
 COPY_WINRATE_MAX  = float(os.environ.get("COPY_WINRATE_MAX",  "99"))
 COPY_MAX_WALLETS  = int(os.environ.get("COPY_MAX_WALLETS",    "5"))
-COPY_MAX_AGE_SECS = int(os.environ.get("COPY_MAX_AGE_SECS",  "120"))  # ignore trades older than 2 min
+COPY_MAX_AGE_SECS    = int(os.environ.get("COPY_MAX_AGE_SECS",    "120"))   # ignore trades older than 2 min
+COPY_MIN_WHALE_USD   = float(os.environ.get("COPY_MIN_WHALE_USD",  "100"))  # skip if whale spent <$100 (test nibbles)
 # Manually tracked wallets — comma-separated Solana addresses; merged with GMGN auto-discovered wallets
 TRACKED_WALLETS   = [w.strip() for w in os.environ.get("TRACKED_WALLETS", "").split(",") if w.strip()]
 # Pinned wallets — always monitored, mirror their exact USD trade size, use bot's own TP/SL/exits
@@ -2232,7 +2233,7 @@ def copy_trade_loop():
                 wallets = list(_copy_wallets)
                 # Expire copied mints older than 10 minutes
                 now = time.time()
-                expired = [m for m, t in _copied_mints.items() if now - t > 600]
+                expired = [m for m, t in _copied_mints.items() if now - t > 1800]
                 for m in expired:
                     _copied_mints.pop(m, None)
 
@@ -2286,6 +2287,16 @@ def copy_trade_loop():
                             if mint in open_trades:
                                 continue
                         if mint in blacklisted_mints:
+                            continue
+                        # Skip recently sold tokens — respect the same cooldown as the scanner
+                        with _copy_lock:
+                            sold_at = _sold_mints.get(mint, 0)
+                            if sold_at and time.time() - sold_at < SOLD_COOLDOWN_SECS:
+                                continue
+                        # Minimum whale conviction — skip if they spent less than threshold
+                        whale_cost = float(act.get("cost", act.get("cost_usd", act.get("usd_value", 0))) or 0)
+                        if whale_cost > 0 and whale_cost < COPY_MIN_WHALE_USD:
+                            log("info", f"COPY SKIP: whale only ${whale_cost:.0f}<{COPY_MIN_WHALE_USD:.0f}", symbol)
                             continue
                         is_fast = w.get("fast", False)
                         if not is_fast:
