@@ -205,7 +205,7 @@ NTFY_TOPIC       = os.environ.get("NTFY_TOPIC", "")
 MIN_REPLIES      = int(os.environ.get("MIN_REPLIES",      "8"))
 MIN_SOCIALS      = int(os.environ.get("MIN_SOCIALS",       "1"))
 MIN_LIQ          = float(os.environ.get("MIN_LIQ",        "500"))
-MIN_VOL_5M       = float(os.environ.get("MIN_VOL_5M",     "5000"))  # $5k 5-min volume — no volume = no momentum
+MIN_VOL_5M       = float(os.environ.get("MIN_VOL_5M",     "10000")) # $10k 5-min volume — real momentum threshold
 MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "2"))     # require ≥2 signal points to enter (1 = too easy, any hot_search token passes)
 MAX_RUG_SCORE    = int(os.environ.get("MAX_RUG_SCORE",    "400"))   # rugcheck score ceiling (higher = riskier)
 
