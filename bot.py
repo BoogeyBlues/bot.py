@@ -2792,7 +2792,7 @@ def scanner_loop():
                             log("warn", "SKIP: smart money selling", symbol)
                             continue
                         sig_score = gmgn_signal_score(mint) + dsc_signal_score(mint) + jup_token_signal_score(mint)
-                        if sig_score < 1:
+                        if sig_score < MIN_SIGNAL_SCORE:
                             continue
                         market = get_market_data(mint)
                         if (market and market["price"] > 0 and market["liq"] >= MIN_LIQ
