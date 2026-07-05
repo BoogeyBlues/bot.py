@@ -2309,6 +2309,10 @@ def copy_trade_loop():
                                 log("warn", "SKIP: smart money selling", symbol)
                                 continue
                         sig_score = gmgn_signal_score(mint) if not is_fast else 0
+                        # Signal gate — enforce for non-fast wallets; SIG 0 entries are noise
+                        if not is_fast and sig_score < MIN_SIGNAL_SCORE:
+                            log("info", f"COPY SKIP: sig {sig_score}<{MIN_SIGNAL_SCORE}", symbol)
+                            continue
                         market = get_market_data(mint)
                         if not market or market["price"] <= 0:
                             continue
