@@ -264,6 +264,7 @@ _copy_lock        = threading.Lock()
 _gmgn_backoff     = 0    # seconds to wait before retrying GMGN rank
 _sold_mints       = {}   # mint -> timestamp, cooldown after selling to prevent re-buy
 _bond_prev        = {}   # mint -> (bond_pct, timestamp) — velocity check: skip stalled bonds
+_bond_prev_lock   = threading.Lock()
 _watchlist        = {}   # mint -> {"res": action_result, "added_at": float} — qualified but couldn't enter
 _watchlist_lock   = threading.Lock()
 WATCHLIST_TTL_SECS = int(os.environ.get("WATCHLIST_TTL_SECS", "300"))  # 5 min before watchlist entry expires
@@ -390,15 +391,23 @@ def daily_trade_limit():
 
 # ── DAILY LIMITS ─────────────────────────────────────────────────
 def _save_daily_state():
+    with _copy_lock:
+        sold_snapshot = dict(_sold_mints)
+    with _watchlist_lock:
+        wl_snapshot = {m: {"res": e["res"], "added_at": e["added_at"]} for m, e in _watchlist.items()}
     state = {
-        "date":         _daily_date,
-        "trades":       _daily_trades,
-        "wins":         _daily_wins,
-        "losses":       _daily_losses,
-        "pause_until":  _pause_until,
-        "capital":      capital,
-        "week_start":   _week_start_date,
-        "week_logs":    _week_day_logs,
+        "date":           _daily_date,
+        "trades":         _daily_trades,
+        "wins":           _daily_wins,
+        "losses":         _daily_losses,
+        "pause_until":    _pause_until,
+        "capital":        capital,
+        "week_start":     _week_start_date,
+        "week_logs":      _week_day_logs,
+        "day_start_cap":  _day_start_cap,
+        "blacklist":      list(blacklisted_mints),
+        "sold_mints":     sold_snapshot,
+        "watchlist":      wl_snapshot,
     }
     try:
         with open(STATE_FILE, "w") as f:
@@ -413,6 +422,7 @@ def _save_daily_state():
 def _load_daily_state():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses
     global _pause_until, capital, _week_start_date, _week_day_logs, completed_trades
+    global _day_start_cap
     today = time.strftime("%Y-%m-%d")
 
     # Try Redis first (survives redeploys), fall back to local file
@@ -438,6 +448,22 @@ def _load_daily_state():
                 _pause_until  = s.get("pause_until", 0.0)
             _week_start_date = s.get("week_start", "")
             _week_day_logs   = s.get("week_logs",  [])
+            if s.get("day_start_cap", 0) > 0:
+                _day_start_cap = float(s["day_start_cap"])
+            # Restore blacklist — persists across days
+            for m in s.get("blacklist", []):
+                blacklisted_mints.add(m)
+            # Restore sold cooldowns still within window
+            _now = time.time()
+            with _copy_lock:
+                for m, ts in s.get("sold_mints", {}).items():
+                    if _now - ts < SOLD_COOLDOWN_SECS:
+                        _sold_mints[m] = ts
+            # Restore watchlist entries still within TTL
+            with _watchlist_lock:
+                for m, entry in s.get("watchlist", {}).items():
+                    if _now - entry.get("added_at", 0) < WATCHLIST_TTL_SECS:
+                        _watchlist[m] = entry
             paused_msg = f" | paused until {time.strftime('%H:%M', time.localtime(_pause_until))}" if _pause_until > time.time() else ""
             log("ok", f"Restored: {_daily_trades} trades | {_daily_wins}W {_daily_losses}L | cap=${capital:.2f}{paused_msg}")
         except Exception as e:
@@ -1791,6 +1817,18 @@ def _partial_exit(mint, price, fraction, label):
         pump_swap = trade.get("pump_swap", False)
         raydium   = trade.get("raydium", False)
 
+    # Execute sell FIRST; only credit capital once the transaction is confirmed
+    sell_ok = execute_sell(tokens_to_sell, mint, symbol, pump_swap=pump_swap, raydium=raydium)
+    if not sell_ok:
+        # Revert trade state changes since sell failed
+        with trades_lock:
+            if mint in open_trades:
+                open_trades[mint]["tokens"]           += tokens_to_sell
+                open_trades[mint]["partial_proceeds"] -= proceeds
+                open_trades[mint]["partial_tp_done"]  -= 1
+        log("err", f"[{label}] Partial sell failed — trade state reverted", symbol)
+        return
+
     with capital_lock:
         capital += proceeds
 
@@ -1798,7 +1836,6 @@ def _partial_exit(mint, price, fraction, label):
     pct_sold = int(fraction * 100)
     log("ok", f"[{label}] Sold {pct_sold}% at +{move_pct:.1f}% → ${proceeds:.4f} locked (cap=${capital:.2f})", symbol)
     notify(f"📤 {label} {symbol}", f"Sold {pct_sold}% at +{move_pct:.1f}%\nProceeds: +${proceeds:.4f}\nCapital: ${capital:.2f}")
-    execute_sell(tokens_to_sell, mint, symbol, pump_swap=pump_swap, raydium=raydium)
 
 
 # ── ENTER / EXIT ─────────────────────────────────────────────────
@@ -1882,8 +1919,14 @@ def exit_trade(mint, price, reason, bond=0):
     # Capital gets back the clamped amount — same bound as pnl so we can't gain billions
     # from a near-zero entry price producing trillions of tokens
     clamped_return = max(0.0, amount - partial_proceeds + pnl)
-    with capital_lock:
-        capital += clamped_return
+
+    # Execute sell FIRST; only credit capital once the transaction is confirmed
+    sell_ok = execute_sell(trade["tokens"], mint, trade["symbol"], pump_swap=trade.get("pump_swap", False), raydium=trade.get("raydium", False))
+    if sell_ok:
+        with capital_lock:
+            capital += clamped_return
+    else:
+        log("err", f"Sell tx failed — capital not credited, tokens may still be in wallet", trade["symbol"])
 
     sign = "+" if pnl >= 0 else ""
     log("ok" if pnl >= 0 else "err",
@@ -1893,7 +1936,6 @@ def exit_trade(mint, price, reason, bond=0):
     notify(f"{emoji} {'WIN' if pnl>=0 else 'LOSS'} {trade['symbol']}",
            f"Reason: {reason}\nPnL: {sign}${pnl:.4f}\nHeld: {hold_m:.1f} min\nCapital: ${capital:.2f}")
 
-    execute_sell(trade["tokens"], mint, trade["symbol"], pump_swap=trade.get("pump_swap", False), raydium=trade.get("raydium", False))
     with _copy_lock:
         _sold_mints[mint] = time.time()  # 30 min cooldown before re-buying
     record_daily_trade(won=(pnl > 0))
@@ -2412,8 +2454,9 @@ def _eval_coin(coin):
             return None
         # Bond velocity: skip if bond hasn't moved ≥0.5% in the last 2 scans
         _now_ts = time.time()
-        _prev_bond, _prev_ts = _bond_prev.get(mint, (None, 0))
-        _bond_prev[mint] = (bond, _now_ts)
+        with _bond_prev_lock:
+            _prev_bond, _prev_ts = _bond_prev.get(mint, (None, 0))
+            _bond_prev[mint] = (bond, _now_ts)
         if _prev_bond is not None and abs(bond - _prev_bond) < 0.5 and _now_ts - _prev_ts < 120:
             _log_scan(symbol, mint, bond, _sig_pre, "vel", 7, "BOND STALLED")
             return None
@@ -2695,15 +2738,19 @@ def scanner_loop():
                         _add_to_watchlist(res)
                         continue
                     strategy = res["strategy"]
-                    m = res["market"]
                     amt = trade_size()
+                    # Re-fetch price — eval happened in a parallel pool, price may be stale
+                    fresh = get_market_data(res["mint"])
+                    if not fresh or fresh["price"] <= 0:
+                        continue
+                    m = fresh
                     if strategy == "bond":
                         log("ok", f"BOND RUNNER | bond={res['bond']:.1f}% 5m={m.get('change5m',0):+.1f}% | sig={res['sig_score']}", res["symbol"])
                     elif strategy == "trench":
                         log("ok", f"TRENCH | bond={res['bond']:.1f}% | sig={res['sig_score']}", res["symbol"])
                     elif strategy == "spike":
                         log("ok", f"DORMANT SPIKE | 1h={m.get('change1h',0):+.0f}% 5m={m.get('change5m',0):+.1f}% | sig={res['sig_score']}", res["symbol"])
-                    enter_trade(res["mint"], res["symbol"], res["price"], amt, strategy,
+                    enter_trade(res["mint"], res["symbol"], fresh["price"], amt, strategy,
                                 res["bond"], 0, pump_swap=res.get("pump_swap", False))
 
             log("info",
@@ -2744,8 +2791,8 @@ def scanner_loop():
                     log("warn", f"SKIP: {dev_reason}", gc["symbol"])
                     continue
                 sig_score = gmgn_signal_score(gmint) + dsc_signal_score(gmint)
-                if sig_score < 1:
-                    log("info", f"MIGRATION SKIP: sig={sig_score} (no signal backing)", gc["symbol"])
+                if sig_score < MIN_SIGNAL_SCORE:
+                    log("info", f"MIGRATION SKIP: sig={sig_score}<{MIN_SIGNAL_SCORE}", gc["symbol"])
                     continue
                 if not is_1m_trending_up(market.get("pair_address", ""), market):
                     log("info", f"MIGRATION SKIP: 1m not trending up", gc["symbol"])
@@ -2790,12 +2837,18 @@ def scanner_loop():
                     continue
                 if gmgn_smart_money_selling(sig_mint):
                     continue
+                if market.get("vol_m5", 0) < MIN_VOL_5M:
+                    log("info", f"GMGN SKIP: vol ${market.get('vol_m5',0):.0f}<{MIN_VOL_5M:.0f}", sig_mint[:8])
+                    continue
+                sig_score = gmgn_signal_score(sig_mint) + dsc_signal_score(sig_mint)
+                if sig_score < MIN_SIGNAL_SCORE:
+                    log("info", f"GMGN SKIP: sig={sig_score}<{MIN_SIGNAL_SCORE}", sig_mint[:8])
+                    continue
                 if not is_1m_trending_up(market.get("pair_address", ""), market):
                     log("info", f"SIGNAL SKIP: 1m not trending up", sig_mint[:8])
                     continue
                 with _copy_lock:
                     _copied_mints[sig_mint] = time.time()
-                sig_score = gmgn_signal_score(sig_mint) + dsc_signal_score(sig_mint)
                 sig_sym   = sig_mint[:8]
                 amt       = trade_size()
                 log("ok", f"GMGN SIGNAL | liq=${market['liq']:.0f} 5m={market.get('change5m',0):+.1f}% | sig={sig_score}", sig_sym)
@@ -2837,11 +2890,17 @@ def scanner_loop():
                     continue
                 if gmgn_smart_money_selling(dsc_mint):
                     continue
+                if market.get("vol_m5", 0) < MIN_VOL_5M:
+                    log("info", f"DSC SKIP: vol ${market.get('vol_m5',0):.0f}<{MIN_VOL_5M:.0f}", dsc_mint[:8])
+                    continue
+                sig_score = gmgn_signal_score(dsc_mint) + dsc_signal_score(dsc_mint)
+                if sig_score < MIN_SIGNAL_SCORE:
+                    log("info", f"DSC SKIP: sig={sig_score}<{MIN_SIGNAL_SCORE}", dsc_mint[:8])
+                    continue
                 if not is_1m_trending_up(market.get("pair_address", ""), market):
                     continue
                 with _copy_lock:
                     _copied_mints[dsc_mint] = time.time()
-                sig_score = gmgn_signal_score(dsc_mint) + dsc_signal_score(dsc_mint)
                 dsc_sym = dsc_mint[:8]
                 amt = trade_size()
                 # Label by which DSC signal triggered
@@ -2894,6 +2953,13 @@ def scanner_loop():
                     continue
                 if gmgn_smart_money_selling(jup_mint):
                     continue
+                if market.get("vol_m5", 0) < MIN_VOL_5M:
+                    log("info", f"JUP SKIP: vol ${market.get('vol_m5',0):.0f}<{MIN_VOL_5M:.0f}", jup_mint[:8])
+                    continue
+                sig_score = gmgn_signal_score(jup_mint) + dsc_signal_score(jup_mint) + jup_token_signal_score(jup_mint)
+                if sig_score < MIN_SIGNAL_SCORE:
+                    log("info", f"JUP SKIP: sig={sig_score}<{MIN_SIGNAL_SCORE}", jup_mint[:8])
+                    continue
                 if not is_1m_trending_up(market.get("pair_address", ""), market):
                     continue
                 impact = jup_price_impact(jup_mint, trade_size())
@@ -2901,7 +2967,6 @@ def scanner_loop():
                     continue
                 with _copy_lock:
                     _copied_mints[jup_mint] = time.time()
-                sig_score = gmgn_signal_score(jup_mint) + dsc_signal_score(jup_mint) + jup_token_signal_score(jup_mint)
                 jup_sym = jup_mint[:8]
                 amt = trade_size()
                 with _jup_lock:
@@ -3822,7 +3887,7 @@ def status():
     <div class="row"><span class="row-key">Bond Entry Range</span>
       <span class="row-val">{BOND_ENTRY_MIN}% – {BOND_ENTRY_MAX}%</span></div>
     <div class="row"><span class="row-key">Bond Take Profit</span>
-      <span class="row-val" style="color:#39ff14">{BOND_TP}%</span></div>
+      <span class="row-val" style="color:#39ff14">{BOND_TP_PCT}%</span></div>
     <div class="row"><span class="row-key">Stop Loss</span>
       <span class="row-val" style="color:#ff006e">{BOND_SL_PCT}% · Trailing SL at +{TSL_ACTIVATE_PCT}%</span></div>
     <div class="row"><span class="row-key">Retune Interval</span>
@@ -4638,7 +4703,8 @@ def admin_reset_daily():
         _daily_losses        = 0
         _pause_until         = 0.0
         _daily_cap_notified  = False
-    completed_trades.clear()
+    with trades_lock:
+        completed_trades.clear()
     _redis_cmd("DEL", "bot_trades")
     redis_save("bot_trades", [])
     _save_daily_state()
@@ -4650,7 +4716,8 @@ def admin_reset_capital():
     global capital
     with capital_lock:
         capital = STARTING_CAPITAL
-    completed_trades.clear()
+    with trades_lock:
+        completed_trades.clear()
     _redis_cmd("DEL", "bot_trades")
     redis_save("bot_trades", [])
     _save_daily_state()
