@@ -264,6 +264,9 @@ _copy_lock        = threading.Lock()
 _gmgn_backoff     = 0    # seconds to wait before retrying GMGN rank
 _sold_mints       = {}   # mint -> timestamp, cooldown after selling to prevent re-buy
 _bond_prev        = {}   # mint -> (bond_pct, timestamp) — velocity check: skip stalled bonds
+_watchlist        = {}   # mint -> {"res": action_result, "added_at": float} — qualified but couldn't enter
+_watchlist_lock   = threading.Lock()
+WATCHLIST_TTL_SECS = int(os.environ.get("WATCHLIST_TTL_SECS", "300"))  # 5 min before watchlist entry expires
 _gmgn_sm_signal_mints  = set()   # smart money buy signal mints (type 12)
 _gmgn_surge_mints      = set()   # price surge signal mints (type 6)
 _gmgn_kol_mints        = set()   # KOL buy mints
@@ -2507,6 +2510,65 @@ def _eval_coin(coin):
                     "pump_swap": coin.get("pump_swap", False), "market": market}
     return None
 
+# ── WATCHLIST ────────────────────────────────────────────────────
+def _add_to_watchlist(res):
+    """Save a qualified trade result that couldn't enter (paused/full) for later retry."""
+    mint = res["mint"]
+    with _watchlist_lock:
+        if mint not in _watchlist:
+            _watchlist[mint] = {"res": res, "added_at": time.time()}
+            log("info", f"WATCHLIST [{res['strategy'].upper()}] saved for retry", res["symbol"])
+
+def _drain_watchlist():
+    """Re-verify watchlisted tokens and enter any that are still valid."""
+    now = time.time()
+    with _watchlist_lock:
+        expired = [m for m, v in _watchlist.items() if now - v["added_at"] > WATCHLIST_TTL_SECS]
+        for m in expired:
+            _watchlist.pop(m, None)
+        entries = list(_watchlist.items())
+
+    for mint, entry in entries:
+        if daily_limit_reached():
+            break
+        with trades_lock:
+            if len(open_trades) >= MAX_OPEN:
+                break
+            if mint in open_trades:
+                with _watchlist_lock:
+                    _watchlist.pop(mint, None)
+                continue
+        if mint in blacklisted_mints:
+            with _watchlist_lock:
+                _watchlist.pop(mint, None)
+            continue
+
+        res = entry["res"]
+        market = get_market_data(mint)
+        if not market or not market.get("pair_address") or market["price"] <= 0:
+            with _watchlist_lock:
+                _watchlist.pop(mint, None)
+            continue
+        if market.get("vol_m5", 0) < MIN_VOL_5M:
+            with _watchlist_lock:
+                _watchlist.pop(mint, None)
+            continue
+        # Drop if price dumped >5% since we watchlisted it
+        price_drift = (market["price"] - res["price"]) / max(res["price"], 1e-12) * 100
+        if price_drift < -5:
+            log("info", f"WATCHLIST DROP: price {price_drift:.1f}% since save", res["symbol"])
+            with _watchlist_lock:
+                _watchlist.pop(mint, None)
+            continue
+
+        with _watchlist_lock:
+            _watchlist.pop(mint, None)
+        waited = now - entry["added_at"]
+        amt = trade_size()
+        log("ok", f"WATCHLIST ENTER [{res['strategy'].upper()}] waited {waited:.0f}s | ${amt:.2f}", res["symbol"])
+        enter_trade(mint, res["symbol"], market["price"], amt, res["strategy"],
+                    res.get("bond", 0), 0, pump_swap=res.get("pump_swap", False))
+
 # ── SCANNER LOOP ─────────────────────────────────────────────────
 def scanner_loop():
     log("ok", "=" * 55)
@@ -2521,6 +2583,7 @@ def scanner_loop():
 
     while scan_active:
         try:
+            _drain_watchlist()
             with trades_lock:
                 num_open = len(open_trades)
             if num_open >= MAX_OPEN:
@@ -2623,13 +2686,14 @@ def scanner_loop():
                         continue
                     if res.get("action") != "trade":
                         continue
-                    if daily_limit_reached():
-                        break
                     with trades_lock:
-                        if len(open_trades) >= MAX_OPEN:
-                            break
-                        if res["mint"] in open_trades:
-                            continue
+                        _already_open = res["mint"] in open_trades
+                        _slots_full   = len(open_trades) >= MAX_OPEN
+                    if _already_open:
+                        continue
+                    if daily_limit_reached() or _slots_full:
+                        _add_to_watchlist(res)
+                        continue
                     strategy = res["strategy"]
                     m = res["market"]
                     amt = trade_size()
