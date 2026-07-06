@@ -589,9 +589,6 @@ def get_signal(market):
 
     _st_prev[market] = st_bull
 
-    if confidence < 2:
-        return None, 0, None
-
     return trend, confidence, atr
 
 # ── LIVE EXECUTION STUBS ──────────────────────────────────────────
@@ -690,6 +687,7 @@ _JPERP_DECIMALS  = {"SOL": 9, "ETH": 8, "BTC": 8}
 _JPERP_USDC_CUST = "G18jKKXQwBbrHeiK3C9MRXhkHsLHf7XgCSisykV46EZa"
 _JPERP_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 _JPERP_MARKETS   = {"SOL", "ETH", "BTC"}
+_JPERP_IDL       = None   # cached at startup — never fetched per-trade
 
 # System programs
 _SYS_PROG  = "11111111111111111111111111111111"
@@ -705,6 +703,37 @@ def _jperp_ata(owner_pk, mint_pk):
         Pubkey.from_string(_ATOK_PROG)
     )
     return ata
+
+
+def _cache_jupiter_idl():
+    """Fetch the Jupiter Perps IDL once at startup and store it globally.
+    Called only in live mode after anchorpy is confirmed importable."""
+    global _JPERP_IDL
+    try:
+        from anchorpy import Program, Provider, Wallet
+        from solders.keypair import Keypair
+        from solders.pubkey import Pubkey
+        from solana.rpc.async_api import AsyncClient
+        import asyncio
+
+        async def _fetch():
+            conn = AsyncClient(SOL_RPC)
+            try:
+                kp       = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+                prog_id  = Pubkey.from_string(_JPERP_PROGRAM)
+                provider = Provider(conn, Wallet(kp))
+                return await Program.fetch_idl(prog_id, provider)
+            finally:
+                await conn.close()
+
+        idl = asyncio.run(_fetch())
+        if idl:
+            _JPERP_IDL = idl
+            log("ok", "Jupiter Perps IDL cached at startup")
+        else:
+            log("warn", "Jupiter Perps IDL fetch returned None — will retry per-trade")
+    except Exception as e:
+        log("warn", f"Jupiter Perps IDL cache failed: {e} — will retry per-trade")
 
 
 def _execute_jupiter_perp_order(market, side, size_usd, leverage) -> bool:
@@ -770,7 +799,7 @@ def _execute_jupiter_perp_order(market, side, size_usd, leverage) -> bool:
                 side_enum = {"long": {}} if side == "long" else {"short": {}}
 
                 provider = Provider(conn, Wallet(kp))
-                idl      = await Program.fetch_idl(prog_id, provider)
+                idl      = _JPERP_IDL or await Program.fetch_idl(prog_id, provider)
                 if not idl:
                     raise RuntimeError("Jupiter Perps IDL not available on-chain")
                 program  = Program(idl, prog_id, provider)
@@ -860,7 +889,7 @@ def _close_jupiter_perp_position(market, side, size_usd) -> bool:
                 side_enum = {"long": {}} if side == "long" else {"short": {}}
 
                 provider = Provider(conn, Wallet(kp))
-                idl      = await Program.fetch_idl(prog_id, provider)
+                idl      = _JPERP_IDL or await Program.fetch_idl(prog_id, provider)
                 if not idl:
                     raise RuntimeError("Jupiter Perps IDL not available on-chain")
                 program  = Program(idl, prog_id, provider)
@@ -3033,6 +3062,7 @@ if __name__ == "__main__":
             skipped = [m.strip().upper() for m in DRIFT_MARKETS.split(",") if m.strip().upper() not in _JPERP_MARKETS]
             if skipped:
                 log("warn", f"Jupiter Perps does not support {skipped} — those markets will be skipped")
+            _cache_jupiter_idl()
         elif not WALLET or not WALLET_PRIVATE_KEY:
             log("err", "DRIFT_PAPER_MODE=false requires WALLET and WALLET_PRIVATE_KEY env vars.")
             raise SystemExit(1)
