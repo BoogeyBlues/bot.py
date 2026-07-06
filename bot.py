@@ -2874,6 +2874,8 @@ def scanner_loop():
                         continue
                 if gmint in blacklisted_mints or daily_limit_reached():
                     continue
+                if time.time() - _sold_mints.get(gmint, 0) < SOLD_COOLDOWN_SECS:
+                    continue
                 if gc.get("replies", 0) < MIN_REPLIES:
                     log("info", f"MIGRATION SKIP: replies {gc.get('replies',0)}<{MIN_REPLIES}", gc["symbol"])
                     continue
