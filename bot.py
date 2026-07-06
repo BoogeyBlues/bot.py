@@ -2680,6 +2680,11 @@ def scanner_loop():
 
     while scan_active:
         try:
+            # Pause gate — check before doing any work
+            if BOT_PAUSED or _pause_until > time.time():
+                time.sleep(5)
+                continue
+
             # Weekly Monday 7am retune — run in background thread, never block scanner
             if TUNE_PAUSED_UNTIL > 0 and time.time() >= TUNE_PAUSED_UNTIL:
                 TUNE_PAUSED_UNTIL = _next_monday_7am()  # reset first so loop can't re-fire
@@ -5205,6 +5210,7 @@ nav::-webkit-scrollbar{display:none}
     <div class="sn-label">NOW SCANNING</div>
     <div class="sn-coin" id="snCoin">&#x2014;</div>
     <div class="sn-status scan" id="snStatus">WAITING</div>
+    <button id="pause-btn" onclick="togglePause()" style="margin-left:auto;padding:4px 12px;border-radius:4px;border:1px solid {'#fbbf24' if paused else '#00e5ff'};background:transparent;color:{'#fbbf24' if paused else '#00e5ff'};font-family:monospace;font-size:9px;font-weight:700;letter-spacing:.1em;cursor:pointer">{'▶ RESUME' if paused else '⏸ PAUSE'}</button>
   </div>
   <div class="deck-wrap" id="deckWrap">
     <div class="live-btn" id="liveBtn" onclick="jumpToLive()">&#x25B6; LIVE</div>
@@ -5723,6 +5729,23 @@ function poll(){
 }
 poll();
 setInterval(poll,3000);
+async function togglePause(){{
+  var btn=document.getElementById('pause-btn');
+  var isPaused=btn.textContent.includes('RESUME');
+  btn.disabled=true; btn.textContent='...';
+  var s=localStorage.getItem('api_secret')||'';
+  if(!s){{s=prompt('API secret:');if(s)localStorage.setItem('api_secret',s);}}
+  var url=isPaused?'/admin/resume':'/admin/pause';
+  try{{
+    var r=await fetch(url,{{method:'POST',headers:{{'X-API-Key':s,'Content-Type':'application/json'}},body:JSON.stringify({{hours:24}})}});
+    var d=await r.json();
+    if(r.status===401){{alert('Wrong API secret');btn.disabled=false;btn.textContent=isPaused?'▶ RESUME':'⏸ PAUSE';return;}}
+    btn.textContent=isPaused?'⏸ PAUSE':'▶ RESUME';
+    btn.style.color=isPaused?'#00e5ff':'#fbbf24';
+    btn.style.borderColor=isPaused?'#00e5ff':'#fbbf24';
+  }}catch(e){{alert('Error: '+e);}}
+  btn.disabled=false;
+}}
 </script>
 </body></html>"""
     html = html.replace("__BOT_NAME__", BOT_NAME)
