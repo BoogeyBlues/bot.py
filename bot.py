@@ -5852,33 +5852,33 @@ function poll(){
 }
 poll();
 setInterval(poll,3000);
-async function _punkAdminPost(url,body){{
+async function _punkAdminPost(url,body){
   var s=localStorage.getItem('api_secret')||'';
-  if(!s){{s=prompt('API secret:');if(!s)return null;localStorage.setItem('api_secret',s);}}
-  var r=await fetch(url,{{method:'POST',headers:{{'X-API-Key':s,'Content-Type':'application/json'}},body:JSON.stringify(body)}});
-  if(r.status===401){{
+  if(!s){s=prompt('API secret:');if(!s)return null;localStorage.setItem('api_secret',s);}
+  var r=await fetch(url,{method:'POST',headers:{'X-API-Key':s,'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if(r.status===401){
     var k=prompt('Wrong API secret — enter correct key:');
     if(!k)return null;
     localStorage.setItem('api_secret',k);
     return _punkAdminPost(url,body);
-  }}
+  }
   return r.json();
-}}
-async function togglePause(){{
+}
+async function togglePause(){
   var btn=document.getElementById('pause-btn');
   var isPaused=btn.textContent.includes('RESUME');
   btn.disabled=true; btn.textContent='...';
-  try{{
+  try{
     var url=isPaused?'/admin/resume':'/admin/pause';
-    var d=await _punkAdminPost(url,{{hours:24}});
-    if(d){{
+    var d=await _punkAdminPost(url,{hours:24});
+    if(d){
       btn.textContent=isPaused?'⏸ PAUSE':'▶ RESUME';
       btn.style.color=isPaused?'#00e5ff':'#fbbf24';
       btn.style.borderColor=isPaused?'#00e5ff':'#fbbf24';
-    }}
-  }}catch(e){{alert('Error: '+e);}}
+    }
+  }catch(e){alert('Error: '+e);}
   btn.disabled=false;
-}}
+}
 </script>
 </body></html>"""
     paused = _pause_until > time.time()
