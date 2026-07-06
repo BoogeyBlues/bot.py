@@ -3305,10 +3305,11 @@ def _home_inner():
     <a href="/" class="btn btn-gold">⚡ Refresh Now</a>
     <a href="/live" class="btn btn-ghost">📡 Live Feed</a>
     <a href="/trades" class="btn btn-ghost">💼 All Trades</a>
-    <button class="btn btn-ghost" style="border-color:rgba(0,229,255,.4);color:#00e5ff" onclick="if(confirm('Run retune now and lock auto-tuning until next Monday 7am?'))fetch('/admin/tune-now',{{method:'POST'}}).then(r=>r.json()).then(d=>alert(d.msg)).catch(()=>alert('Failed'))">🧠 Tune Now</button>
-    <button class="btn btn-ghost" onclick="fetch('/admin/reset-daily',{{method:'POST'}}).then(r=>r.json()).then(d=>alert(d.msg)).catch(()=>alert('Failed'))">🔄 Reset Daily</button>
-    <button class="btn btn-ghost" onclick="if(confirm('Reset capital to ${STARTING_CAPITAL:.2f}?'))fetch('/admin/reset-capital',{{method:'POST'}}).then(r=>r.json()).then(d=>alert(d.msg)).catch(()=>alert('Failed'))">💰 Reset Capital</button>
-    <button class="btn btn-ghost" style="border-color:#ff3355;color:#ff3355" onclick="(async()=>{{if(!confirm('Reset capital to ${STARTING_CAPITAL:.2f}, clear win rate and daily counters?'))return;const s=localStorage.getItem('api_secret')||prompt('API secret:');if(s)localStorage.setItem('api_secret',s);const r=await fetch('/admin/reset-all',{{method:'POST',headers:{{'X-API-Key':s||''}}}});const d=await r.json();if(r.status===401){{alert('Wrong API secret');return;}}alert(d.msg||d.error);location.reload();}})()">🗑️ Reset All</button>
+    <button class="btn btn-ghost" style="border-color:rgba(0,229,255,.4);color:#00e5ff" onclick="adminPost('/admin/tune-now',{{}},'Run retune now and lock auto-tuning until next Monday 7am?')">🧠 Tune Now</button>
+    <button class="btn btn-ghost" onclick="adminPost('/admin/reset-daily',{{}},null)">🔄 Reset Daily</button>
+    <button class="btn btn-ghost" onclick="adminPost('/admin/reset-capital',{{}},'Reset capital to ${STARTING_CAPITAL:.2f}?')">💰 Reset Capital</button>
+    <button class="btn btn-ghost" style="border-color:#ff3355;color:#ff3355" onclick="adminPost('/admin/reset-all',{{}},'Reset capital to ${STARTING_CAPITAL:.2f}, clear win rate and daily counters?')">🗑️ Reset All</button>
+    <button class="btn btn-ghost" style="border-color:#888;color:#aaa;font-size:0.68rem" onclick="(()=>{{var k=prompt('Enter new API secret (leave blank to clear):',_getKey());if(k===null)return;_setKey(k);alert(k?'Key saved.':'Key cleared.');}})()">🔑 Set Key</button>
   </div>
 
   <div class="cards">
@@ -4077,21 +4078,30 @@ function refreshStatus(){{
     }}
   }}).catch(()=>{{}});
 }}
+function _getKey(){{return localStorage.getItem('api_secret')||'';}}
+function _setKey(k){{localStorage.setItem('api_secret',k||'');}}
+async function adminPost(url,body,confirmMsg){{
+  if(confirmMsg&&!confirm(confirmMsg))return;
+  var s=_getKey();
+  if(!s){{s=prompt('API secret:');if(!s)return;_setKey(s);}}
+  var r=await fetch(url,{{method:'POST',headers:{{'X-API-Key':s,'Content-Type':'application/json'}},body:JSON.stringify(body)}});
+  var d=await r.json();
+  if(r.status===401){{
+    var k=prompt('Wrong API secret — enter correct key:');
+    if(!k)return;_setKey(k);
+    return adminPost(url,body,null);
+  }}
+  alert(d.msg||d.error||'Done');
+  refreshStatus();
+}}
 async function togglePause(){{
   const btn=document.getElementById('pause-btn');
   const isPaused=btn.textContent.includes('RESUME');
   btn.disabled=true;
   btn.textContent='...';
   try{{
-    const secret=localStorage.getItem('api_secret')||'';
     const url=isPaused?'/admin/resume':'/admin/pause';
-    const r=await fetch(url,{{method:'POST',headers:{{'X-API-Key':secret,'Content-Type':'application/json'}},body:JSON.stringify({{hours:24}})}});
-    const d=await r.json();
-    if(r.status===401){{
-      const key=prompt('Enter API secret:');
-      if(key){{ localStorage.setItem('api_secret',key); togglePause(); return; }}
-    }}
-    if(!d.ok) alert(d.error||'Failed');
+    await adminPost(url,{{hours:24}},null);
   }} catch(e){{ alert('Error: '+e); }}
   btn.disabled=false;
   refreshStatus();
@@ -5732,20 +5742,30 @@ function poll(){
 }
 poll();
 setInterval(poll,3000);
+async function _punkAdminPost(url,body){{
+  var s=localStorage.getItem('api_secret')||'';
+  if(!s){{s=prompt('API secret:');if(!s)return null;localStorage.setItem('api_secret',s);}}
+  var r=await fetch(url,{{method:'POST',headers:{{'X-API-Key':s,'Content-Type':'application/json'}},body:JSON.stringify(body)}});
+  if(r.status===401){{
+    var k=prompt('Wrong API secret — enter correct key:');
+    if(!k)return null;
+    localStorage.setItem('api_secret',k);
+    return _punkAdminPost(url,body);
+  }}
+  return r.json();
+}}
 async function togglePause(){{
   var btn=document.getElementById('pause-btn');
   var isPaused=btn.textContent.includes('RESUME');
   btn.disabled=true; btn.textContent='...';
-  var s=localStorage.getItem('api_secret')||'';
-  if(!s){{s=prompt('API secret:');if(s)localStorage.setItem('api_secret',s);}}
-  var url=isPaused?'/admin/resume':'/admin/pause';
   try{{
-    var r=await fetch(url,{{method:'POST',headers:{{'X-API-Key':s,'Content-Type':'application/json'}},body:JSON.stringify({{hours:24}})}});
-    var d=await r.json();
-    if(r.status===401){{alert('Wrong API secret');btn.disabled=false;btn.textContent=isPaused?'▶ RESUME':'⏸ PAUSE';return;}}
-    btn.textContent=isPaused?'⏸ PAUSE':'▶ RESUME';
-    btn.style.color=isPaused?'#00e5ff':'#fbbf24';
-    btn.style.borderColor=isPaused?'#00e5ff':'#fbbf24';
+    var url=isPaused?'/admin/resume':'/admin/pause';
+    var d=await _punkAdminPost(url,{{hours:24}});
+    if(d){{
+      btn.textContent=isPaused?'⏸ PAUSE':'▶ RESUME';
+      btn.style.color=isPaused?'#00e5ff':'#fbbf24';
+      btn.style.borderColor=isPaused?'#00e5ff':'#fbbf24';
+    }}
   }}catch(e){{alert('Error: '+e);}}
   btn.disabled=false;
 }}
