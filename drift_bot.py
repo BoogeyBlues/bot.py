@@ -1403,47 +1403,6 @@ def run_trading_loop():
         time.sleep(5)
 
 # ── FLASK ROUTES ──────────────────────────────────────────────────
-_CURSOR = """<style>
-@media(pointer:fine){
-  body{
-    background-image:linear-gradient(rgba(5,10,20,.65),rgba(5,10,20,.65)),
-      url('/static/tankgirl.png')!important;
-    background-size:cover!important;background-position:center!important;
-    background-attachment:fixed!important;
-  }
-  .bg-art{display:none!important}
-  .wrap{z-index:auto!important}
-  *{cursor:none!important}
-  #dora-cur{position:fixed;pointer-events:none;z-index:99999;
-    width:69px;height:96px;image-rendering:pixelated;
-    top:-200px;left:-200px}
-}
-</style>
-<script>
-(function(){
-  var c=document.createElement('img');
-  c.id='dora-cur';
-  c.src='/static/doraemon_walk.gif';
-  c.style.cssText='position:fixed;pointer-events:none;z-index:99999;width:69px;height:96px;image-rendering:pixelated;top:-200px;left:-200px;display:none';
-  document.body.appendChild(c);
-  function move(x,y){c.style.display='block';c.style.left=(x-34)+'px';c.style.top=(y-96)+'px';}
-  document.addEventListener('mousemove',function(e){move(e.clientX,e.clientY);});
-  document.addEventListener('touchmove',function(e){
-    var t=e.touches[0];move(t.clientX,t.clientY);
-  },{passive:true});
-  document.addEventListener('touchstart',function(e){
-    var t=e.touches[0];move(t.clientX,t.clientY);
-  },{passive:true});
-})();
-</script>"""
-
-@app.after_request
-def _inject_cursor(resp):
-    if 'text/html' in resp.content_type:
-        html = resp.get_data(as_text=True)
-        if '</body>' in html:
-            resp.set_data(html.replace('</body>', _CURSOR + '</body>', 1))
-    return resp
 
 @app.route("/", methods=["GET"])
 def home():
@@ -1472,7 +1431,6 @@ def home():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>{DRIFT_BOT_NAME}</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
@@ -1561,7 +1519,23 @@ nav{{position:sticky;top:0;z-index:100;background:rgba(5,10,20,.92);backdrop-fil
 .pos-dir.long{{color:var(--green)}}.pos-dir.short{{color:var(--red)}}
 .pos-pnl{{font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:700;flex-shrink:0}}
 .pos-pnl.up{{color:var(--green)}}.pos-pnl.dn{{color:var(--red)}}
-.sparkline-wrap{{width:72px;height:40px;flex-shrink:0}}
+.chart-zone{{width:80px;height:44px;flex-shrink:0;cursor:pointer;position:relative}}
+.chart-hint{{position:absolute;right:3px;top:3px;font-size:.42rem;font-weight:600;letter-spacing:.05em;color:var(--muted);text-transform:uppercase;opacity:.65;pointer-events:none}}
+canvas.mini{{width:80px;height:44px;display:block;border-radius:8px;background:rgba(255,255,255,.02)}}
+.drawer-bd{{position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.65);backdrop-filter:blur(4px);display:none}}
+.drawer{{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;z-index:201;background:var(--bg2);border-radius:20px 20px 0 0;border:1px solid rgba(0,229,255,.12);border-bottom:none;padding:0 0 44px;display:none;animation:drawerUp .25s ease}}
+@keyframes drawerUp{{from{{transform:translate(-50%,100%)}}to{{transform:translate(-50%,0)}}}}
+.drawer-handle{{width:36px;height:4px;border-radius:2px;background:var(--muted);margin:12px auto 14px}}
+.drawer-hdr{{padding:0 16px 12px;display:flex;align-items:flex-start;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,.04)}}
+.d-sym{{font-family:'Bebas Neue',sans-serif;font-size:1.5rem;letter-spacing:2px;color:var(--text)}}
+.d-sub{{font-size:.6rem;color:var(--muted);margin-top:2px;font-family:'JetBrains Mono',monospace}}
+.d-close{{background:rgba(255,255,255,.06);border:none;border-radius:8px;color:var(--muted);width:30px;height:30px;font-size:1rem;cursor:pointer;display:flex;align-items:center;justify-content:center}}
+.d-chart-wrap{{padding:14px 14px 8px}}
+canvas.dchart{{width:100%;height:130px;display:block;border-radius:11px;background:rgba(255,255,255,.02)}}
+.d-stats{{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;padding:10px 16px 0}}
+.ds{{display:flex;flex-direction:column;gap:3px}}
+.ds-v{{font-family:'JetBrains Mono',monospace;font-size:.8rem;font-variant-numeric:tabular-nums;color:var(--cyan)}}
+.ds-l{{font-size:.54rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}}
 .no-pos{{text-align:center;padding:28px 16px;color:var(--muted);font-size:13px}}
 
 /* TRADE DECK */
@@ -1817,7 +1791,7 @@ function cycleDeck() {{
 }}
 
 /* ── LIVE DATA ──────────────────────────────────────────────── */
-const charts={{}}, pnlH={{}};
+const charts={{}}; // kept for swipe cleanup compat
 const MS={json.dumps(MILESTONES)};
 const START_CAP={STARTING_CAPITAL};
 const GOAL={PROFIT_GOAL};
@@ -1854,14 +1828,13 @@ async function poll() {{
 }}
 
 function updatePositions(positions) {{
+  _lastPositions=positions;
   const wrap=document.getElementById('pos-wrap');
   const noPos=document.getElementById('no-pos');
   const keys=Object.keys(positions);
   noPos.style.display=keys.length?'none':'block';
   keys.forEach((market,i)=>{{
     const pos=positions[market]; const pnl=pos.pnl||0;
-    if(!pnlH[market]) pnlH[market]=[];
-    pnlH[market].push(pnl); if(pnlH[market].length>80) pnlH[market].shift();
     let card=document.getElementById('pc-'+market);
     if(!card) {{
       // Build swipe wrapper + card + hidden close button
@@ -1878,16 +1851,16 @@ function updatePositions(positions) {{
     }} else {{
       const pnlEl=document.getElementById('pp-'+market);
       if(pnlEl){{pnlEl.textContent=(pnl>=0?'+':'')+' $'+Math.abs(pnl).toFixed(2);pnlEl.className='pos-pnl '+(pnl>=0?'up':'dn');}}
-      updateChart(market,pnl);
+      updateChart(market);
       card.className='pos-card '+(pnl>=0?'profit':'loss');
     }}
   }});
   document.querySelectorAll('.swipe-wrap').forEach(el=>{{
     const m=el.id.replace('sw-','');
     if(!positions[m]){{
-      const card=document.getElementById('pc-'+m);
-      if(charts[m]){{charts[m].destroy();delete charts[m];}}
-      delete pnlH[m]; el.remove();
+      delete _priceHists[m]; delete _lastPositions[m];
+      if(_drawerMkt===m) closeDrawer();
+      el.remove();
     }}
   }});
 }}
@@ -1936,36 +1909,102 @@ function closePosDirect(market) {{
 
 function buildCard(market,pos) {{
   const side=pos.side||'long';
-  const sc=side==='long'?'var(--green)':'var(--red)';
   const pnl=pos.pnl||0;
-  const sparkId='spark-'+market;
   return `<div class="pos-info">
     <div class="pos-pair">${{market}}-PERP</div>
     <div class="pos-dir ${{side}}">● ${{side.toUpperCase()}}</div>
   </div>
-  <canvas class="sparkline-wrap" id="${{sparkId}}" width="72" height="40"></canvas>
+  <div class="chart-zone" onclick="openDrawer('${{market}}')">
+    <span class="chart-hint">tap</span>
+    <canvas class="mini" id="mc-${{market}}" width="160" height="88"></canvas>
+  </div>
   <div class="pos-pnl ${{pnl>=0?'up':'dn'}}" id="pp-${{market}}">${{pnl>=0?'+':''}} $${{Math.abs(pnl).toFixed(2)}}</div>`;
 }}
 
-function initChart(market) {{
-  const el=document.getElementById('spark-'+market);
-  if(!el||charts[market]) return;
-  charts[market]=new Chart(el.getContext('2d'),{{
-    type:'line',
-    data:{{labels:[],datasets:[{{data:[],borderColor:'#00ff88',borderWidth:1.5,pointRadius:0,tension:.4,fill:true,backgroundColor:'rgba(0,255,136,.08)'}}]}},
-    options:{{responsive:false,animation:{{duration:300}},plugins:{{legend:{{display:false}},tooltip:{{enabled:false}}}},scales:{{x:{{display:false}},y:{{display:false}}}}}}
+let _priceHists={{}};
+let _drawerMkt=null;
+let _lastPositions={{}};
+
+function drawChart(canvas,hist,entry,h){{
+  const w=canvas.offsetWidth||canvas.width||300;
+  canvas.width=w; canvas.height=h;
+  const ctx=canvas.getContext('2d');
+  ctx.clearRect(0,0,w,h);
+  if(!hist||hist.length<2)return;
+  const mn=Math.min(...hist,entry),mx=Math.max(...hist,entry);
+  const pad=(mx-mn)*0.12||entry*0.005;
+  const lo=mn-pad,hi=mx+pad,rng=hi-lo||1;
+  const xp=i=>(i/(hist.length-1))*w;
+  const yp=v=>h-((v-lo)/rng)*h;
+  ctx.strokeStyle='rgba(255,255,255,.1)';ctx.lineWidth=1;ctx.setLineDash([3,4]);
+  ctx.beginPath();ctx.moveTo(0,yp(entry));ctx.lineTo(w,yp(entry));ctx.stroke();ctx.setLineDash([]);
+  const last=hist[hist.length-1];
+  const col=last>=entry?'#00ff88':'#ff3355';
+  const grad=ctx.createLinearGradient(0,0,0,h);
+  grad.addColorStop(0,last>=entry?'rgba(0,255,136,.18)':'rgba(255,51,85,.18)');
+  grad.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.beginPath();ctx.moveTo(xp(0),yp(hist[0]));
+  hist.forEach((v,i)=>i>0&&ctx.lineTo(xp(i),yp(v)));
+  ctx.lineTo(w,h);ctx.lineTo(0,h);ctx.closePath();ctx.fillStyle=grad;ctx.fill();
+  ctx.beginPath();ctx.moveTo(xp(0),yp(hist[0]));
+  hist.forEach((v,i)=>i>0&&ctx.lineTo(xp(i),yp(v)));
+  ctx.strokeStyle=col;ctx.lineWidth=h>80?2:1.5;ctx.stroke();
+  ctx.beginPath();ctx.arc(w-3,yp(last),3,0,Math.PI*2);ctx.fillStyle=col;ctx.fill();
+}}
+
+function initChart(market){{
+  const pos=_lastPositions[market];
+  if(!pos) return;
+  requestAnimationFrame(()=>{{
+    const cv=document.getElementById('mc-'+market);
+    const hist=_priceHists[market]||[pos.entry];
+    if(cv) drawChart(cv,hist,pos.entry||0,44);
   }});
 }}
 
-function updateChart(market,latestPnl) {{
-  const c=charts[market]; if(!c) return;
-  const hist=pnlH[market]||[];
-  const col=latestPnl>=0?'#00ff88':'#ff3355';
-  c.data.labels=hist.map((_,i)=>i);
-  c.data.datasets[0].data=hist;
-  c.data.datasets[0].borderColor=col;
-  c.data.datasets[0].backgroundColor=latestPnl>=0?'rgba(0,255,136,.08)':'rgba(255,51,85,.08)';
-  c.update('none');
+function updateChart(market){{
+  const pos=_lastPositions[market];
+  if(!pos) return;
+  const cv=document.getElementById('mc-'+market);
+  const hist=_priceHists[market]||[pos.entry];
+  if(cv) drawChart(cv,hist,pos.entry||0,44);
+  if(_drawerMkt===market){{
+    const dv=document.getElementById('dChart');
+    const last=hist[hist.length-1]||pos.entry;
+    const drift=(last-(pos.entry||0))/(pos.entry||1)*100;
+    if(dv) drawChart(dv,hist,pos.entry||0,130);
+    const curEl=document.getElementById('dCur');
+    const driftEl=document.getElementById('dDrift');
+    if(curEl) curEl.textContent='$'+last.toFixed(4);
+    if(driftEl){{driftEl.textContent=(drift>=0?'+':'')+drift.toFixed(2)+'%';driftEl.style.color=drift>=0?'var(--green)':'var(--red)';}}
+  }}
+}}
+
+function openDrawer(market){{
+  const pos=_lastPositions[market];
+  if(!pos) return;
+  _drawerMkt=market;
+  const entry=pos.entry||0;
+  const hist=_priceHists[market]||[entry];
+  const last=hist[hist.length-1]||entry;
+  const drift=(last-entry)/(entry||1)*100;
+  document.getElementById('dSym').textContent=market+'-PERP';
+  document.getElementById('dSub').textContent=(pos.side||'long').toUpperCase()+' · $'+entry.toFixed(4)+' entry';
+  document.getElementById('dEntry').textContent='$'+entry.toFixed(4);
+  document.getElementById('dCur').textContent='$'+last.toFixed(4);
+  const de=document.getElementById('dDrift');
+  de.textContent=(drift>=0?'+':'')+drift.toFixed(2)+'%';
+  de.style.color=drift>=0?'var(--green)':'var(--red)';
+  document.getElementById('dLev').textContent=(pos.leverage||'-')+'x';
+  document.getElementById('drawerBd').style.display='block';
+  document.getElementById('drawer').style.display='block';
+  requestAnimationFrame(()=>{{const cv=document.getElementById('dChart');if(cv) drawChart(cv,hist,entry,130);}});
+}}
+
+function closeDrawer(){{
+  _drawerMkt=null;
+  document.getElementById('drawerBd').style.display='none';
+  document.getElementById('drawer').style.display='none';
 }}
 
 async function pollTrades() {{
@@ -2022,10 +2061,37 @@ function resetCapital() {{
     .then(r=>r.json()).then(d=>{{alert(d.msg||d.error);poll();pollTrades();}}).catch(e=>alert(e));
 }}
 
+async function pollPriceHistory(){{
+  try{{
+    const ph=await fetch('/api/price-history').then(r=>r.json());
+    Object.keys(ph).forEach(m=>{{
+      _priceHists[m]=ph[m];
+      updateChart(m);
+    }});
+  }}catch(e){{}}
+}}
+
 /* ── KICK OFF ───────────────────────────────────────────────── */
-poll(); pollTrades(); pollFeed();
-setInterval(poll,3000); setInterval(pollTrades,5000); setInterval(pollFeed,4000);
+poll(); pollTrades(); pollFeed(); pollPriceHistory();
+setInterval(poll,3000); setInterval(pollTrades,5000); setInterval(pollFeed,4000); setInterval(pollPriceHistory,4000);
 </script>
+
+<!-- DRAWER -->
+<div class="drawer-bd" id="drawerBd" onclick="closeDrawer()"></div>
+<div class="drawer" id="drawer">
+  <div class="drawer-handle"></div>
+  <div class="drawer-hdr">
+    <div><div class="d-sym" id="dSym">—</div><div class="d-sub" id="dSub">—</div></div>
+    <button class="d-close" onclick="closeDrawer()">✕</button>
+  </div>
+  <div class="d-chart-wrap"><canvas class="dchart" id="dChart"></canvas></div>
+  <div class="d-stats">
+    <div class="ds"><span class="ds-v" id="dEntry">—</span><span class="ds-l">Entry</span></div>
+    <div class="ds"><span class="ds-v" id="dCur">—</span><span class="ds-l">Current</span></div>
+    <div class="ds"><span class="ds-v" id="dDrift">—</span><span class="ds-l">Drift</span></div>
+    <div class="ds"><span class="ds-v" id="dLev">—</span><span class="ds-l">Leverage</span></div>
+  </div>
+</div>
 </body></html>"""
 
 
@@ -2381,6 +2447,13 @@ def status_api():
     })
 
 
+@app.route("/api/price-history", methods=["GET"])
+def price_history_api():
+    with _state_lock:
+        ph = {k: [float(p) for _, p in list(v)[-80:]] for k, v in _price_history.items()}
+    return jsonify(ph)
+
+
 @app.route("/trades/api", methods=["GET"])
 def trades_api():
     with _state_lock:
@@ -2582,7 +2655,6 @@ def monitor():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>Monitor — {DRIFT_BOT_NAME}</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
 :root{{--cyan:#00e5ff;--green:#00ff88;--red:#ff3355;--yellow:#ffee00;--bg:#050a14;--bg2:#080f1e;--bg3:#0d1628;--text:#c8d8f0;--muted:#4a6080}}
@@ -2632,7 +2704,23 @@ nav{{position:fixed;top:0;left:50%;transform:translateX(-50%);width:100%;z-index
 .pos-pnl{{font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:700;margin-left:auto}}
 .pos-meta{{display:grid;grid-template-columns:1fr 1fr;gap:3px 12px;font-size:10px;color:var(--muted);font-family:'JetBrains Mono',monospace;margin-bottom:10px}}
 .pos-meta b{{color:#aaa;font-weight:400}}
-canvas{{width:100%!important;display:block;margin-bottom:10px}}
+.chart-click-zone{{cursor:pointer;position:relative;margin-bottom:10px}}
+.chart-click-zone .chart-hint{{position:absolute;right:8px;top:6px;font-size:.48rem;font-weight:600;letter-spacing:.06em;color:var(--muted);text-transform:uppercase;opacity:.7;pointer-events:none}}
+canvas.pos-chart{{width:100%!important;height:80px;display:block;border-radius:8px;background:rgba(255,255,255,.02)}}
+.drawer-bd{{position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.65);backdrop-filter:blur(4px);display:none}}
+.drawer{{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;z-index:201;background:#080f1e;border-radius:20px 20px 0 0;border:1px solid rgba(0,229,255,.12);border-bottom:none;padding:0 0 44px;display:none;animation:drawerUp .25s ease}}
+@keyframes drawerUp{{from{{transform:translate(-50%,100%)}}to{{transform:translate(-50%,0)}}}}
+.drawer-handle{{width:36px;height:4px;border-radius:2px;background:#4a6080;margin:12px auto 14px}}
+.drawer-hdr{{padding:0 16px 12px;display:flex;align-items:flex-start;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,.04)}}
+.d-sym{{font-family:'Bebas Neue',sans-serif;font-size:1.5rem;letter-spacing:2px;color:#c8d8f0}}
+.d-sub{{font-size:.6rem;color:#4a6080;margin-top:2px;font-family:'JetBrains Mono',monospace}}
+.d-close{{background:rgba(255,255,255,.06);border:none;border-radius:8px;color:#4a6080;width:30px;height:30px;font-size:1rem;cursor:pointer;display:flex;align-items:center;justify-content:center}}
+.d-chart-wrap{{padding:14px 14px 8px}}
+canvas.dchart{{width:100%;height:130px;display:block;border-radius:11px;background:rgba(255,255,255,.02)}}
+.d-stats{{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;padding:10px 16px 0}}
+.ds{{display:flex;flex-direction:column;gap:3px}}
+.ds-v{{font-family:'JetBrains Mono',monospace;font-size:.8rem;font-variant-numeric:tabular-nums;color:#00e5ff}}
+.ds-l{{font-size:.54rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:#4a6080}}
 .close-btn{{width:100%;padding:9px;background:transparent;border:1px solid var(--red);color:var(--red);font-size:11px;font-weight:900;letter-spacing:1px;cursor:pointer;text-transform:uppercase;transition:all .15s;border-radius:6px}}
 .close-btn:hover{{background:var(--red);color:#fff}}
 .log-feed{{background:var(--bg);border:1px solid rgba(0,229,255,.08);border-radius:10px;padding:10px 12px;max-height:180px;overflow-y:auto;font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.7}}
@@ -2921,8 +3009,36 @@ function manualToggle() {{
 }}
 
 // ── CHARTS ────────────────────────────────────────────────
-const charts  = {{}};
-const pnlHist = {{}};
+let _mPriceHists = {{}};
+let _mLastPos    = {{}};
+let _mDrawerMkt  = null;
+
+function drawChart(canvas, hist, entry, h) {{
+  const w = canvas.offsetWidth || canvas.width || 360;
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, w, h);
+  if (!hist || hist.length < 2) return;
+  const mn = Math.min(...hist, entry), mx = Math.max(...hist, entry);
+  const pad = (mx - mn) * 0.12 || entry * 0.005;
+  const lo = mn - pad, hi = mx + pad, rng = hi - lo || 1;
+  const xp = i => (i / (hist.length - 1)) * w;
+  const yp = v => h - ((v - lo) / rng) * h;
+  ctx.strokeStyle = 'rgba(255,255,255,.1)'; ctx.lineWidth = 1; ctx.setLineDash([3, 4]);
+  ctx.beginPath(); ctx.moveTo(0, yp(entry)); ctx.lineTo(w, yp(entry)); ctx.stroke(); ctx.setLineDash([]);
+  const last = hist[hist.length - 1];
+  const col = last >= entry ? '#00ff88' : '#ff3355';
+  const grad = ctx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, last >= entry ? 'rgba(0,255,136,.18)' : 'rgba(255,51,85,.18)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.beginPath(); ctx.moveTo(xp(0), yp(hist[0]));
+  hist.forEach((v, i) => i > 0 && ctx.lineTo(xp(i), yp(v)));
+  ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath(); ctx.fillStyle = grad; ctx.fill();
+  ctx.beginPath(); ctx.moveTo(xp(0), yp(hist[0]));
+  hist.forEach((v, i) => i > 0 && ctx.lineTo(xp(i), yp(v)));
+  ctx.strokeStyle = col; ctx.lineWidth = h > 80 ? 2 : 1.5; ctx.stroke();
+  ctx.beginPath(); ctx.arc(w - 3, yp(last), 3, 0, Math.PI * 2); ctx.fillStyle = col; ctx.fill();
+}}
 
 // ── POSITIONS ─────────────────────────────────────────────
 async function poll() {{
@@ -2930,6 +3046,7 @@ async function poll() {{
     const d    = await fetch('/status/api').then(r => r.json());
     const pos  = d.positions || {{}};
     const keys = Object.keys(pos);
+    _mLastPos  = pos;
     document.getElementById('statPositions').textContent = keys.length;
     const wrap  = document.getElementById('pos-wrap');
     const noPos = document.getElementById('no-pos');
@@ -2939,12 +3056,8 @@ async function poll() {{
     keys.forEach(market => {{
       const p   = pos[market];
       const pnl = p.pnl || 0;
-      const cur = p.current_price || p.entry;
       totalPnl += pnl;
       labels.push(market.replace(/-?PERP$/i, ''));
-      if (!pnlHist[market]) pnlHist[market] = [];
-      pnlHist[market].push(pnl);
-      if (pnlHist[market].length > 120) pnlHist[market].shift();
       let card = document.getElementById('pc-' + market);
       if (!card) {{
         card = document.createElement('div');
@@ -2954,17 +3067,19 @@ async function poll() {{
         wrap.appendChild(card);
         setTimeout(() => initChart(market), 50);
       }} else {{
-        const pnlEl = document.getElementById('pp-'  + market);
-        const curEl = document.getElementById('pc2-' + market);
+        const pnlEl = document.getElementById('pp-' + market);
         const c = pnl >= 0 ? '#00ff88' : '#ff3355';
         if (pnlEl) {{ pnlEl.textContent = (pnl>=0?'+':'')+'$'+pnl.toFixed(2); pnlEl.style.color = c; }}
-        if (curEl) curEl.textContent = '$' + cur.toFixed(4);
-        updateChart(market, pnl);
+        updateChart(market);
       }}
     }});
     document.querySelectorAll('.pos-card').forEach(el => {{
       const m = el.id.replace('pc-', '');
-      if (!pos[m]) {{ if (charts[m]) {{ charts[m].destroy(); delete charts[m]; }} delete pnlHist[m]; el.remove(); }}
+      if (!pos[m]) {{
+        delete _mPriceHists[m];
+        if (_mDrawerMkt === m) closeMDrawer();
+        el.remove();
+      }}
     }});
     const pnlEl = document.getElementById('statPnl');
     pnlEl.textContent  = (totalPnl >= 0 ? '+' : '') + '$' + totalPnl.toFixed(2);
@@ -3027,49 +3142,72 @@ function cardHTML(market, p) {{
   const sc   = side === 'long' ? '#00ff88' : '#ff3355';
   const pnl  = p.pnl || 0;
   const pc   = pnl >= 0 ? '#00ff88' : '#ff3355';
-  const cur  = p.current_price || p.entry;
   return `
     <div class="pos-top">
       <span class="pos-sym">${{market}}-PERP</span>
       <span class="pos-side" style="background:${{sc}}20;color:${{sc}}">${{side.toUpperCase()}}</span>
       <span class="pos-pnl" id="pp-${{market}}" style="color:${{pc}}">${{pnl>=0?'+':''}}$${{pnl.toFixed(2)}}</span>
     </div>
-    <div class="pos-meta">
-      <span><b>Entry</b> $${{(p.entry||0).toFixed(4)}}</span>
-      <span><b>Current</b> <span id="pc2-${{market}}">$${{cur.toFixed(4)}}</span></span>
-      <span><b>TP</b> <span style="color:#00ff88">$${{(p.tp||0).toFixed(4)}}</span></span>
-      <span><b>SL</b> <span style="color:#ff3355">$${{(p.sl||0).toFixed(4)}}</span></span>
-      <span><b>Size</b> $${{(p.size||0).toFixed(2)}}</span>
-      <span><b>Leverage</b> ${{p.leverage||3}}x</span>
+    <div class="chart-click-zone" onclick="openMDrawer('${{market}}')">
+      <span class="chart-hint">tap</span>
+      <canvas class="pos-chart" id="mc-${{market}}"></canvas>
     </div>
-    <canvas id="chart-${{market}}" height="80"></canvas>
     <button class="close-btn" onclick="closePos('${{market}}')">✕ CLOSE ${{market}}</button>`;
 }}
 
 function initChart(market) {{
-  const el = document.getElementById('chart-' + market);
-  if (!el || charts[market]) return;
-  charts[market] = new Chart(el.getContext('2d'), {{
-    type: 'line',
-    data: {{ labels: [], datasets: [{{ data: [], borderColor: '#00e5ff', backgroundColor: 'rgba(0,229,255,.07)', borderWidth: 2, pointRadius: 0, tension: 0.4, fill: true }}] }},
-    options: {{
-      responsive: true, animation: {{ duration: 300 }},
-      plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: c => (c.parsed.y>=0?'+':'')+'$'+c.parsed.y.toFixed(2) }} }} }},
-      scales: {{ x: {{ display: false }}, y: {{ grid: {{ color: '#ffffff10' }}, ticks: {{ color: '#555', font: {{ size: 9 }}, callback: v => '$' + v.toFixed(2) }} }} }}
-    }}
+  const pos = _mLastPos[market];
+  if (!pos) return;
+  requestAnimationFrame(() => {{
+    const cv = document.getElementById('mc-' + market);
+    const hist = _mPriceHists[market] || [pos.entry];
+    if (cv) drawChart(cv, hist, pos.entry || 0, 80);
   }});
 }}
 
-function updateChart(market, latestPnl) {{
-  const c = charts[market];
-  if (!c) return;
-  const hist  = pnlHist[market] || [];
-  const color = latestPnl >= 0 ? '#00ff88' : '#ff3355';
-  c.data.labels = hist.map((_, i) => i);
-  c.data.datasets[0].data             = hist;
-  c.data.datasets[0].borderColor      = color;
-  c.data.datasets[0].backgroundColor  = latestPnl >= 0 ? 'rgba(0,255,136,.07)' : 'rgba(255,51,85,.07)';
-  c.update('none');
+function updateChart(market) {{
+  const pos = _mLastPos[market];
+  if (!pos) return;
+  const cv = document.getElementById('mc-' + market);
+  const hist = _mPriceHists[market] || [pos.entry];
+  if (cv) drawChart(cv, hist, pos.entry || 0, 80);
+  if (_mDrawerMkt === market) {{
+    const dv = document.getElementById('mDChart');
+    const last = hist[hist.length - 1] || pos.entry;
+    const drift = (last - (pos.entry || 0)) / (pos.entry || 1) * 100;
+    if (dv) drawChart(dv, hist, pos.entry || 0, 130);
+    const curEl   = document.getElementById('mDCur');
+    const driftEl = document.getElementById('mDDrift');
+    if (curEl) curEl.textContent = '$' + last.toFixed(4);
+    if (driftEl) {{ driftEl.textContent = (drift>=0?'+':'')+drift.toFixed(2)+'%'; driftEl.style.color = drift>=0?'var(--green)':'var(--red)'; }}
+  }}
+}}
+
+function openMDrawer(market) {{
+  const pos = _mLastPos[market];
+  if (!pos) return;
+  _mDrawerMkt = market;
+  const entry = pos.entry || 0;
+  const hist  = _mPriceHists[market] || [entry];
+  const last  = hist[hist.length - 1] || entry;
+  const drift = (last - entry) / (entry || 1) * 100;
+  document.getElementById('mDSym').textContent  = market + '-PERP';
+  document.getElementById('mDSub').textContent  = (pos.side||'long').toUpperCase() + ' · $' + entry.toFixed(4) + ' entry';
+  document.getElementById('mDEntry').textContent = '$' + entry.toFixed(4);
+  document.getElementById('mDCur').textContent   = '$' + last.toFixed(4);
+  const de = document.getElementById('mDDrift');
+  de.textContent = (drift>=0?'+':'')+drift.toFixed(2)+'%';
+  de.style.color = drift>=0?'var(--green)':'var(--red)';
+  document.getElementById('mDLev').textContent  = (pos.leverage||'-') + 'x';
+  document.getElementById('mDrawerBd').style.display = 'block';
+  document.getElementById('mDrawer').style.display   = 'block';
+  requestAnimationFrame(() => {{ const cv = document.getElementById('mDChart'); if (cv) drawChart(cv, hist, entry, 130); }});
+}}
+
+function closeMDrawer() {{
+  _mDrawerMkt = null;
+  document.getElementById('mDrawerBd').style.display = 'none';
+  document.getElementById('mDrawer').style.display   = 'none';
 }}
 
 function closePos(market) {{
@@ -3078,14 +3216,39 @@ function closePos(market) {{
     .then(r => r.json()).then(d => alert(d.msg || d.error)).catch(e => alert(e));
 }}
 
+async function pollMPriceHistory() {{
+  try {{
+    const ph = await fetch('/api/price-history').then(r => r.json());
+    Object.keys(ph).forEach(m => {{
+      _mPriceHists[m] = ph[m];
+      updateChart(m);
+    }});
+  }} catch(e) {{}}
+}}
+
 // ── KICK OFF ──────────────────────────────────────────────
-poll();
-pollTrades();
-pollLogs();
-setInterval(poll,       3000);
-setInterval(pollTrades, 5000);
-setInterval(pollLogs,   3000);
+poll(); pollTrades(); pollLogs(); pollMPriceHistory();
+setInterval(poll,              3000);
+setInterval(pollTrades,        5000);
+setInterval(pollLogs,          3000);
+setInterval(pollMPriceHistory, 4000);
 </script>
+
+<div class="drawer-bd" id="mDrawerBd" onclick="closeMDrawer()"></div>
+<div class="drawer" id="mDrawer">
+  <div class="drawer-handle"></div>
+  <div class="drawer-hdr">
+    <div><div class="d-sym" id="mDSym">—</div><div class="d-sub" id="mDSub">—</div></div>
+    <button class="d-close" onclick="closeMDrawer()">✕</button>
+  </div>
+  <div class="d-chart-wrap"><canvas class="dchart" id="mDChart"></canvas></div>
+  <div class="d-stats">
+    <div class="ds"><span class="ds-v" id="mDEntry">—</span><span class="ds-l">Entry</span></div>
+    <div class="ds"><span class="ds-v" id="mDCur">—</span><span class="ds-l">Current</span></div>
+    <div class="ds"><span class="ds-v" id="mDDrift">—</span><span class="ds-l">Drift</span></div>
+    <div class="ds"><span class="ds-v" id="mDLev">—</span><span class="ds-l">Leverage</span></div>
+  </div>
+</div>
 </body></html>"""
 
 
