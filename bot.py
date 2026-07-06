@@ -2060,10 +2060,15 @@ def monitor_loop():
                 market  = get_market_data(mint)
                 price   = market["price"] if market and market["price"] > 0 else trade["entry"]
     
-                # Paper mode: simulate price from bond % movement when DexScreener has no data
-                if PAPER_MODE and price == trade["entry"] and bond > 0 and trade.get("bond_entry", 0) > 0:
-                    bond_move = bond - trade["bond_entry"]
-                    price = trade["entry"] * (1 + bond_move / 100)
+                # Paper mode price simulation
+                if PAPER_MODE and price == trade["entry"]:
+                    if bond > 0 and trade.get("bond_entry", 0) > 0:
+                        # Bonding curve strategies: derive price from bond % movement
+                        bond_move = bond - trade["bond_entry"]
+                        price = trade["entry"] * (1 + bond_move / 100)
+                    elif market and market.get("price", 0) > 0:
+                        # Copy/migrate/spike/fast: use live DexScreener price directly
+                        price = market["price"]
     
                 with trades_lock:
                     if mint not in open_trades:
