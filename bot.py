@@ -3300,7 +3300,7 @@ def _home_inner():
     <button class="btn btn-ghost" style="border-color:rgba(0,229,255,.4);color:#00e5ff" onclick="if(confirm('Run retune now and lock auto-tuning until next Monday 7am?'))fetch('/admin/tune-now',{{method:'POST'}}).then(r=>r.json()).then(d=>alert(d.msg)).catch(()=>alert('Failed'))">🧠 Tune Now</button>
     <button class="btn btn-ghost" onclick="fetch('/admin/reset-daily',{{method:'POST'}}).then(r=>r.json()).then(d=>alert(d.msg)).catch(()=>alert('Failed'))">🔄 Reset Daily</button>
     <button class="btn btn-ghost" onclick="if(confirm('Reset capital to ${STARTING_CAPITAL:.2f}?'))fetch('/admin/reset-capital',{{method:'POST'}}).then(r=>r.json()).then(d=>alert(d.msg)).catch(()=>alert('Failed'))">💰 Reset Capital</button>
-    <button class="btn btn-ghost" style="border-color:#ff3355;color:#ff3355" onclick="if(confirm('FULL RESET — wipes ALL trades, PNL history, and restores capital to ${STARTING_CAPITAL:.2f}. Cannot be undone. Continue?'))fetch('/admin/reset-all',{{method:'POST'}}).then(r=>r.json()).then(d=>{{alert(d.msg);location.reload()}}).catch(()=>alert('Failed'))">🗑️ Reset All</button>
+    <button class="btn btn-ghost" style="border-color:#ff3355;color:#ff3355" onclick="(async()=>{{if(!confirm('Reset capital to ${STARTING_CAPITAL:.2f}, clear win rate and daily counters?'))return;const s=localStorage.getItem('api_secret')||prompt('API secret:');if(s)localStorage.setItem('api_secret',s);const r=await fetch('/admin/reset-all',{{method:'POST',headers:{{'X-API-Key':s||''}}}});const d=await r.json();if(r.status===401){{alert('Wrong API secret');return;}}alert(d.msg||d.error);location.reload();}})()">🗑️ Reset All</button>
   </div>
 
   <div class="cards">
@@ -4921,45 +4921,23 @@ def admin_reset_capital():
 def admin_reset_all():
     denied = _auth_required()
     if denied: return denied
-    global capital, usdc_locked
-    global _daily_trades, _daily_wins, _daily_losses, _pause_until
-    global _daily_cap_notified, _week_day_logs, _week_start_date, _milestones_hit
-    global _day_start_cap, _daily_date
+    global capital
+    global _daily_trades, _daily_wins, _daily_losses, _daily_cap_notified
+    global _day_start_cap
 
-    # 1. Wipe Redis keys entirely (DEL, not overwrite — survives restart)
-    _redis_cmd("DEL", "bot_state")
-    _redis_cmd("DEL", "bot_trades")
-
-    # 2. Wipe in-memory state
-    completed_trades.clear()
-    with trades_lock:
-        open_trades.clear()
+    # Reset capital, win rate counters, and daily trade counters only.
+    # Does NOT touch trade history, open trades, Redis keys, or weekly state.
     with capital_lock:
         capital = STARTING_CAPITAL
-    with usdc_lock:
-        usdc_locked = 0.0
+    with trades_lock:
+        completed_trades.clear()
     with _daily_lock:
         _daily_trades       = 0
         _daily_wins         = 0
         _daily_losses       = 0
-        _pause_until        = 0.0
         _daily_cap_notified = False
-        _week_day_logs      = []
-        _week_start_date    = ""
         _day_start_cap      = STARTING_CAPITAL
-        _daily_date         = ""
-    with _milestone_lock:
-        _milestones_hit.clear()
 
-    # 3. Wipe local files
-    for f in [LEARN_FILE, STATE_FILE]:
-        try:
-            if os.path.exists(f):
-                os.remove(f)
-        except Exception:
-            pass
-
-    # 4. Write fresh clean state to Redis so restart loads correctly
     _save_daily_state()
     redis_save("bot_trades", [])
 
