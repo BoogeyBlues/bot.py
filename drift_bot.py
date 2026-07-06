@@ -73,6 +73,7 @@ _st_prev           = {}   # market -> previous supertrend bullish state (for fli
 _market_stats      = {}   # market -> {wins, losses, long_wins, short_wins, long_total, short_total}
 _market_params     = {}   # tuned per-market: {leverage, bias, paused_until, last_result}
 _5m_trend_cache    = {}   # market -> {trend, ts} — 5-min candle bias, 60s TTL
+_signal_skip_ts    = {}   # market+reason -> last_log_ts, throttles signal-skip spam
 _liquidity_cache   = {}   # market -> {factor, ts} — OKX spread+volume factor, 30s TTL
 
 _session = requests.Session()
@@ -611,10 +612,18 @@ def get_signal(market):
 
     Returns (direction, confidence, atr) or (None, 0, None).
     """
+    def _skip_log(reason, detail=""):
+        key = f"{market}:{reason}"
+        now = time.time()
+        if now - _signal_skip_ts.get(key, 0) > 120:
+            _signal_skip_ts[key] = now
+            log("info", f"no signal — {reason}{(' | ' + detail) if detail else ''}", market)
+
     global _st_prev
     with _state_lock:
         prices = list(_price_history.get(market, []))
     if len(prices) < 55:
+        _skip_log("warming up", f"{len(prices)}/55 candles")
         return None, 0, None
     vals = [p for _, p in prices]
 
@@ -625,6 +634,7 @@ def get_signal(market):
     st_bull, _   = _supertrend(vals, 10, 3.0)
 
     if ema50 is None or rsi is None or atr is None or st_bull is None:
+        _skip_log("indicator calc failed")
         return None, 0, None
 
     cur = vals[-1]
@@ -632,6 +642,7 @@ def get_signal(market):
     # ── Regime: enough volatility to trade ────────────────────────
     atr_pct = atr / cur
     if atr_pct < 0.001:
+        _skip_log("low volatility", f"ATR%={atr_pct*100:.3f}")
         _st_prev[market] = st_bull
         return None, 0, None
 
@@ -639,18 +650,7 @@ def get_signal(market):
 
     # ── Filter 1: EMA-50 alignment (no counter-trend) ─────────────
     if not ((trend == "long" and cur > ema50) or (trend == "short" and cur < ema50)):
-        _st_prev[market] = st_bull
-        return None, 0, None
-
-    # ── Filter 2: 5-minute higher-timeframe must agree ────────────
-    trend_5m = _get_5m_trend(market)
-    if trend_5m and trend_5m != trend:
-        log("info", f"5m={trend_5m} vs 1m={trend} — skip counter-trend entry", market)
-        _st_prev[market] = st_bull
-        return None, 0, None
-
-    # ── Filter 3: RSI exhaustion hard block ───────────────────────
-    if (trend == "long" and rsi > 78) or (trend == "short" and rsi < 22):
+        _skip_log("EMA-50 misaligned", f"ST={trend} cur={cur:.2f} ema50={ema50:.2f}")
         _st_prev[market] = st_bull
         return None, 0, None
 
@@ -663,6 +663,25 @@ def get_signal(market):
     just_flipped = prev_bull is not None and prev_bull != st_bull
     if just_flipped:
         confidence += 1  # fresh Supertrend flip — highest quality entry
+
+    # ── Filter 2: 5-minute higher-timeframe alignment ─────────────
+    # Hard block → confidence penalty: 5m disagreement costs 1 confidence point.
+    # Strongest setups (conf ≥ 2) can still fire against the 5m trend;
+    # weakest setups (conf = 1) are blocked when 5m disagrees.
+    trend_5m = _get_5m_trend(market)
+    if trend_5m and trend_5m != trend:
+        confidence -= 1
+        if confidence < 1:
+            log("info", f"5m={trend_5m} vs 1m={trend} conf too low — skip", market)
+            _st_prev[market] = st_bull
+            return None, 0, None
+        log("info", f"5m={trend_5m} vs 1m={trend} conf={confidence} — entering anyway", market)
+
+    # ── Filter 3: RSI exhaustion hard block ───────────────────────
+    if (trend == "long" and rsi > 78) or (trend == "short" and rsi < 22):
+        _skip_log("RSI exhausted", f"RSI={rsi:.1f} trend={trend}")
+        _st_prev[market] = st_bull
+        return None, 0, None
 
     _st_prev[market] = st_bull
 
