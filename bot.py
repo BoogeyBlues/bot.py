@@ -1883,6 +1883,8 @@ def _partial_exit(mint, price, fraction, label):
 # ── ENTER / EXIT ─────────────────────────────────────────────────
 def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, replies=0, pump_swap=False, raydium=False):
     global capital, _daily_trades
+    if BOT_PAUSED or _pause_until > time.time():
+        return False
     if daily_limit_reached():
         _log_scan(symbol, mint, bond_entry, 0, "cap", -1, "DAILY CAP / COOLDOWN")
         return False
@@ -2731,6 +2733,8 @@ def scanner_loop():
             _black_snap = set(blacklisted_mints)
             candidates = []
             for coin in coins:
+                if BOT_PAUSED or _pause_until > time.time():
+                    break
                 if daily_limit_reached():
                     break
                 mint   = coin["mint"]
@@ -2800,6 +2804,8 @@ def scanner_loop():
 
                 # ── Phase 3: sequential trade decisions ────────────────
                 for res in ordered_results:
+                    if BOT_PAUSED or _pause_until > time.time():
+                        break
                     if not res:
                         continue
                     if res.get("action") == "blacklist":
