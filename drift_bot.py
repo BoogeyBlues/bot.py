@@ -972,12 +972,22 @@ def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=N
 def close_position(market, exit_price, reason=""):
     global _capital, _daily_pnl
     with _state_lock:
-        pos = _positions.pop(market, None)
+        pos = _positions.get(market)
     if not pos:
         return
+
+    # Execute exchange close BEFORE removing from local state.
+    # If the RPC fails we keep the position in state so the next monitor
+    # cycle retries rather than losing track of an open on-chain position.
     if not DRIFT_PAPER_MODE:
         if DRIFT_EXCHANGE == "jupiter":
-            _close_jupiter_perp_position(market, pos["side"], pos["size"])
+            ok = _close_jupiter_perp_position(market, pos["side"], pos["size"])
+            if not ok:
+                log("err", f"Exchange close FAILED — position kept open locally, will retry", market)
+                return
+
+    with _state_lock:
+        _positions.pop(market, None)
 
     if pos["side"] == "long":
         pnl_pct = (exit_price - pos["entry"]) / pos["entry"]
