@@ -573,8 +573,8 @@ def _reset_daily_if_needed():
             _daily_trades  = 0
             _daily_wins    = 0
             _daily_losses  = 0
-            _pause_until   = 0.0
             _daily_cap_notified = False
+            # _pause_until intentionally NOT reset here — pause survives day rollover
             _day_start_cap = capital  # snapshot for daily loss % guard
             limit = daily_trade_limit()
             with capital_lock:
@@ -4081,6 +4081,7 @@ def status():
       <div class="lbl">Scanner</div>
       <div class="val" style="color:{scan_c};font-size:1.4rem">{scan_t}</div>
       <div class="sub">{'Looking for entries' if scan_t=='SCANNING' else f'Resumes {time.strftime("%H:%M", time.localtime(_pause_until))}' if paused else 'Capital too low'}</div>
+      <button id="pause-btn" onclick="togglePause()" style="margin-top:8px;padding:5px 14px;border-radius:4px;border:1px solid {'#fbbf24' if not paused else '#4ade80'};background:transparent;color:{'#fbbf24' if not paused else '#4ade80'};font-size:0.72rem;font-weight:700;letter-spacing:.06em;cursor:pointer">{'⏸ PAUSE' if not paused else '▶ RESUME'}</button>
     </div>
     <div class="stat">
       <div class="lbl">Daily Drawdown</div>
@@ -4142,7 +4143,33 @@ function refreshStatus(){{
     if(d.sol_price) document.getElementById('sol-price').textContent='$'+d.sol_price.toLocaleString();
     const ntEl=document.getElementById('next-tune');
     if(ntEl && d.next_tune_str) ntEl.textContent=d.next_tune_str;
+    const btn=document.getElementById('pause-btn');
+    if(btn && d.scanning!==undefined){{
+      const paused=!d.scanning;
+      btn.textContent=paused?'▶ RESUME':'⏸ PAUSE';
+      btn.style.color=paused?'#4ade80':'#fbbf24';
+      btn.style.borderColor=paused?'#4ade80':'#fbbf24';
+    }}
   }}).catch(()=>{{}});
+}}
+async function togglePause(){{
+  const btn=document.getElementById('pause-btn');
+  const isPaused=btn.textContent.includes('RESUME');
+  btn.disabled=true;
+  btn.textContent='...';
+  try{{
+    const secret=localStorage.getItem('api_secret')||'';
+    const url=isPaused?'/admin/resume':'/admin/pause';
+    const r=await fetch(url,{{method:'POST',headers:{{'X-API-Key':secret,'Content-Type':'application/json'}},body:JSON.stringify({{hours:24}})}});
+    const d=await r.json();
+    if(r.status===401){{
+      const key=prompt('Enter API secret:');
+      if(key){{ localStorage.setItem('api_secret',key); togglePause(); return; }}
+    }}
+    if(!d.ok) alert(d.error||'Failed');
+  }} catch(e){{ alert('Error: '+e); }}
+  btn.disabled=false;
+  refreshStatus();
 }}
 refreshStatus();
 setInterval(refreshStatus,5000);
@@ -5022,16 +5049,31 @@ def admin_reset_all():
     log("ok", f"FULL RESET — capital=${STARTING_CAPITAL:.2f}, all history wiped")
     return jsonify({"ok": True, "msg": f"Full reset — capital restored to ${STARTING_CAPITAL:.2f}. Reload the page."})
 
+def _persist_pause(until_ts: float):
+    """Write pause timestamp to Redis so it survives restarts and daily resets."""
+    global _pause_until
+    _pause_until = until_ts
+    redis_save("bot_pause_until", until_ts)
+    _save_daily_state()
+
+def _load_pause():
+    """Restore pause state from Redis on startup."""
+    global _pause_until
+    val = _redis_cmd("GET", "bot_pause_until")
+    if val and val.get("result"):
+        try:
+            _pause_until = float(val["result"])
+        except (TypeError, ValueError):
+            _pause_until = 0.0
+
 @app.route("/admin/pause", methods=["POST"])
 def admin_pause():
     denied = _auth_required()
     if denied: return denied
-    global _pause_until
     hours = 24.0
     if request.is_json and request.json:
         hours = float(request.json.get("hours", 24))
-    _pause_until = time.time() + hours * 3600
-    _save_daily_state()
+    _persist_pause(time.time() + hours * 3600)
     until_str = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(_pause_until))
     log("warn", f"Scanner PAUSED for {hours:.0f}h (until {until_str}) via admin")
     return jsonify({"ok": True, "msg": f"Scanner paused for {hours:.0f}h until {until_str}"})
@@ -5040,9 +5082,7 @@ def admin_pause():
 def admin_resume():
     denied = _auth_required()
     if denied: return denied
-    global _pause_until
-    _pause_until = 0.0
-    _save_daily_state()
+    _persist_pause(0.0)
     log("ok", "Scanner RESUMED via admin endpoint")
     return jsonify({"ok": True, "msg": "Scanner resumed"})
 
@@ -7948,6 +7988,7 @@ if __name__ == "__main__":
         log("warn", "WALLET/WALLET_PRIVATE_KEY not set — PAPER mode")
 
     _load_daily_state()
+    _load_pause()
     if not REDIS_URL or not REDIS_TOKEN:
         log("warn", "⚠️  No Redis configured — capital saved to /tmp only (wiped on redeploy). "
             "Set UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN in Railway for safe persistence.")
