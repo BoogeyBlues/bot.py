@@ -3663,6 +3663,30 @@ async function pollStats(){{
 }}
 pollStats();
 setInterval(pollStats,5000);
+function _getKey(){{return localStorage.getItem('api_secret')||'';}}
+function _setKey(k){{localStorage.setItem('api_secret',k||'');}}
+async function adminPost(url,body,confirmMsg){{
+  if(confirmMsg&&!confirm(confirmMsg))return;
+  var s=_getKey();
+  if(!s){{s=prompt('API secret:');if(!s)return;_setKey(s);}}
+  var r=await fetch(url,{{method:'POST',headers:{{'X-API-Key':s,'Content-Type':'application/json'}},body:JSON.stringify(body)}});
+  var d=await r.json();
+  if(r.status===401){{
+    var k=prompt('Wrong API secret — enter correct key:');
+    if(!k)return;_setKey(k);
+    return adminPost(url,body,null);
+  }}
+  alert(d.msg||d.error||'Done');
+  pollStats();
+}}
+async function togglePause(){{
+  const btn=document.getElementById('pause-btn');
+  const isPaused=btn.textContent.includes('RESUME');
+  btn.disabled=true;btn.textContent='...';
+  try{{await adminPost(isPaused?'/admin/resume':'/admin/pause',{{hours:24}},null);}}
+  catch(e){{alert('Error: '+e);}}
+  btn.disabled=false;pollStats();
+}}
 </script>
 </body></html>"""
     return html, 200
