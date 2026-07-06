@@ -4902,6 +4902,26 @@ def admin_reset_all():
     log("ok", f"FULL RESET — capital=${STARTING_CAPITAL:.2f}, all history wiped")
     return jsonify({"ok": True, "msg": f"Full reset — capital restored to ${STARTING_CAPITAL:.2f}. Reload the page."})
 
+@app.route("/admin/pause", methods=["POST"])
+def admin_pause():
+    global _pause_until
+    hours = 24.0
+    if request.is_json and request.json:
+        hours = float(request.json.get("hours", 24))
+    _pause_until = time.time() + hours * 3600
+    _save_daily_state()
+    until_str = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(_pause_until))
+    log("warn", f"Scanner PAUSED for {hours:.0f}h (until {until_str}) via admin")
+    return jsonify({"ok": True, "msg": f"Scanner paused for {hours:.0f}h until {until_str}"})
+
+@app.route("/admin/resume", methods=["POST"])
+def admin_resume():
+    global _pause_until
+    _pause_until = 0.0
+    _save_daily_state()
+    log("ok", "Scanner RESUMED via admin endpoint")
+    return jsonify({"ok": True, "msg": "Scanner resumed"})
+
 @app.route("/log", methods=["GET"])
 def get_log():
     return jsonify({"logs": trade_log[-100:]})
