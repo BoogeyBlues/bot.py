@@ -3139,7 +3139,7 @@ def _home_inner():
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>{BOT_NAME}</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <style>
@@ -3150,7 +3150,7 @@ def _home_inner():
     --surface2:#16162a;--border:#ffffff0d;--text:#e8e8f0;--muted:#5a5a7a;
   }}
   body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;
-    min-height:100vh;overflow-x:hidden}}
+    min-height:100vh;overflow-x:hidden;max-width:900px;margin:0 auto}}
 
   /* animated starfield */
   body::before{{content:'';position:fixed;inset:0;
@@ -3158,7 +3158,7 @@ def _home_inner():
                radial-gradient(ellipse at 80% 20%,#0a1a3a22 0%,transparent 60%);
     pointer-events:none;z-index:0}}
 
-  .wrap{{max-width:900px;margin:0 auto;padding:20px 16px;position:relative}}
+  .wrap{{padding:20px 16px;position:relative}}
 
   /* HEADER */
   header{{text-align:center;padding:16px 0 24px;position:relative}}
@@ -3191,6 +3191,7 @@ def _home_inner():
   /* STAT CARDS */
   .cards{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:20px}}
   @media(max-width:540px){{.cards{{grid-template-columns:1fr 1fr}}}}
+  @media(max-width:360px){{.cards{{grid-template-columns:1fr}}}}
   .card{{background:var(--surface);border:1px solid var(--border);border-radius:16px;
     padding:16px 14px;position:relative;overflow:hidden;transition:transform .2s}}
   .card:hover{{transform:translateY(-2px)}}
@@ -3239,7 +3240,8 @@ def _home_inner():
   .ms.hit{{color:var(--gold);border-color:#f5c54240;background:#f5c54210}}
 
   /* TABLE */
-  table{{width:100%;border-collapse:collapse;font-size:.78rem}}
+  .tbl-wrap{{overflow-x:auto;-webkit-overflow-scrolling:touch}}
+  table{{width:100%;border-collapse:collapse;font-size:.78rem;min-width:420px}}
   thead tr{{border-bottom:1px solid var(--border)}}
   th{{padding:8px 10px;color:var(--muted);font-weight:600;
     font-size:.68rem;text-transform:uppercase;letter-spacing:.06em;text-align:left}}
@@ -3262,6 +3264,7 @@ def _home_inner():
   .btn{{padding:10px 18px;border-radius:10px;font-size:.78rem;font-weight:600;
     text-decoration:none;border:1px solid;cursor:pointer;transition:all .2s;
     display:inline-flex;align-items:center;gap:6px;letter-spacing:.02em}}
+  @media(max-width:480px){{.actions{{gap:6px}}.btn{{padding:8px 12px;font-size:.72rem}}}}
   .btn-gold{{background:linear-gradient(135deg,#f5c542,#e8a800);
     color:#000;border-color:#f5c542;box-shadow:0 0 20px #f5c54240}}
   .btn-gold:hover{{box-shadow:0 0 30px #f5c54260;transform:translateY(-1px)}}
@@ -3368,10 +3371,10 @@ def _home_inner():
   {"" if not open_list else f'''
   <div class="section">
     <div class="section-hdr"><h2>⚡ Open Trades ({len(open_list)})</h2></div>
-    <table>
+    <div class="tbl-wrap"><table>
       <thead><tr><th>Symbol</th><th>Strategy</th><th>Size</th><th>Bond In</th><th>Held</th></tr></thead>
       <tbody>{open_rows}</tbody>
-    </table>
+    </table></div>
   </div>'''}
 
   <div class="section">
@@ -3379,10 +3382,10 @@ def _home_inner():
       <h2>📋 Recent Trades</h2>
       <a href="/trades">View All →</a>
     </div>
-    <table>
+    <div class="tbl-wrap"><table>
       <thead><tr><th>Strategy</th><th>Symbol</th><th>PnL</th><th>Exit</th><th>Hold</th><th>Time</th></tr></thead>
       <tbody>{rows if rows else '<tr><td colspan="6" class="empty">No trades yet — bot is scanning...</td></tr>'}</tbody>
-    </table>
+    </table></div>
   </div>
 
   <footer>
