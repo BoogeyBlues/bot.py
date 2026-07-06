@@ -1575,7 +1575,7 @@ def home():
         f'<button class="trade-btn btn-long" onclick="manualTrade(\'{mk}\',\'long\')">LONG</button>'
         f'<button class="trade-btn btn-short" onclick="manualTrade(\'{mk}\',\'short\')">SHORT</button>'
         f'</div>'
-        for mk in markets_list
+        for mk in ["SOL", "ETH", "BTC"]
     )
 
     return f"""<!DOCTYPE html>
@@ -1651,7 +1651,7 @@ nav{{position:sticky;top:0;z-index:100;background:rgba(5,10,20,.92);backdrop-fil
 .stat-val{{font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:1px;color:var(--cyan)}}
 
 /* SECTION HEADER */
-.section-header{{font-family:'Bebas Neue',sans-serif;font-size:16px;letter-spacing:3px;color:var(--text);margin:20px 0 10px;position:relative;overflow:hidden}}
+.section-header{{font-family:'Bebas Neue',sans-serif;font-size:16px;letter-spacing:3px;color:var(--text);margin:12px 0 8px;position:relative;overflow:hidden}}
 .scan-bar{{position:absolute;top:0;left:-40%;width:40%;height:100%;background:linear-gradient(90deg,transparent,rgba(0,229,255,.35),transparent);animation:scanBar 4s ease-in-out infinite}}
 @keyframes scanBar{{0%{{left:-40%}}100%{{left:140%}}}}
 
@@ -1705,7 +1705,6 @@ nav{{position:sticky;top:0;z-index:100;background:rgba(5,10,20,.92);backdrop-fil
 .market-row:nth-child(1){{animation:slideLeft .5s ease forwards .2s}}
 .market-row:nth-child(2){{animation:slideLeft .5s ease forwards .35s}}
 .market-row:nth-child(3){{animation:slideLeft .5s ease forwards .5s}}
-.market-row:nth-child(4){{animation:slideLeft .5s ease forwards .65s}}
 @keyframes slideLeft{{to{{opacity:1;transform:translateX(0)}}}}
 .market-label{{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;color:var(--text);width:36px;flex-shrink:0}}
 .trade-btn{{flex:1;padding:9px 0;border:none;border-radius:8px;font-family:'Bebas Neue',sans-serif;font-size:15px;letter-spacing:2px;cursor:pointer;position:relative;overflow:hidden;transition:transform .15s}}
@@ -1726,7 +1725,7 @@ nav{{position:sticky;top:0;z-index:100;background:rgba(5,10,20,.92);backdrop-fil
 .feed-cursor{{display:inline-block;width:6px;height:.85em;background:var(--muted);margin-left:2px;vertical-align:text-bottom;animation:blinkCur .8s step-end infinite}}
 @keyframes blinkCur{{0%,100%{{opacity:1}}50%{{opacity:0}}}}
 
-footer{{text-align:center;padding:20px 16px 40px;font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:2px;color:var(--muted);opacity:0;animation:fadeIn .6s ease forwards 1.5s;line-height:1.8}}
+footer{{text-align:center;padding:16px 16px 20px;font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:2px;color:var(--muted);opacity:0;animation:fadeIn .6s ease forwards 1.5s;line-height:1.8}}
 footer a{{color:var(--cyan);text-decoration:none}}
 ::-webkit-scrollbar{{width:4px}}
 ::-webkit-scrollbar-thumb{{background:var(--muted);border-radius:4px}}
@@ -1745,9 +1744,6 @@ footer a{{color:var(--cyan);text-decoration:none}}
   .section-header{{font-size:18px;letter-spacing:4px}}
   .pos-pnl{{font-size:16px}}
   .feed-entry{{font-size:11px;padding:9px 14px}}
-  .market-row:nth-child(5){{animation:slideLeft .5s ease forwards .8s}}
-  .market-row:nth-child(6){{animation:slideLeft .5s ease forwards .95s}}
-  .market-row:nth-child(7){{animation:slideLeft .5s ease forwards 1.1s}}
   .trade-btn{{font-size:17px;padding:11px 0}}
   footer{{font-size:11px}}
 }}
@@ -1832,7 +1828,7 @@ footer a{{color:var(--cyan);text-decoration:none}}
     <div class="milestones">{milestone_html}</div>
 
     <!-- MANUAL TRADING -->
-    <div class="section-header" style="margin-top:20px">MANUAL TRADE<div class="scan-bar"></div></div>
+    <div class="section-header">MANUAL TRADE<div class="scan-bar"></div></div>
     <div id="market-rows">{market_rows}</div>
     <button class="reset-btn" onclick="resetCapital()">⟳ RESET CAPITAL TO ${STARTING_CAPITAL:.0f}</button>
 
