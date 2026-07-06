@@ -2077,19 +2077,22 @@ def monitor_loop():
                     exit_trade(mint, price, "BUNDLE_TP", bond)
                     continue
     
-                # Dead pair: zero bond movement since entry — no volume at all
-                bond_moved = bond_last_moved > trade["opened_at"] + 5
-                if not bond_moved and elapsed >= DEAD_PAIR_SECS:
-                    log("warn", f"Dead pair — no volume in {elapsed:.0f}s — exiting", symbol)
-                    exit_trade(mint, price, "DEAD", bond)
-                    continue
+                # Dead pair / volume stale — bonding curve strategies only
+                # Copy, fast, migrate, spike trade on Raydium where bond never moves
+                if strategy in ("bond", "bundle", "trench"):
+                    bond_moved = bond_last_moved > trade["opened_at"] + 5
+                    if not bond_moved and elapsed >= DEAD_PAIR_SECS:
+                        log("warn", f"Dead pair — no volume in {elapsed:.0f}s — exiting", symbol)
+                        exit_trade(mint, price, "DEAD", bond)
+                        continue
 
-                # Volume stale: had movement but stalled — 60s of no bond activity
-                stale_secs = time.time() - bond_last_moved
-                if bond_moved and stale_secs >= VOL_STALE_SECS:
-                    log("warn", f"Volume stale {stale_secs:.0f}s — exiting", symbol)
-                    exit_trade(mint, price, "STALE", bond)
-                    continue
+                    stale_secs = time.time() - bond_last_moved
+                    if bond_moved and stale_secs >= VOL_STALE_SECS:
+                        log("warn", f"Volume stale {stale_secs:.0f}s — exiting", symbol)
+                        exit_trade(mint, price, "STALE", bond)
+                        continue
+                else:
+                    stale_secs = time.time() - bond_last_moved
 
                 # Slow stale: fallback for bond/bundle — bond hasn't moved in BOND_STALE_SECS
                 if strategy in ("bond", "bundle") and elapsed > 30 and stale_secs >= BOND_STALE_SECS:
