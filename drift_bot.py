@@ -54,7 +54,6 @@ _log_lock      = threading.Lock()
 _notify_queue  = []
 _notify_q_lock = threading.Lock()
 _notify_log    = []   # last 50 messages sent (same text as Telegram)
-_signals_cache     = {}   # market -> {signal, ts}
 _st_prev           = {}   # market -> previous supertrend bullish state (for flip detection)
 _market_stats      = {}   # market -> {wins, losses, long_wins, short_wins, long_total, short_total}
 _market_params     = {}   # tuned per-market: {leverage, bias, paused_until, last_result}
@@ -641,33 +640,6 @@ def _execute_drift_order(market, side, size_usd, leverage) -> bool:
         log("err", f"Drift order failed: {e}")
     return False
 
-def _execute_zeta_order(market, side, size_usd, leverage) -> bool:
-    try:
-        price = get_market_price(market)
-        if not price:
-            log("err", f"Cannot get price for {market} — Zeta order skipped")
-            return False
-        quantity = (size_usd * leverage) / price
-        r = _session.post(
-            "https://dex.zeta.markets/api/v2/order",
-            json={
-                "wallet": WALLET,
-                "market": f"{market.upper()}-PERP",
-                "side": side,
-                "quantity": quantity,
-                "orderType": "market",
-                "privateKey": WALLET_PRIVATE_KEY,
-            },
-            timeout=15
-        )
-        if r.status_code != 200:
-            log("err", f"Zeta order failed: {r.status_code} {r.text[:80]}")
-            return False
-        return True
-    except Exception as e:
-        log("err", f"Zeta order error: {e}")
-    return False
-
 # ── JUPITER PERPS EXECUTION ────────────────────────────────────────
 # Markets: SOL, ETH, BTC only (JLP pool composition)
 _JPERP_PROGRAM   = "PERPHjGBqRHArX4DySjwM6UJHiR3sWAatqfdBS2qQJu"
@@ -967,9 +939,7 @@ def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=N
             return
 
     if not DRIFT_PAPER_MODE:
-        if DRIFT_EXCHANGE == "zeta":
-            ok = _execute_zeta_order(market, side, size_usd, leverage)
-        elif DRIFT_EXCHANGE == "jupiter":
+        if DRIFT_EXCHANGE == "jupiter":
             ok = _execute_jupiter_perp_order(market, side, size_usd, leverage)
         else:
             ok = _execute_drift_order(market, side, size_usd, leverage)
@@ -1340,13 +1310,6 @@ def run_trading_loop():
                         f"SIGNAL {signal.upper()} conf={confidence}/3 lev={market_lev}x "
                         f"margin=${margin:.0f} notional=${size_usd:.0f} "
                         f"SL={sl_pct*100:.2f}% TP={tp_pct*100:.2f}%", market)
-
-                    # Cache signal for display
-                    with _state_lock:
-                        _signals_cache[market] = {
-                            "signal": signal, "confidence": confidence,
-                            "ts": time.strftime("%H:%M:%S"), "price": price,
-                        }
 
                     # Open with ATR-based SL/TP and ATR-based trailing stop
                     open_position(market, signal, price, size_usd, market_lev,
