@@ -24,6 +24,20 @@ def handle_500(e):
     log("warn", f"500 error: {e}\n{tb[:500]}", "FLASK")
     return f"<h1>Internal Server Error</h1><pre style='font-size:12px;color:#aaa'>{str(e)}</pre>", 500
 
+def _auth_required():
+    """Returns a 401 Response if API_SECRET is set and the request doesn't provide it.
+    Check: Authorization: Bearer <secret>  OR  X-API-Key: <secret>
+    Returns None if auth passes, a Response object if it fails."""
+    if not API_SECRET:
+        return None
+    provided = (
+        request.headers.get("X-API-Key", "") or
+        request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    )
+    if provided != API_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+    return None
+
 # ── REDIS PERSISTENCE (Upstash REST) ────────────────────────────
 def _redis_cmd(*args):
     if not REDIS_URL or not REDIS_TOKEN:
@@ -222,6 +236,7 @@ STATE_FILE  = os.path.join(DATA_DIR, "bot_state.json")
 WEEK_FILE   = os.path.join(DATA_DIR, "bot_week.json")
 REDIS_URL   = os.environ.get("UPSTASH_REDIS_REST_URL", "")
 REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
+API_SECRET  = os.environ.get("API_SECRET", "")
 
 MILESTONES = [100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000]
 
@@ -4828,6 +4843,8 @@ setInterval(tickHists,3000);
 
 @app.route("/admin/tune-now", methods=["POST"])
 def admin_tune_now():
+    denied = _auth_required()
+    if denied: return denied
     global TUNE_PAUSED_UNTIL
     with trades_lock:
         history_snap = list(completed_trades)
@@ -4841,6 +4858,8 @@ def admin_tune_now():
 
 @app.route("/admin/reset-daily", methods=["POST"])
 def admin_reset_daily():
+    denied = _auth_required()
+    if denied: return denied
     global _daily_trades, _daily_wins, _daily_losses, _pause_until, _daily_cap_notified
     with _daily_lock:
         _daily_trades        = 0
@@ -4858,6 +4877,8 @@ def admin_reset_daily():
 
 @app.route("/admin/reset-capital", methods=["POST"])
 def admin_reset_capital():
+    denied = _auth_required()
+    if denied: return denied
     global capital
     with capital_lock:
         capital = STARTING_CAPITAL
@@ -4871,6 +4892,8 @@ def admin_reset_capital():
 
 @app.route("/admin/reset-all", methods=["POST"])
 def admin_reset_all():
+    denied = _auth_required()
+    if denied: return denied
     global capital, usdc_locked
     global _daily_trades, _daily_wins, _daily_losses, _pause_until
     global _daily_cap_notified, _week_day_logs, _week_start_date, _milestones_hit
@@ -4918,6 +4941,8 @@ def admin_reset_all():
 
 @app.route("/admin/pause", methods=["POST"])
 def admin_pause():
+    denied = _auth_required()
+    if denied: return denied
     global _pause_until
     hours = 24.0
     if request.is_json and request.json:
@@ -4930,6 +4955,8 @@ def admin_pause():
 
 @app.route("/admin/resume", methods=["POST"])
 def admin_resume():
+    denied = _auth_required()
+    if denied: return denied
     global _pause_until
     _pause_until = 0.0
     _save_daily_state()
