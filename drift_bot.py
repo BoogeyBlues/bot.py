@@ -59,7 +59,8 @@ _notify_log    = []   # last 50 messages sent (same text as Telegram)
 _st_prev           = {}   # market -> previous supertrend bullish state (for flip detection)
 _market_stats      = {}   # market -> {wins, losses, long_wins, short_wins, long_total, short_total}
 _market_params     = {}   # tuned per-market: {leverage, bias, paused_until, last_result}
-_gmgn_signal_cache = {}   # market -> {result, ts} — 5-min TTL to avoid per-tick API calls
+_5m_trend_cache    = {}   # market -> {trend, ts} — 5-min candle bias, 60s TTL
+_liquidity_cache   = {}   # market -> {factor, ts} — OKX spread+volume factor, 30s TTL
 
 _session = requests.Session()
 _session.trust_env = False
@@ -496,10 +497,81 @@ def _get_gmgn_signal(market):
                     elif action in ("sell", "dump"):
                         result = "short"
                     break
+        _5m_trend_cache[market] = {"trend": None, "ts": now}
+        return None
+
+
+def _get_liquidity_factor(market):
+    """
+    Returns a leverage multiplier in [0.70, 1.00] based on two live signals from
+    the OKX perpetual ticker: bid-ask spread and 24-hour USDT volume.
+
+    Tight spread + high volume  → 1.00  (no penalty, full leverage)
+    Wide spread or thin volume  → down to 0.70 (cut leverage up to 30%)
+
+    Result is cached 30 s so one OKX call covers many 5-second loop ticks.
+    Falls back to 1.0 on any network / parse error so it never blocks a trade.
+    """
+    now = time.time()
+    cached = _liquidity_cache.get(market)
+    if cached and now - cached["ts"] < 30:
+        return cached["factor"]
+
+    sym = _OKX_SYM.get(market.upper())
+    if not sym:
+        return 1.0
+    try:
+        r = _session.get(
+            "https://www.okx.com/api/v5/market/ticker",
+            params={"instId": sym},
+            timeout=5,
+        )
+        if r.status_code != 200:
+            return 1.0
+        data = r.json().get("data", [{}])[0]
+        bid      = float(data.get("bidPx",    0))
+        ask      = float(data.get("askPx",    0))
+        vol_usd  = float(data.get("volCcy24h", 0))   # 24 h notional in USDT
+
+        # ── Spread factor ───────────────────────────────────────────
+        # 0.01 % spread → ~0.975  |  0.05 % → ~0.875  |  ≥ 0.12 % → 0.70
+        spread_factor = 1.0
+        if bid > 0 and ask > 0:
+            spread_pct    = (ask - bid) / ((ask + bid) / 2)
+            spread_factor = max(0.70, 1.0 - spread_pct * 250)
+
+        # ── Volume factor ───────────────────────────────────────────
+        # Calibrated to typical OKX-SWAP daily volumes.
+        # Below minimum → 0.70; at or above baseline → 1.00; linear between.
+        _VOL_BASELINE = {"SOL": 1_000_000_000, "ETH": 5_000_000_000, "BTC": 10_000_000_000}
+        _VOL_MIN      = {"SOL":   100_000_000, "ETH":   500_000_000, "BTC":  1_000_000_000}
+        baseline = _VOL_BASELINE.get(market.upper(), 1_000_000_000)
+        minimum  = _VOL_MIN.get(market.upper(),       100_000_000)
+        if vol_usd <= 0:
+            vol_factor = 1.0   # no data — don't penalise
+        elif vol_usd < minimum:
+            vol_factor = 0.70
+        elif vol_usd >= baseline:
+            vol_factor = 1.0
+        else:
+            vol_factor = 0.70 + 0.30 * (vol_usd - minimum) / (baseline - minimum)
+
+        factor = min(spread_factor, vol_factor)
+        _liquidity_cache[market] = {"factor": factor, "ts": now}
+        return factor
     except Exception:
-        pass
-    _gmgn_signal_cache[market] = {"result": result, "ts": time.time()}
-    return result
+        return 1.0
+
+
+def _calc_ema(vals, period):
+    """Proper exponential moving average — weights recent prices more than SMA."""
+    if len(vals) < period:
+        return None
+    k = 2 / (period + 1)
+    ema = sum(vals[:period]) / period  # seed with SMA of first `period` bars
+    for p in vals[period:]:
+        ema = p * k + ema * (1 - k)
+    return ema
 
 def get_signal(market):
     """
@@ -1409,16 +1481,20 @@ def run_trading_loop():
                             f"(sl={sl_pct*100:.2f}% > liq buffer) — skip", market)
                         continue
 
-                    # ── Dynamic leverage: inverse of volatility, clamped to safe range ──
-                    # k=0.10 calibrated for 1-min ATR: gives 65x at ~0.15% per-tick ATR.
-                    # Calm markets (BTC/ETH) → higher leverage; volatile (SOL) → lower.
-                    # Max-confidence signal (fresh flip + GMGN + RSI neutral) gets 15% boost.
+                    # ── Dynamic leverage: volatility + liquidity, clamped to safe range ──
+                    # Volatility (ATR): calm markets get higher leverage; volatile gets lower.
+                    # Liquidity (spread + 24h volume): thin markets get up to 30% haircut.
+                    # Confidence boost: fresh Supertrend flip (conf=3) adds 15%.
                     LEV_K      = 0.10
                     raw_lev    = LEV_K / atr_pct if atr_pct > 0 else DRIFT_LEV_MIN
                     tuned_lev  = mparams.get("leverage", DRIFT_LEVERAGE)
                     raw_lev    = (raw_lev + tuned_lev) / 2
-                    if confidence >= 4:
-                        raw_lev *= 1.15
+                    if confidence >= 3:
+                        raw_lev *= 1.15   # fresh flip = highest conviction, push lev up
+                    liq_mult   = _get_liquidity_factor(market)
+                    raw_lev   *= liq_mult
+                    if liq_mult < 0.95:
+                        log("info", f"Liquidity factor {liq_mult:.2f} — leverage trimmed", market)
                     market_lev = int(max(DRIFT_LEV_MIN, min(DRIFT_LEV_MAX, raw_lev, max_safe_lev)))
                     size_usd   = DRIFT_MARGIN_USD * market_lev
                     margin     = DRIFT_MARGIN_USD
