@@ -2394,10 +2394,12 @@ def copy_trade_loop():
                             if gmgn_smart_money_selling(mint):
                                 log("warn", "SKIP: smart money selling", symbol)
                                 continue
-                        sig_score = gmgn_signal_score(mint)
-                        if sig_score < MIN_SIGNAL_SCORE:
-                            log("info", f"COPY SKIP: sig {sig_score}<{MIN_SIGNAL_SCORE}", symbol)
-                            continue
+                            sig_score = gmgn_signal_score(mint)
+                            if sig_score < MIN_SIGNAL_SCORE:
+                                log("info", f"COPY SKIP: sig {sig_score}<{MIN_SIGNAL_SCORE}", symbol)
+                                continue
+                        else:
+                            sig_score = 0
                         market = get_market_data(mint)
                         if not market or market["price"] <= 0:
                             continue
