@@ -2965,7 +2965,7 @@ def scanner_loop():
                 with _copy_lock:
                     if sig_mint in _copied_mints:
                         continue
-                if time.time() - _sold_mints.get(sig_mint, 0) < 1800:
+                if time.time() - _sold_mints.get(sig_mint, 0) < SOLD_COOLDOWN_SECS:
                     continue
                 if daily_limit_reached():
                     break
@@ -3027,7 +3027,7 @@ def scanner_loop():
                 with _copy_lock:
                     if dsc_mint in _copied_mints:
                         continue
-                if time.time() - _sold_mints.get(dsc_mint, 0) < 1800:
+                if time.time() - _sold_mints.get(dsc_mint, 0) < SOLD_COOLDOWN_SECS:
                     continue
                 if daily_limit_reached():
                     break
@@ -3095,7 +3095,7 @@ def scanner_loop():
                 with _copy_lock:
                     if jup_mint in _copied_mints:
                         continue
-                if time.time() - _sold_mints.get(jup_mint, 0) < 1800:
+                if time.time() - _sold_mints.get(jup_mint, 0) < SOLD_COOLDOWN_SECS:
                     continue
                 if daily_limit_reached():
                     break
