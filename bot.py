@@ -3364,14 +3364,14 @@ def _home_inner():
       <div id="h-pnl-sub" class="sub">{total} trades closed</div>
     </div>
     <div class="card">
-      <div class="lbl">Win Rate</div>
+      <div class="lbl">Win Rate <span style="font-size:.6rem;letter-spacing:.06em;color:var(--muted);font-weight:500">ALL TIME</span></div>
       <div id="h-wr" class="val {'green' if wr>=50 else 'red'}">{wr}%</div>
       <div id="h-wr-sub" class="sub">{len(wins)}W &nbsp;/&nbsp; {total-len(wins)}L</div>
     </div>
     <div class="card">
-      <div class="lbl">Trade Size</div>
+      <div class="lbl">Trade Size <span style="font-size:.6rem;letter-spacing:.06em;color:var(--muted);font-weight:500">TODAY</span></div>
       <div id="h-size" class="val blue">${trade_size():.2f}</div>
-      <div class="sub">{pct*100:.0f}% tier · {_daily_trades}/{limit} today</div>
+      <div id="h-size-sub" class="sub">{_daily_wins}W {_daily_losses}L · {_daily_trades}/{limit}</div>
     </div>
     <div class="card">
       <div class="lbl">Open Trades</div>
@@ -3610,6 +3610,8 @@ async function pollStats(){{
     if(wrSub) wrSub.innerHTML=d.wins+'W &nbsp;/&nbsp; '+d.losses+'L';
     const sizeEl=document.getElementById('h-size');
     if(sizeEl) sizeEl.textContent='$'+d.trade_size.toFixed(2);
+    const sizeSubEl=document.getElementById('h-size-sub');
+    if(sizeSubEl&&d.today) sizeSubEl.textContent=d.today.wins+'W '+d.today.losses+'L · '+d.today.trades+'/'+(d.daily_limit||9999);
     const openEl=document.getElementById('h-open');
     if(openEl) openEl.innerHTML=d.open_trades+'<span style="font-size:1rem;font-weight:500;color:var(--muted)">'+'/'+d.max_open+'</span>';
     const openSub=document.getElementById('h-open-sub');
@@ -3748,14 +3750,14 @@ def _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
   </div>
   <div class="grid">
     <div class="stat">
-      <div class="lbl">Win Rate</div>
+      <div class="lbl">Win Rate <span style="font-size:.6rem;opacity:.5;letter-spacing:.05em">ALL TIME</span></div>
       <div id="pk-wr" class="val" style="color:{wr_color}">{wr}%</div>
       <div id="pk-wr-sub" class="sub">{len(wins)}W / {total-len(wins)}L</div>
     </div>
     <div class="stat">
-      <div class="lbl">Trade Size</div>
+      <div class="lbl">Trade Size <span style="font-size:.6rem;opacity:.5;letter-spacing:.05em">TODAY</span></div>
       <div id="pk-size" class="val cyan">${trade_size():.2f}</div>
-      <div class="sub">{pct*100:.0f}% tier</div>
+      <div id="pk-size-sub" class="sub">{_daily_wins}W {_daily_losses}L · {_daily_trades}/{_cap_tier(cap)[1]}</div>
     </div>
     <div class="stat">
       <div class="lbl">Open Now</div>
@@ -3857,6 +3859,8 @@ async function pollPunk(){{
     if(wrSub) wrSub.textContent=d.wins+'W / '+d.losses+'L';
     const sizeEl=document.getElementById('pk-size');
     if(sizeEl) sizeEl.textContent='$'+d.trade_size.toFixed(2);
+    const pkSizeSub=document.getElementById('pk-size-sub');
+    if(pkSizeSub&&d.today) pkSizeSub.textContent=d.today.wins+'W '+d.today.losses+'L · '+d.today.trades+'/'+(d.daily_limit||9999);
     const openEl=document.getElementById('pk-open');
     if(openEl) openEl.innerHTML=d.open_trades+'<span style="font-size:1.1rem;color:#888">/{MAX_OPEN}</span>';
     const openSub=document.getElementById('pk-open-sub');
@@ -3898,6 +3902,7 @@ def status_api():
         "sol_price":    round(sol_price, 2) if sol_price else None,
         "next_tune_str": next_tune_str,
         "scanning":     scan_active and _pause_until <= time.time(),
+        "daily_limit":  _cap_tier(cap)[1],
         "today": {"trades": _daily_trades, "wins": _daily_wins, "losses": _daily_losses,
                   "paused_until": time.strftime("%H:%M", time.localtime(_pause_until)) if _pause_until > time.time() else None},
     })
