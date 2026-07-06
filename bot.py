@@ -1066,6 +1066,7 @@ def get_recently_graduated():
                         "symbol":   coin.get("symbol", mint[:8]),
                         "dev":      coin.get("creator", ""),
                         "grad_age": int(age_secs),
+                        "replies":  int(coin.get("reply_count", 0) or coin.get("replies", 0) or 0),
                     })
             if recent:
                 log("info", f"Migration scan: {len(recent)} recently graduated", "GRAD")
@@ -2586,6 +2587,8 @@ def _eval_coin(coin):
     created_at = coin.get("created_at", 0)
     age_h = (time.time() - created_at / 1000) / 3600 if created_at > 0 else 0
     if age_h >= SPIKE_MIN_AGE_H:
+        if int(coin.get("replies", 0) or 0) < MIN_REPLIES:
+            return None
         market = get_market_data(mint)
         if not market or not market.get("pair_address") or market["price"] <= 0:
             return None
@@ -2733,7 +2736,7 @@ def scanner_loop():
                 continue
 
             # Scan summary counters for diagnostics
-            n_social = n_replies = n_bond_range = n_spike_range = 0
+            n_social = n_active = n_bond_range = n_spike_range = 0
 
             # ── Phase 1: cheap pre-filter (no I/O) ────────────────────
             with trades_lock:
@@ -2753,15 +2756,11 @@ def scanner_loop():
                     _log_scan(symbol, mint, bond, social_count, "social", 0, f"ONLY {social_count}/1 SOCIALS")
                     continue
                 n_social += 1
-                replies = int(coin.get("replies", 0) or 0)
-                if replies < MIN_REPLIES:
-                    _log_scan(symbol, mint, bond, sum([bool(coin.get("twitter")), bool(coin.get("telegram")), bool(coin.get("website"))]), "social", 0, f"REPLIES {replies}<{MIN_REPLIES}")
-                    continue
                 last_trade = coin.get("last_trade", 0)
                 if last_trade > 0 and time.time() - last_trade / 1000 > 300:
                     _log_scan(symbol, mint, bond, social_count, "active", 1, "LAST TRADE >5MIN")
                     continue
-                n_replies += 1
+                n_active += 1
 
                 # ── Bundle ride — handled inline (special path) ────────
                 if BUNDLE_MODE == "ride" and 0 < bond < 75:
@@ -2853,11 +2852,11 @@ def scanner_loop():
 
             log("info",
                 f"Filter summary: {len(coins)} coins | "
-                f"{n_social} have-social | {n_replies} active<5m | "
+                f"{n_social} have-social | {n_active} active<5m | "
                 f"{n_bond_range} in bond range | {n_spike_range} dormant")
             if n_social == 0:
                 log("warn", "0 coins have Twitter or Telegram — market may be slow")
-            elif n_replies == 0:
+            elif n_active == 0:
                 log("warn", f"{n_social} coins have socials but none traded in last 5 min")
 
             # ── Migration Bounce Scan ────────────────────────────────
@@ -2874,6 +2873,9 @@ def scanner_loop():
                     if gmint in _copied_mints:
                         continue
                 if gmint in blacklisted_mints or daily_limit_reached():
+                    continue
+                if gc.get("replies", 0) < MIN_REPLIES:
+                    log("info", f"MIGRATION SKIP: replies {gc.get('replies',0)}<{MIN_REPLIES}", gc["symbol"])
                     continue
                 market = get_market_data(gmint)
                 if not market or market["price"] <= 0 or market["liq"] < MIN_LIQ:
