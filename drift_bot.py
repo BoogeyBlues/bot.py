@@ -1,4 +1,4 @@
-import os, time, threading, requests, json, hmac, hashlib
+import os, time, threading, requests, json
 from collections import deque
 from flask import Flask, jsonify, request as flask_request
 
@@ -15,6 +15,7 @@ DRIFT_MAX_OPEN     = int(os.environ.get("DRIFT_MAX_OPEN", "5"))
 DRIFT_TP_PCT       = float(os.environ.get("DRIFT_TP_PCT", "0.20"))
 DRIFT_SL_PCT       = float(os.environ.get("DRIFT_SL_PCT", "0.05"))
 DRIFT_TRAIL_PCT    = float(os.environ.get("DRIFT_TRAIL_PCT", "0.05"))
+DRIFT_DAILY_LOSS_CAP = float(os.environ.get("DRIFT_DAILY_LOSS_CAP", "200"))  # stop day if down $200
 DRIFT_BOT_NAME     = os.environ.get("DRIFT_BOT_NAME", "Drift Sniper")
 DRIFT_PORT         = int(os.environ.get("DRIFT_PORT", "5001"))
 WALLET             = os.environ.get("WALLET", "")
@@ -33,9 +34,6 @@ DRIFT_COMPOUND_PCT = float(os.environ.get("DRIFT_COMPOUND_PCT", "0.10"))  # % of
 DRIFT_MAX_HOLD_MINUTES = int(os.environ.get("DRIFT_MAX_HOLD_MINUTES", "30"))  # force-exit after N minutes
 REDIS_URL          = os.environ.get("UPSTASH_REDIS_REST_URL", "")
 REDIS_TOKEN        = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
-BYBIT_API_KEY      = os.environ.get("BYBIT_API_KEY", "")
-BYBIT_API_SECRET   = os.environ.get("BYBIT_API_SECRET", "")
-BYBIT_BASE_URL     = "https://api.bybit.com"
 
 # ── MARKETS — sanitize at startup ─────────────────────────────────
 # Deduplicate whatever is in the env var, then restrict to Jupiter-supported
@@ -206,7 +204,7 @@ def _notify_worker():
         else:
             time.sleep(0.2)
 
-# ── PRICE FEEDS (Pyth primary → OKX fallback → Bybit last resort) ─────────────
+# ── PRICE FEEDS (Pyth primary → OKX fallback → Binance last resort) ──────────
 # Pyth Network feed IDs — the same oracle Drift Protocol uses for settlement.
 # Verified via https://hermes.pyth.network/v2/price_feeds
 _PYTH_FEEDS = {
@@ -249,9 +247,9 @@ _OKX_SYM = {
     "PYTH":   "PYTH-USDT-SWAP", "SHIB":   "SHIB-USDT-SWAP",
 }
 
-# Bybit last-resort fallback (spot, same symbol convention as OKX minus -SWAP)
-_BYBIT_SYM = {k: v.replace("-USDT-SWAP", "USDT") for k, v in _OKX_SYM.items()}
-_BYBIT_SYM["RNDR"] = "RNDRUSDT"   # Bybit uses RNDR, not RENDER
+# Binance last-resort fallback (spot, no API key needed)
+_BINANCE_SYM = {k: v.replace("-USDT-SWAP", "USDT") for k, v in _OKX_SYM.items()}
+_BINANCE_SYM["RNDR"] = "RNDRUSDT"
 
 # Per-market price cache: {market: (price, fetched_at)}
 _price_cache      = {}
@@ -314,23 +312,21 @@ def _fetch_all_prices_okx(markets):
     except Exception:
         return {}
 
-def _fetch_price_bybit(market):
-    """Last-resort single-market Bybit fetch."""
-    sym = _BYBIT_SYM.get(market.upper())
+def _fetch_price_binance(market):
+    """Last-resort single-market Binance spot fetch (no API key required)."""
+    sym = _BINANCE_SYM.get(market.upper())
     if not sym:
         return None
     try:
         r = _session.get(
-            "https://api.bybit.com/v5/market/tickers",
-            params={"category": "spot", "symbol": sym},
+            "https://api.binance.com/api/v3/ticker/price",
+            params={"symbol": sym},
             timeout=8
         )
         if r.status_code == 200:
-            items = r.json().get("result", {}).get("list", [])
-            if items:
-                price = float(items[0].get("lastPrice", 0))
-                if price > 0:
-                    return price
+            price = float(r.json().get("price", 0))
+            if price > 0:
+                return price
     except Exception:
         pass
     return None
@@ -338,9 +334,9 @@ def _fetch_price_bybit(market):
 def refresh_price_cache(markets):
     """
     Called once per trading loop tick.
-    1. Pyth batch  — one request, all markets with known feed IDs
-    2. OKX batch   — one request for remaining markets (perp mark prices)
-    3. Bybit individual — last resort for anything still missing
+    1. Pyth batch    — one request, all markets with known feed IDs
+    2. OKX batch     — one request for remaining markets (perp mark prices)
+    3. Binance spot  — last resort for anything still missing
     """
     now    = time.time()
     prices = _fetch_all_prices_pyth(markets)
@@ -350,13 +346,13 @@ def refresh_price_cache(markets):
     if missing:
         prices.update(_fetch_all_prices_okx(missing))
 
-    # Bybit for anything still missing
+    # Binance for anything still missing
     still_missing = [m for m in markets if m not in prices]
     for market in still_missing:
-        p = _fetch_price_bybit(market)
+        p = _fetch_price_binance(market)
         if p:
             prices[market] = p
-            log("info", f"Bybit fallback: ${p:.4f}", market)
+            log("info", f"Binance fallback: ${p:.4f}", market)
 
     with _price_cache_lock:
         for market, price in prices.items():
@@ -389,7 +385,7 @@ def _prefetch_price_history(markets):
             log("warn", f"Candle pre-fetch failed: {e}", market)
 
 def get_market_price(market):
-    """Return cached price if fresh, otherwise fetch individually via Pyth → OKX → Bybit."""
+    """Return cached price if fresh, otherwise fetch individually via Pyth → OKX → Binance."""
     market = market.upper()
     with _price_cache_lock:
         cached = _price_cache.get(market)
@@ -417,7 +413,7 @@ def get_market_price(market):
         with _price_cache_lock:
             _price_cache[market] = (price, time.time())
         return price
-    price = _fetch_price_bybit(market)
+    price = _fetch_price_binance(market)
     if price:
         with _price_cache_lock:
             _price_cache[market] = (price, time.time())
@@ -481,37 +477,44 @@ def _supertrend(vals, period=10, mult=3.0):
     return bull[-1], lvl
 
 # ── SIGNAL ENGINE ─────────────────────────────────────────────────
-def _get_gmgn_signal(market):
-    """Fetch smart money signal from GMGN for the underlying asset. Returns 'long', 'short', or None."""
-    if not GMGN_API_KEY:
+def _get_5m_trend(market):
+    """
+    Fetch the 5-minute trend bias from OKX candles. Returns 'long', 'short', or None.
+    Cached for 60 seconds so it's checked once per loop cycle, not per tick.
+    Used as a higher-timeframe filter: if 5m disagrees with 1m signal, skip the trade.
+    """
+    now = time.time()
+    cached = _5m_trend_cache.get(market)
+    if cached and now - cached["ts"] < 60:
+        return cached["trend"]
+
+    sym = _OKX_SYM.get(market.upper())
+    if not sym:
+        _5m_trend_cache[market] = {"trend": None, "ts": now}
         return None
-    cached = _gmgn_signal_cache.get(market)
-    if cached and time.time() - cached["ts"] < 300:
-        return cached["result"]
-    result = None
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json",
-            "Authorization": f"Bearer {GMGN_API_KEY}",
-        }
         r = _session.get(
-            "https://gmgn.ai/defi/quotation/v1/signals/sol",
-            params={"type": "12", "limit": "20"},
-            headers=headers,
-            timeout=8
+            "https://www.okx.com/api/v5/market/candles",
+            params={"instId": sym, "bar": "5m", "limit": "22"},
+            timeout=8,
         )
-        if r.status_code == 200:
-            signals = r.json().get("data", {}).get("signals", [])
-            for s in signals:
-                sym = (s.get("token_symbol") or "").upper()
-                if sym == market.upper():
-                    action = (s.get("action") or "").lower()
-                    if action in ("buy", "accumulate"):
-                        result = "long"
-                    elif action in ("sell", "dump"):
-                        result = "short"
-                    break
+        if r.status_code != 200:
+            _5m_trend_cache[market] = {"trend": None, "ts": now}
+            return None
+        candles = r.json().get("data", [])
+        if len(candles) < 15:
+            _5m_trend_cache[market] = {"trend": None, "ts": now}
+            return None
+        closes = [float(c[4]) for c in reversed(candles)]
+        # EMA-20 on 5m candles ≈ 1h40m of trend
+        k = 2 / (20 + 1)
+        ema = closes[0]
+        for p in closes[1:]:
+            ema = p * k + ema * (1 - k)
+        trend = "long" if closes[-1] > ema else "short"
+        _5m_trend_cache[market] = {"trend": trend, "ts": now}
+        return trend
+    except Exception:
         _5m_trend_cache[market] = {"trend": None, "ts": now}
         return None
 
@@ -588,75 +591,78 @@ def _calc_ema(vals, period):
         ema = p * k + ema * (1 - k)
     return ema
 
+
 def get_signal(market):
     """
-    Research-backed multi-factor signal engine.
+    Multi-factor signal engine. No GMGN — that is exclusively for bot.py (PumpFun sniper).
 
     Entry requires ALL of:
-      - Supertrend (10, 3) bullish/bearish
-      - Price on correct side of EMA-50 (no counter-trend)
-      - RSI-14 between 35-65 (not exhausted, not ranging at extremes)
-      - Market not in dead zone (ATR / price > 0.001 — enough volatility to trade)
+      - Supertrend (10, 3) bullish/bearish on 1m
+      - Price on correct side of EMA-50 (1m) — no counter-trend entries
+      - 5-minute trend agrees with 1m direction — higher-timeframe alignment
+      - RSI-14 not exhausted (hard block >78 long / <22 short)
+      - ATR/price > 0.001 — market must have tradeable volatility
 
-    Confidence score (affects position size):
-      +1 base (Supertrend + EMA agree, RSI not exhausted)
-      +1 if RSI is neutral (35-65) — momentum has room to run
-      +1 if Supertrend just FLIPPED this bar (fresh signal, highest quality)
-      +1 if GMGN smart money actively confirms direction
-      → min to enter: confidence >= 2 (max 4)
+    Confidence score (scales position size):
+      +1 base (ST + EMA agree, RSI not exhausted, 5m aligned)
+      +1 if RSI is neutral 35-65 — momentum has room to run
+      +1 if Supertrend just FLIPPED this bar — fresh, highest-quality entry
+      → max 3; position sizing scales with confidence
 
     Returns (direction, confidence, atr) or (None, 0, None).
     """
     global _st_prev
     with _state_lock:
         prices = list(_price_history.get(market, []))
-    if len(prices) < 55:   # need 50 for EMA + buffer
+    if len(prices) < 55:
         return None, 0, None
     vals = [p for _, p in prices]
 
-    # ── Indicators ────────────────────────────────────────────────
-    ema50     = sum(vals[-50:]) / 50
-    rsi       = _calc_rsi(vals, 14)
-    atr       = _calc_atr(vals, 14)
-    st_bull, st_lvl = _supertrend(vals, 10, 3.0)
+    # ── Indicators (real EMA, not SMA) ────────────────────────────
+    ema50        = _calc_ema(vals, 50)
+    rsi          = _calc_rsi(vals, 14)
+    atr          = _calc_atr(vals, 14)
+    st_bull, _   = _supertrend(vals, 10, 3.0)
 
-    if rsi is None or atr is None or st_bull is None:
+    if ema50 is None or rsi is None or atr is None or st_bull is None:
         return None, 0, None
 
     cur = vals[-1]
 
-    # ── Market regime: must have enough volatility to be worth trading ──
+    # ── Regime: enough volatility to trade ────────────────────────
     atr_pct = atr / cur
-    if atr_pct < 0.001:   # market is frozen / ranging — skip
-        _st_prev[market] = st_bull  # consume flip so it doesn't linger
+    if atr_pct < 0.001:
+        _st_prev[market] = st_bull
         return None, 0, None
 
-    # ── Direction from Supertrend ──────────────────────────────────
     trend = "long" if st_bull else "short"
 
-    # ── Factor 1: EMA-50 trend filter (no counter-trend entries) ──
-    ema_ok = (trend == "long" and cur > ema50) or (trend == "short" and cur < ema50)
-    if not ema_ok:
-        _st_prev[market] = st_bull  # consume flip so stale flip doesn't persist
+    # ── Filter 1: EMA-50 alignment (no counter-trend) ─────────────
+    if not ((trend == "long" and cur > ema50) or (trend == "short" and cur < ema50)):
+        _st_prev[market] = st_bull
         return None, 0, None
 
-    # ── Factor 2: RSI exhaustion check ────────────────────────────
-    # Hard block only on clear exhaustion (overbought long or oversold short).
-    # Mid-range RSI adds a confidence point; extreme-but-not-exhausted passes with lower confidence.
-    rsi_exhausted = (trend == "long" and rsi > 78) or (trend == "short" and rsi < 22)
-    if rsi_exhausted:
+    # ── Filter 2: 5-minute higher-timeframe must agree ────────────
+    trend_5m = _get_5m_trend(market)
+    if trend_5m and trend_5m != trend:
+        log("info", f"5m={trend_5m} vs 1m={trend} — skip counter-trend entry", market)
+        _st_prev[market] = st_bull
+        return None, 0, None
+
+    # ── Filter 3: RSI exhaustion hard block ───────────────────────
+    if (trend == "long" and rsi > 78) or (trend == "short" and rsi < 22):
         _st_prev[market] = st_bull
         return None, 0, None
 
     # ── Confidence scoring ─────────────────────────────────────────
-    confidence = 1  # base: ST + EMA agree and RSI not exhausted
+    confidence = 1  # base: all filters passed
     if 35 < rsi < 65:
-        confidence += 1  # RSI in neutral zone — momentum has room to run
+        confidence += 1  # RSI neutral — momentum has room
 
-    prev_bull = _st_prev.get(market)
+    prev_bull    = _st_prev.get(market)
     just_flipped = prev_bull is not None and prev_bull != st_bull
     if just_flipped:
-        confidence += 1  # fresh flip = highest quality entry
+        confidence += 1  # fresh Supertrend flip — highest quality entry
 
     _st_prev[market] = st_bull
 
@@ -711,87 +717,6 @@ def _execute_drift_order(market, side, size_usd, leverage) -> bool:
     except Exception as e:
         log("err", f"Drift order failed: {e}")
     return False
-
-# ── BYBIT EXECUTION ──────────────────────────────────────────────
-def _bybit_headers(ts, body_str):
-    recv = "5000"
-    sig  = hmac.new(BYBIT_API_SECRET.encode(),
-                    f"{ts}{BYBIT_API_KEY}{recv}{body_str}".encode(),
-                    hashlib.sha256).hexdigest()
-    return {
-        "X-BAPI-API-KEY":     BYBIT_API_KEY,
-        "X-BAPI-SIGN":        sig,
-        "X-BAPI-SIGN-TYPE":   "2",
-        "X-BAPI-TIMESTAMP":   ts,
-        "X-BAPI-RECV-WINDOW": recv,
-        "Content-Type":       "application/json",
-    }
-
-def _bybit_qty(price, size_usd):
-    qty = size_usd / price
-    if price >= 100:
-        return round(qty, 3)
-    if price >= 1:
-        return round(qty, 1)
-    if price >= 0.001:
-        return int(qty)
-    return int(qty / 1000) * 1000  # PEPE/BONK — nearest thousand
-
-def _execute_bybit_order(market, side, size_usd, leverage) -> bool:
-    if not BYBIT_API_KEY or not BYBIT_API_SECRET:
-        log("err", "BYBIT_API_KEY / BYBIT_API_SECRET not set")
-        return False
-    symbol = _BYBIT_SYM.get(market.upper())
-    if not symbol:
-        log("err", f"No Bybit symbol for {market}")
-        return False
-    price = get_market_price(market)
-    if not price:
-        log("err", f"Cannot get price for {market}")
-        return False
-    qty = _bybit_qty(price, size_usd)
-    # set leverage (non-fatal)
-    ts       = str(int(time.time() * 1000))
-    lev_body = json.dumps({"category": "linear", "symbol": symbol,
-                            "buyLeverage": str(int(leverage)),
-                            "sellLeverage": str(int(leverage))})
-    try:
-        _session.post(f"{BYBIT_BASE_URL}/v5/position/set-leverage",
-                      headers=_bybit_headers(ts, lev_body),
-                      data=lev_body, timeout=10)
-    except Exception:
-        pass
-    # place market order
-    ts         = str(int(time.time() * 1000))
-    order_body = json.dumps({"category": "linear", "symbol": symbol,
-                              "side": "Buy" if side == "long" else "Sell",
-                              "orderType": "Market", "qty": str(qty)})
-    r    = _session.post(f"{BYBIT_BASE_URL}/v5/order/create",
-                         headers=_bybit_headers(ts, order_body),
-                         data=order_body, timeout=15)
-    data = r.json()
-    if data.get("retCode") != 0:
-        log("err", f"Bybit order failed: {data.get('retMsg')} [{data.get('retCode')}]", market)
-        return False
-    log("ok", f"Bybit {side} {market} qty={qty} orderId={data['result'].get('orderId','')[:16]}", market)
-    return True
-
-def _close_bybit_position(market, side) -> bool:
-    symbol = _BYBIT_SYM.get(market.upper())
-    if not symbol or not BYBIT_API_KEY:
-        return False
-    ts   = str(int(time.time() * 1000))
-    body = json.dumps({"category": "linear", "symbol": symbol,
-                       "side": "Sell" if side == "long" else "Buy",
-                       "orderType": "Market", "qty": "0", "reduceOnly": True})
-    r    = _session.post(f"{BYBIT_BASE_URL}/v5/order/create",
-                         headers=_bybit_headers(ts, body),
-                         data=body, timeout=15)
-    data = r.json()
-    if data.get("retCode") != 0:
-        log("err", f"Bybit close failed: {data.get('retMsg')}", market)
-        return False
-    return True
 
 # ── JUPITER PERPS EXECUTION ────────────────────────────────────────
 # Markets: SOL, ETH, BTC only (JLP pool composition)
@@ -919,7 +844,7 @@ def _execute_jupiter_perp_order(market, side, size_usd, leverage) -> bool:
                     tok_units = (DRIFT_MARGIN_USD / price) * (10 ** _JPERP_DECIMALS[mkt])
                     jup_min   = int(tok_units * 0.99)   # 1% slippage buffer
                 else:
-                    jup_min = None  # USDC used directly for shorts
+                    jup_min = 0  # shorts collateralise in USDC directly — no swap, no min-out
 
                 side_enum = {"long": {}} if side == "long" else {"short": {}}
 
@@ -1092,9 +1017,7 @@ def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=N
             return
 
     if not DRIFT_PAPER_MODE:
-        if DRIFT_EXCHANGE == "bybit":
-            ok = _execute_bybit_order(market, side, size_usd, leverage)
-        elif DRIFT_EXCHANGE == "jupiter":
+        if DRIFT_EXCHANGE == "jupiter":
             ok = _execute_jupiter_perp_order(market, side, size_usd, leverage)
         else:
             ok = _execute_drift_order(market, side, size_usd, leverage)
@@ -1126,14 +1049,22 @@ def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=N
 def close_position(market, exit_price, reason=""):
     global _capital, _daily_pnl
     with _state_lock:
-        pos = _positions.pop(market, None)
+        pos = _positions.get(market)
     if not pos:
         return
+
+    # Execute exchange close BEFORE removing from local state.
+    # If the RPC fails we keep the position in state so the next monitor
+    # cycle retries rather than losing track of an open on-chain position.
     if not DRIFT_PAPER_MODE:
-        if DRIFT_EXCHANGE == "bybit":
-            _close_bybit_position(market, pos["side"])
-        elif DRIFT_EXCHANGE == "jupiter":
-            _close_jupiter_perp_position(market, pos["side"], pos["size"])
+        if DRIFT_EXCHANGE == "jupiter":
+            ok = _close_jupiter_perp_position(market, pos["side"], pos["size"])
+            if not ok:
+                log("err", f"Exchange close FAILED — position kept open locally, will retry", market)
+                return
+
+    with _state_lock:
+        _positions.pop(market, None)
 
     if pos["side"] == "long":
         pnl_pct = (exit_price - pos["entry"]) / pos["entry"]
@@ -1177,7 +1108,7 @@ def close_position(market, exit_price, reason=""):
     emoji = "✅" if pnl_usd >= 0 else "❌"
     log("ok" if pnl_usd >= 0 else "err",
         f"CLOSE {pos['side'].upper()} {market} @ ${exit_price:.4f} "
-        f"PnL={pnl_usd:+.2f} ({pnl_pct * pos['leverage'] * 100:+.1f}% lev) [{reason}]")
+        f"PnL={pnl_usd:+.2f} ({pnl_pct*100:+.1f}%) [{reason}]")
     if is_dollar_tp:
         notify(
             f"💰 *{DRIFT_BOT_NAME}*\n"
@@ -1230,73 +1161,6 @@ def close_position(market, exit_price, reason=""):
                 finally:
                     _tuning_lock.release()
             threading.Thread(target=_tune_and_release, daemon=True).start()
-
-def partial_close_position(market, exit_price, target_usd, reason=""):
-    """Lock target_usd of profit by closing a fraction of the position; let the rest ride.
-    Resets the timeout clock on the remaining notional."""
-    global _capital, _daily_pnl
-    with _state_lock:
-        pos = _positions.get(market)
-        if not pos:
-            return
-
-        if pos["side"] == "long":
-            pnl_pct = (exit_price - pos["entry"]) / pos["entry"]
-        else:
-            pnl_pct = (pos["entry"] - exit_price) / pos["entry"]
-
-        full_pnl = pos["size"] * pnl_pct  # notional * raw %
-
-        if full_pnl > 0 and full_pnl >= target_usd:
-            fraction = min(target_usd / full_pnl, 0.50)
-        elif full_pnl > 0:
-            fraction = 0.50   # can't hit target yet — take half anyway
-        else:
-            fraction = 0.25   # underwater: trim exposure
-
-        realized_pnl  = full_pnl * fraction
-        closed_margin = (pos["size"] / pos["leverage"]) * fraction
-        closed_size   = pos["size"] * fraction
-
-        _positions[market]["size"]     -= closed_size
-        _positions[market]["opened_at"] = time.time()  # restart timeout clock
-
-        cap_snap = pos.copy()   # snapshot for logging
-
-    trade = {
-        "market": market, "side": cap_snap["side"],
-        "entry": cap_snap["entry"], "exit": exit_price,
-        "pnl": round(realized_pnl, 4),
-        "pnl_pct": pnl_pct * 100 * cap_snap["leverage"],
-        "reason": reason,
-        "secured": 0, "compounded": 0,
-        "duration_s": time.time() - cap_snap["opened_at"],
-        "ts": time.strftime("%Y-%m-%d %H:%M"),
-    }
-
-    with _state_lock:
-        _capital   += closed_margin + realized_pnl
-        _daily_pnl += realized_pnl
-        cap_after   = _capital
-        _trades.insert(0, trade)
-        if len(_trades) > 200:
-            _trades.pop()
-
-    pct_closed = int(fraction * 100)
-    pct_riding = 100 - pct_closed
-    log("ok" if realized_pnl >= 0 else "warn",
-        f"PARTIAL-{pct_closed}% {cap_snap['side'].upper()} {market} @ ${exit_price:.4f} "
-        f"locked=${realized_pnl:+.4f} ({pnl_pct * cap_snap['leverage'] * 100:+.1f}% lev) "
-        f"— {pct_riding}% riding [{reason}]")
-    notify(
-        f"💰 *{DRIFT_BOT_NAME}*\n"
-        f"PARTIAL EXIT {market} ({pct_closed}%)\n"
-        f"Locked: ${realized_pnl:+.4f}\n"
-        f"Remaining: {pct_riding}% still riding\n"
-        f"Capital now: ${cap_after:.2f}"
-    )
-    _save_state()
-
 
 def monitor_positions():
     # TP/SL exits are handled exclusively by run_position_price_updater (every 5s).
@@ -1480,15 +1344,19 @@ def run_trading_loop():
                     if not price:
                         continue
 
+                    # ── Daily loss cap — stop trading if down DRIFT_DAILY_LOSS_CAP ──
+                    with _state_lock:
+                        dpnl = _daily_pnl
+                    if dpnl <= -DRIFT_DAILY_LOSS_CAP:
+                        log("warn", f"Daily loss cap hit (${dpnl:.2f}) — no new positions today")
+                        break
+
                     # ── ATR-based SL/TP (dynamic, volatility-adjusted) ────
                     atr_pct   = sig_atr / price
                     sl_pct    = atr_pct * 1.5   # SL = 1.5× ATR
                     tp_pct    = atr_pct * 3.0   # TP = 3× ATR (2:1 R:R)
 
                     # ── Liquidation safety cap ────────────────────────────
-                    # At leverage L, liquidation happens when price moves 1/L against us.
-                    # SL must land INSIDE that distance (using 85% of margin as hard limit).
-                    # If even the minimum leverage puts SL past liquidation, skip the trade.
                     max_safe_lev = 0.85 / sl_pct if sl_pct > 0 else DRIFT_LEV_MAX
                     if max_safe_lev < DRIFT_LEV_MIN:
                         log("info",
@@ -1511,11 +1379,17 @@ def run_trading_loop():
                     if liq_mult < 0.95:
                         log("info", f"Liquidity factor {liq_mult:.2f} — leverage trimmed", market)
                     market_lev = int(max(DRIFT_LEV_MIN, min(DRIFT_LEV_MAX, raw_lev, max_safe_lev)))
-                    size_usd   = DRIFT_MARGIN_USD * market_lev
-                    margin     = DRIFT_MARGIN_USD
+
+                    # ── Confidence-scaled position sizing ─────────────────
+                    # conf=1 (base): 50% of margin — weakest setups lose less
+                    # conf=2 (RSI neutral): 75% of margin
+                    # conf=3 (fresh flip): 100% of margin — highest conviction
+                    conf_scale = {1: 0.50, 2: 0.75, 3: 1.00}.get(confidence, 1.00)
+                    margin     = round(DRIFT_MARGIN_USD * conf_scale, 2)
+                    size_usd   = margin * market_lev
 
                     log("ok",
-                        f"SIGNAL {signal.upper()} conf={confidence}/4 lev={market_lev}x "
+                        f"SIGNAL {signal.upper()} conf={confidence}/3 lev={market_lev}x "
                         f"margin=${margin:.0f} notional=${size_usd:.0f} "
                         f"SL={sl_pct*100:.2f}% TP={tp_pct*100:.2f}%", market)
 
@@ -2681,39 +2555,18 @@ def run_position_price_updater():
                         close_position(market, price, f"LIQ-GUARD liq={liq_price:.4f}")
                         continue
 
-                # ── ATR TP% / SL% — primary exits (volatility-calibrated) ──
-                if (updated["side"] == "long" and price >= updated["tp"]) or \
-                   (updated["side"] == "short" and price <= updated["tp"]):
-                    close_position(market, price, "TP%")
-                elif (updated["side"] == "long" and price <= updated["sl"]) or \
-                     (updated["side"] == "short" and price >= updated["sl"]):
-                    close_position(market, price, "SL%")
-                # ── Dollar ceiling TP / margin SL — secondary hard limits ──
-                elif DRIFT_TP_USD > 0 and pnl >= DRIFT_TP_USD:
+                # ── Dollar TP / SL ────────────────────────────────────
+                if DRIFT_TP_USD > 0 and pnl >= DRIFT_TP_USD:
                     close_position(market, price, f"TP${DRIFT_TP_USD:.0f}")
                 elif DRIFT_SL_MARGIN_PCT > 0 and pnl <= -(updated["size"] / updated["leverage"] * DRIFT_SL_MARGIN_PCT):
                     sl_usd = updated["size"] / updated["leverage"] * DRIFT_SL_MARGIN_PCT
                     close_position(market, price, f"SL${sl_usd:.1f}")
-                # ── Stale check — ride upswings, pull $2 if stalling ─────
-                elif DRIFT_MAX_HOLD_MINUTES > 0 and \
-                     (time.time() - updated["opened_at"]) > DRIFT_MAX_HOLD_MINUTES * 60:
-                    with _state_lock:
-                        hist = list(_price_history.get(market, []))
-                    ref_prices = [p for t, p in hist if t <= time.time() - 300]
-                    ref = ref_prices[-1] if ref_prices else None
-                    if ref and ((updated["side"] == "long"  and price > ref * 1.001) or
-                                (updated["side"] == "short" and price < ref * 0.999)):
-                        # Still moving our way — reset clock, keep riding
-                        with _state_lock:
-                            if market in _positions:
-                                _positions[market]["opened_at"] = time.time()
-                        log("info", f"Upswing ongoing — clock reset (pnl={pnl:+.2f})", market)
-                    elif pnl > 0:
-                        # Stalling with profit — lock $2, let rest ride
-                        partial_close_position(market, price, 2.0, "STALL-PARTIAL")
-                    else:
-                        # Stalling with no profit — cut it
-                        close_position(market, price, "STALL-FLAT")
+                elif (updated["side"] == "long" and price >= updated["tp"]) or \
+                     (updated["side"] == "short" and price <= updated["tp"]):
+                    close_position(market, price, "TP%")
+                elif (updated["side"] == "long" and price <= updated["sl"]) or \
+                     (updated["side"] == "short" and price >= updated["sl"]):
+                    close_position(market, price, "SL%")
         except Exception as e:
             log("warn", f"Price updater error: {e}")
         time.sleep(1)
@@ -3239,11 +3092,7 @@ setInterval(pollLogs,   3000);
 # ── ENTRY POINT ───────────────────────────────────────────────────
 if __name__ == "__main__":
     if not DRIFT_PAPER_MODE:
-        if DRIFT_EXCHANGE == "bybit":
-            if not BYBIT_API_KEY or not BYBIT_API_SECRET:
-                log("err", "DRIFT_EXCHANGE=bybit requires BYBIT_API_KEY and BYBIT_API_SECRET env vars.")
-                raise SystemExit(1)
-        elif DRIFT_EXCHANGE == "jupiter":
+        if DRIFT_EXCHANGE == "jupiter":
             if not WALLET_PRIVATE_KEY:
                 log("err", "DRIFT_EXCHANGE=jupiter requires WALLET_PRIVATE_KEY env var.")
                 raise SystemExit(1)
