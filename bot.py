@@ -2350,6 +2350,9 @@ def copy_trade_loop():
     fetch_smart_wallets()
     while scan_active:
         try:
+            if BOT_PAUSED or _pause_until > time.time():
+                time.sleep(5)
+                continue
             # Refresh wallet list every hour (or retry after backoff expires)
             with _copy_lock:
                 stale = time.time() - _copy_wallet_time > COPY_REFRESH_MINS * 60
@@ -5042,10 +5045,10 @@ def _persist_pause(until_ts: float):
 def _load_pause():
     """Restore pause state from Redis on startup."""
     global _pause_until
-    val = _redis_cmd("GET", "bot_pause_until")
-    if val and val.get("result"):
+    val = redis_load("bot_pause_until")
+    if val is not None:
         try:
-            _pause_until = float(val["result"])
+            _pause_until = float(val)
         except (TypeError, ValueError):
             _pause_until = 0.0
 
