@@ -765,7 +765,7 @@ def _execute_jupiter_perp_order(market, side, size_usd, leverage) -> bool:
                     tok_units = (DRIFT_MARGIN_USD / price) * (10 ** _JPERP_DECIMALS[mkt])
                     jup_min   = int(tok_units * 0.99)   # 1% slippage buffer
                 else:
-                    jup_min = None  # USDC used directly for shorts
+                    jup_min = 0  # shorts collateralise in USDC directly — no swap, no min-out
 
                 side_enum = {"long": {}} if side == "long" else {"short": {}}
 
