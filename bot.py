@@ -78,7 +78,7 @@ _RISK_TIERS = {
 _CAP_TIERS = _RISK_TIERS.get(RISK_LEVEL, _RISK_TIERS["standard"])
 
 MAX_DAILY_LOSS_PCT  = float(os.environ.get("MAX_DAILY_LOSS_PCT",  "20"))  # stop day if down >20% of start capital
-SOLD_COOLDOWN_SECS = int(os.environ.get("SOLD_COOLDOWN_SECS", "300"))  # was 1800 — 5 min re-entry window
+SOLD_COOLDOWN_SECS = int(os.environ.get("SOLD_COOLDOWN_SECS", "1800"))  # 30 min cooldown before re-buying a sold coin
 
 # Risk limits
 DAILY_LOSS_MAX    = int(os.environ.get("DAILY_LOSS_MAX",  "6"))   # retune after N consecutive losses
