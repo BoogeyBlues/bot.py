@@ -2584,21 +2584,26 @@ def manual_close(market):
 @app.route("/api/reset-capital", methods=["POST"])
 def reset_capital():
     global _capital, _trades, _daily_pnl, _profit_secured, _positions
+    global _market_stats, _market_params, _milestones_hit, _total_trades_ever
     if not DRIFT_PAPER_MODE:
         with _state_lock:
             open_mkts = list(_positions.keys())
         if open_mkts:
             return jsonify({"error": f"Cannot reset with open live positions: {open_mkts}. Close them first."}), 400
     with _state_lock:
-        _capital         = STARTING_CAPITAL
-        _trades          = []
-        _daily_pnl       = 0.0
-        _profit_secured  = 0.0
-        _positions       = {}
+        _capital           = STARTING_CAPITAL
+        _trades            = []
+        _daily_pnl         = 0.0
+        _profit_secured    = 0.0
+        _positions         = {}
+        _market_stats      = {}
+        _market_params     = {}
+        _milestones_hit    = set()
+        _total_trades_ever = 0
     _save_state()
-    log("ok", f"Capital reset to ${STARTING_CAPITAL:.2f} — all trades/positions cleared")
-    notify(f"*{DRIFT_BOT_NAME}* CAPITAL RESET\nCapital: ${STARTING_CAPITAL:.2f}")
-    return jsonify({"msg": f"Reset to ${STARTING_CAPITAL:.2f}", "capital": STARTING_CAPITAL})
+    log("ok", f"Full reset — capital ${STARTING_CAPITAL:.2f}, trade history, tuner state, milestones all cleared")
+    notify(f"*{DRIFT_BOT_NAME}* FULL RESET\nCapital: ${STARTING_CAPITAL:.2f} | Clean baseline")
+    return jsonify({"msg": f"Full reset to ${STARTING_CAPITAL:.2f}", "capital": STARTING_CAPITAL})
 
 
 @app.route("/api/tune-stats", methods=["GET"])
