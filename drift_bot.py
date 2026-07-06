@@ -23,8 +23,9 @@ WALLET_PRIVATE_KEY = os.environ.get("WALLET_PRIVATE_KEY", "")
 SOL_RPC            = os.environ.get("SOL_RPC", "https://api.mainnet-beta.solana.com")
 TELEGRAM_TOKEN     = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
-GMGN_API_KEY       = os.environ.get("GMGN_API_KEY", "")
-STARTING_CAPITAL   = float(os.environ.get("DRIFT_STARTING_CAPITAL", "5000"))
+# NOTE: GMGN is used exclusively by bot.py (PumpFun sniper). This bot
+# (drift_bot.py) does NOT call GMGN. Keep these completely separate.
+STARTING_CAPITAL   = float(os.environ.get("DRIFT_STARTING_CAPITAL", "100"))
 PROFIT_GOAL        = float(os.environ.get("DRIFT_PROFIT_GOAL", "10000"))
 DRIFT_TP_USD       = float(os.environ.get("DRIFT_TP_USD",    str(DRIFT_MARGIN_USD * 2)))  # default: 2× margin
 DRIFT_SL_MARGIN_PCT = float(os.environ.get("DRIFT_SL_MARGIN_PCT", "0.75"))  # close when loss = 75% of margin
