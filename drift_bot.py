@@ -10,12 +10,11 @@ DRIFT_EXCHANGE     = os.environ.get("DRIFT_EXCHANGE", "jupiter")
 DRIFT_LEVERAGE     = float(os.environ.get("DRIFT_LEVERAGE", "42"))     # midpoint; used as fallback
 DRIFT_LEV_MIN      = float(os.environ.get("DRIFT_LEV_MIN",  "30"))     # minimum leverage
 DRIFT_LEV_MAX      = float(os.environ.get("DRIFT_LEV_MAX",  "55"))     # maximum leverage
-DRIFT_MARGIN_USD   = float(os.environ.get("DRIFT_MARGIN_USD", "500"))  # fixed margin per trade ($)
+DRIFT_MARGIN_USD   = float(os.environ.get("DRIFT_MARGIN_USD", "20"))   # fixed margin per trade ($)
 DRIFT_MAX_OPEN     = int(os.environ.get("DRIFT_MAX_OPEN", "5"))
 DRIFT_TP_PCT       = float(os.environ.get("DRIFT_TP_PCT", "0.20"))
 DRIFT_SL_PCT       = float(os.environ.get("DRIFT_SL_PCT", "0.05"))
 DRIFT_TRAIL_PCT    = float(os.environ.get("DRIFT_TRAIL_PCT", "0.05"))
-DRIFT_MARKETS      = os.environ.get("DRIFT_MARKETS", "SOL,ETH,BTC")  # Jupiter Perps: SOL/ETH/BTC only
 DRIFT_DAILY_LOSS_CAP = float(os.environ.get("DRIFT_DAILY_LOSS_CAP", "200"))  # stop day if down $200
 DRIFT_BOT_NAME     = os.environ.get("DRIFT_BOT_NAME", "Drift Sniper")
 DRIFT_PORT         = int(os.environ.get("DRIFT_PORT", "5001"))
@@ -32,10 +31,26 @@ DRIFT_TP_USD       = float(os.environ.get("DRIFT_TP_USD",    str(DRIFT_MARGIN_US
 DRIFT_SL_MARGIN_PCT = float(os.environ.get("DRIFT_SL_MARGIN_PCT", "0.75"))  # close when loss = 75% of margin
 DRIFT_TUNE_EVERY   = int(os.environ.get("DRIFT_TUNE_EVERY",   "3")) # retune after every N closed trades
 DRIFT_COMPOUND_PCT = float(os.environ.get("DRIFT_COMPOUND_PCT", "0.10"))  # % of profit reinvested
+DRIFT_MAX_HOLD_MINUTES = int(os.environ.get("DRIFT_MAX_HOLD_MINUTES", "30"))  # force-exit after N minutes
 REDIS_URL          = os.environ.get("UPSTASH_REDIS_REST_URL", "")
 REDIS_TOKEN        = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
 
-MILESTONES = [250, 500, 1000, 2500, 5000, 10000, 25000]
+# ── MARKETS — sanitize at startup ─────────────────────────────────
+# Deduplicate whatever is in the env var, then restrict to Jupiter-supported
+# markets when DRIFT_EXCHANGE=jupiter (only SOL/ETH/BTC are in the JLP pool).
+_JUPITER_MARKETS = {"SOL", "ETH", "BTC"}
+_raw_markets = os.environ.get("DRIFT_MARKETS", "SOL,ETH,BTC")
+_seen, _clean = set(), []
+for _m in _raw_markets.split(","):
+    _m = _m.strip().upper()
+    if _m and _m not in _seen:
+        _seen.add(_m)
+        _clean.append(_m)
+if DRIFT_EXCHANGE == "jupiter":
+    _clean = [m for m in _clean if m in _JUPITER_MARKETS] or ["SOL", "ETH", "BTC"]
+DRIFT_MARKETS = ",".join(_clean)
+
+MILESTONES = [100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000]
 
 # ── STATE ─────────────────────────────────────────────────────────
 _positions           = {}
