@@ -5309,7 +5309,7 @@ nav::-webkit-scrollbar{display:none}
     <div class="sn-label">NOW SCANNING</div>
     <div class="sn-coin" id="snCoin">&#x2014;</div>
     <div class="sn-status scan" id="snStatus">WAITING</div>
-    <button id="pause-btn" onclick="togglePause()" style="margin-left:auto;padding:4px 12px;border-radius:4px;border:1px solid {'#fbbf24' if paused else '#00e5ff'};background:transparent;color:{'#fbbf24' if paused else '#00e5ff'};font-family:monospace;font-size:9px;font-weight:700;letter-spacing:.1em;cursor:pointer">{'▶ RESUME' if paused else '⏸ PAUSE'}</button>
+    <button id="pause-btn" onclick="togglePause()" style="margin-left:auto;padding:4px 12px;border-radius:4px;border:1px solid __PAUSE_COLOR__;background:transparent;color:__PAUSE_COLOR__;font-family:monospace;font-size:9px;font-weight:700;letter-spacing:.1em;cursor:pointer">__PAUSE_LABEL__</button>
   </div>
   <div class="deck-wrap" id="deckWrap">
     <div class="live-btn" id="liveBtn" onclick="jumpToLive()">&#x25B6; LIVE</div>
@@ -5857,7 +5857,10 @@ async function togglePause(){{
 }}
 </script>
 </body></html>"""
+    paused = _pause_until > time.time()
     html = html.replace("__BOT_NAME__", BOT_NAME)
+    html = html.replace("__PAUSE_COLOR__", "#fbbf24" if paused else "#00e5ff")
+    html = html.replace("__PAUSE_LABEL__", "▶ RESUME" if paused else "⏸ PAUSE")
     return html, 200
 @app.route("/learn/api", methods=["GET"])
 def learn_api():
