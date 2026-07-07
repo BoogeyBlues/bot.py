@@ -138,13 +138,13 @@ SLIP_DROP_TO   = float(os.environ.get("SLIP_DROP_TO",  "85"))
 SLIP_WAIT_SECS = int(os.environ.get("SLIP_WAIT_SECS",  "6"))
 
 # Trailing stop loss — activates once trade is up TSL_ACTIVATE_PCT, then trails BOND_SL_PCT below peak
-TSL_ACTIVATE_PCT = float(os.environ.get("TSL_ACTIVATE_PCT", "15"))  # lock-in starts at +15%
+TSL_ACTIVATE_PCT = float(os.environ.get("TSL_ACTIVATE_PCT", "25"))  # lock-in starts at +25% — avoids cutting near-TP trades
 SHARP_DROP_PCT = float(os.environ.get("SHARP_DROP_PCT", "4"))
 
 # Partial take-profit — scale out to lock gains without killing the run
-# TP1: +12% → sell 30%; TP2: +25% → sell 30% of remaining; final ~50% rides with TSL
+# TP1: +20% → sell 30%; TP2: +25% → sell 30% of remaining; final ~49% rides to BOND_TP at +30%
 PARTIAL_TP1_PCT  = float(os.environ.get("PARTIAL_TP1_PCT",  "20"))
-PARTIAL_TP2_PCT  = float(os.environ.get("PARTIAL_TP2_PCT",  "40"))
+PARTIAL_TP2_PCT  = float(os.environ.get("PARTIAL_TP2_PCT",  "25"))
 
 # Bundle mode: "avoid" or "ride"
 BUNDLE_MODE    = os.environ.get("BUNDLE_MODE", "avoid").lower()
@@ -187,8 +187,8 @@ FAST_TP_PCT       = float(os.environ.get("FAST_TP_PCT",       "8"))
 FAST_SL_PCT       = float(os.environ.get("FAST_SL_PCT",       "10"))
 FAST_MAX_SECS     = int(os.environ.get("FAST_MAX_SECS",       "90"))
 COPY_REFRESH_MINS = int(os.environ.get("COPY_REFRESH_MINS",  "60"))   # refresh wallet list hourly
-COPY_TP_PCT       = float(os.environ.get("COPY_TP_PCT",       "20"))
-COPY_SL_PCT       = float(os.environ.get("COPY_SL_PCT",       "15"))
+COPY_TP_PCT       = float(os.environ.get("COPY_TP_PCT",       "30"))  # matched to bond — 15% SL was negative EV at <43% WR
+COPY_SL_PCT       = float(os.environ.get("COPY_SL_PCT",        "8"))  # matched to bond — break-even WR now 21% not 43%
 COPY_MAX_SECS     = int(os.environ.get("COPY_MAX_SECS",       "180"))
 GMGN_RANK         = "https://gmgn.ai/defi/quotation/v1/rank/sol/wallets/7d"
 GMGN_ACTIVITY     = "https://gmgn.ai/defi/quotation/v1/wallet_activity/sol"
@@ -216,7 +216,7 @@ MIN_REPLIES      = int(os.environ.get("MIN_REPLIES",      "8"))
 MIN_SOCIALS      = int(os.environ.get("MIN_SOCIALS",       "1"))
 MIN_LIQ          = float(os.environ.get("MIN_LIQ",        "500"))
 MIN_VOL_5M       = float(os.environ.get("MIN_VOL_5M",     "10000")) # $10k 5-min volume — real momentum threshold
-MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "2"))     # require ≥2 signal points to enter (1 = too easy, any hot_search token passes)
+MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "3"))     # require ≥3 signal points — blocks hot_search+profile junk (score=2 had no directional edge)
 MAX_RUG_SCORE    = int(os.environ.get("MAX_RUG_SCORE",    "400"))   # rugcheck score ceiling (higher = riskier)
 
 # General
@@ -2185,7 +2185,7 @@ def monitor_loop():
                 partial_done = trade.get("partial_tp_done", 0)
     
                 if partial_done == 0 and move_pct >= PARTIAL_TP1_PCT:
-                    _partial_exit(mint, price, 0.30, "PARTIAL_TP1")   # lock 30% at +12%
+                    _partial_exit(mint, price, 0.30, "PARTIAL_TP1")   # lock 30% at +20%
                     with trades_lock:
                         if mint not in open_trades:
                             continue
@@ -2193,7 +2193,7 @@ def monitor_loop():
                     partial_done = 1
 
                 if partial_done == 1 and move_pct >= PARTIAL_TP2_PCT:
-                    _partial_exit(mint, price, 0.30, "PARTIAL_TP2")   # lock 30% of remaining at +25%
+                    _partial_exit(mint, price, 0.30, "PARTIAL_TP2")   # lock 30% of remaining at +25% (fires before BOND_TP at +30%)
                     with trades_lock:
                         if mint not in open_trades:
                             continue
