@@ -75,6 +75,7 @@ _market_params     = {}   # tuned per-market: {leverage, bias, paused_until, las
 _5m_trend_cache    = {}   # market -> {trend, ts} — 5-min candle bias, 60s TTL
 _signal_skip_ts    = {}   # market+reason -> last_log_ts, throttles signal-skip spam
 _liquidity_cache   = {}   # market -> {factor, ts} — OKX spread+volume factor, 30s TTL
+_ph_last_min       = {}   # market -> last minute bucket appended (int(ts/60)); keeps 1 candle/min
 
 _session = requests.Session()
 _session.trust_env = False
@@ -1306,14 +1307,18 @@ def run_trading_loop():
             # Single batch call to Binance for all markets — one request instead of N
             refresh_price_cache(markets)
 
-            # Update price history from cache
+            # Update price history — one candle per minute so EMA-50/RSI/Supertrend
+            # operate on 50-minute trend data, not 50 × 5-second noise samples.
+            _now_ts = time.time()
+            _cur_min = int(_now_ts / 60)
             for market in markets:
                 price = get_market_price(market)
-                if price:
+                if price and _ph_last_min.get(market) != _cur_min:
+                    _ph_last_min[market] = _cur_min
                     with _state_lock:
                         if market not in _price_history:
                             _price_history[market] = deque(maxlen=300)
-                        _price_history[market].append((time.time(), price))
+                        _price_history[market].append((_now_ts, price))
 
             # Monitor existing positions for exits
             monitor_positions()
