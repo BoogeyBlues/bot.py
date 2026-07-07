@@ -3266,9 +3266,10 @@ def _home_inner():
   @keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.4}}}}
 
   /* NAV LINKS */
-  nav{{display:flex;justify-content:center;flex-wrap:wrap;gap:8px;margin:20px 0 28px}}
+  nav{{display:flex;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;gap:8px;padding:0 12px;margin:20px 0 28px}}
+  nav::-webkit-scrollbar{{display:none}}
   nav a{{color:var(--muted);font-size:.78rem;font-weight:500;text-decoration:none;
-    padding:6px 14px;border-radius:8px;border:1px solid var(--border);
+    padding:6px 14px;border-radius:8px;border:1px solid var(--border);white-space:nowrap;flex-shrink:0;
     background:var(--surface);transition:all .2s;letter-spacing:.03em}}
   nav a:hover{{color:var(--gold);border-color:#f5c54244;background:#f5c54210}}
 
