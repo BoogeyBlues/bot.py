@@ -1166,7 +1166,7 @@ def close_position(market, exit_price, reason=""):
         if not won:
             # Brief cooldown after a loss — let the market settle before re-entering
             existing_pause = mp.get("paused_until", 0)
-            loss_cooldown = time.time() + 900  # 15 min
+            loss_cooldown = time.time() + 300  # 5 min — was 15, too long with only 3 markets
             if loss_cooldown > existing_pause:
                 mp["paused_until"] = loss_cooldown
         global _total_trades_ever
@@ -1263,11 +1263,11 @@ def drift_auto_tune():
         else:
             bias = None
 
-        # Pause market for 4h if win rate is very poor after 5+ trades
+        # Pause market for 2h if win rate is very poor after 10+ trades (was 5 — too small a sample)
         paused_until = cur.get("paused_until", 0)
-        if wr < 0.20 and n >= 5 and paused_until < time.time():
-            paused_until = time.time() + 4 * 3600
-            log("warn", f"Pausing {market} (WR={wr*100:.0f}% / {n} trades) for 4h", "TUNE")
+        if wr < 0.20 and n >= 10 and paused_until < time.time():
+            paused_until = time.time() + 2 * 3600
+            log("warn", f"Pausing {market} (WR={wr*100:.0f}% / {n} trades) for 2h", "TUNE")
 
         new = {"leverage": new_lev, "bias": bias,
                "paused_until": paused_until, "last_result": cur.get("last_result", "")}
