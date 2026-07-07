@@ -434,6 +434,7 @@ def _save_daily_state():
         "bundle_deployers": _bundle_deployers,
         "sold_mints":     sold_snapshot,
         "watchlist":      wl_snapshot,
+        "usdc_locked":    usdc_locked,
     }
     try:
         with open(STATE_FILE, "w") as f:
@@ -448,10 +449,16 @@ def _save_daily_state():
 def _load_daily_state():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses
     global _pause_until, capital, _week_start_date, _week_day_logs, completed_trades
-    global _day_start_cap, TUNE_PAUSED_UNTIL
+    global _day_start_cap, TUNE_PAUSED_UNTIL, usdc_locked
     global BOND_ENTRY_MIN, BOND_ENTRY_MAX, BOND_TP_PCT, BOND_SL_PCT
     global BOND_STALE_SECS, BOND_MAX_SECS, SPIKE_TP_PCT, TRENCH_TP_PCT
-    today = time.strftime("%Y-%m-%d")
+    # Compute the same @HH day key used by _save_daily_state so the date comparison matches
+    _now = time.gmtime()
+    if _now.tm_hour >= TRADE_START_HOUR:
+        today = time.strftime("%Y-%m-%d", _now) + f"@{TRADE_START_HOUR:02d}"
+    else:
+        _prev = time.gmtime(time.time() - 86400)
+        today = time.strftime("%Y-%m-%d", _prev) + f"@{TRADE_START_HOUR:02d}"
 
     # Try Redis first (survives redeploys), fall back to local file
     s = redis_load("bot_state")
@@ -474,6 +481,9 @@ def _load_daily_state():
                 _daily_wins   = s.get("wins",        0)
                 _daily_losses = s.get("losses",      0)
                 _pause_until  = s.get("pause_until", 0.0)
+            # usdc_locked accumulates across trades — always restore regardless of date
+            if "usdc_locked" in s:
+                usdc_locked = float(s["usdc_locked"])
             _week_start_date = s.get("week_start", "")
             _week_day_logs   = s.get("week_logs",  [])
             if s.get("day_start_cap", 0) > 0:
@@ -866,12 +876,9 @@ def check_milestones():
 # ── ADAPTIVE LEARNING ────────────────────────────────────────────
 def record_trade(trade_data):
     try:
-        history = []
-        if os.path.exists(LEARN_FILE):
-            with open(LEARN_FILE, "r") as f:
-                history = json.load(f)
-        history.append(trade_data)
-        trimmed = history[-200:]
+        # Caller already appended to completed_trades — read from in-memory list,
+        # not the local file (ephemeral, gone after dyno restart)
+        trimmed = list(completed_trades)[-200:]
         with open(LEARN_FILE, "w") as f:
             json.dump(trimmed, f)
         redis_save("bot_trades", trimmed)
