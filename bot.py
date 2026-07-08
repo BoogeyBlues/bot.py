@@ -2548,9 +2548,7 @@ def _eval_coin(coin):
             _log_scan(symbol, mint, bond, _sig_pre, "sm", 6, "SMART $ SELLING")
             return None
         sig_score = gmgn_signal_score(mint) + dsc_signal_score(mint) + jup_token_signal_score(mint)
-        if sig_score < MIN_SIGNAL_SCORE:
-            _log_scan(symbol, mint, bond, _sig_pre, "sig", 7, f"SIG {sig_score}<{MIN_SIGNAL_SCORE}")
-            return None
+        # Bond runner buys BEFORE smart money arrives — no signal floor here
         # Bond velocity: skip if bond hasn't moved ≥0.2% in last 30s (loosened from 0.5%/2s)
         _now_ts = time.time()
         with _bond_prev_lock:
@@ -2601,9 +2599,7 @@ def _eval_coin(coin):
             _log_scan(symbol, mint, bond, _sig_pre, "holder", 4, holder_reason[:18].upper())
             return None
         sig_score = gmgn_signal_score(mint) + dsc_signal_score(mint) + jup_token_signal_score(mint)
-        if sig_score < MIN_SIGNAL_SCORE:
-            _log_scan(symbol, mint, bond, _sig_pre, "sig", 7, f"SIG {sig_score}<{MIN_SIGNAL_SCORE}")
-            return None
+        # Trench runner near graduation — vol and price impact are the real gates, not signal score
         market = get_market_data(mint)
         if not market or not market.get("pair_address") or market["price"] <= 0:
             _log_scan(symbol, mint, bond, _sig_pre, "vol", 8, "NOT INDEXED YET")
