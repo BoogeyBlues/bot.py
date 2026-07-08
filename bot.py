@@ -101,7 +101,7 @@ ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # kept for ref
 
 # Bond Runner strategy
 BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "50"))  # 50%+ = confirmed momentum, less stall risk
-BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "60"))
+BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "75"))
 BOND_TP_PCT     = float(os.environ.get("BOND_TP_PCT",    "30"))  # raised from 20 — needs 3x R:R at low WR
 BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "8"))
 BOND_GRAD_BOND  = float(os.environ.get("BOND_GRAD_BOND", "90"))  # graduation imminent — tighten TSL
@@ -112,7 +112,7 @@ DEAD_PAIR_SECS      = int(os.environ.get("DEAD_PAIR_SECS",       "20"))  # exit 
 VOL_STALE_SECS      = int(os.environ.get("VOL_STALE_SECS",       "60"))  # exit if had volume but stalled 60s
 
 # Dormant Spike strategy
-SPIKE_MIN_AGE_H = float(os.environ.get("SPIKE_MIN_AGE_H", "12"))
+SPIKE_MIN_AGE_H = float(os.environ.get("SPIKE_MIN_AGE_H", "6"))
 SPIKE_MIN_1H    = float(os.environ.get("SPIKE_MIN_1H",    "30"))
 SPIKE_TP_PCT    = float(os.environ.get("SPIKE_TP_PCT",    "35"))   # raised from 20 — spikes run 30-50% before fading
 SPIKE_SL_PCT    = float(os.environ.get("SPIKE_SL_PCT",    "15"))
@@ -214,8 +214,8 @@ NTFY_TOPIC       = os.environ.get("NTFY_TOPIC", "")
 MIN_REPLIES      = int(os.environ.get("MIN_REPLIES",      "8"))
 MIN_SOCIALS      = int(os.environ.get("MIN_SOCIALS",       "1"))
 MIN_LIQ          = float(os.environ.get("MIN_LIQ",        "500"))
-MIN_VOL_5M       = float(os.environ.get("MIN_VOL_5M",     "10000")) # $10k 5-min volume — real momentum threshold
-MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "3"))     # require ≥3 signal points — blocks hot_search+profile junk (score=2 had no directional edge)
+MIN_VOL_5M       = float(os.environ.get("MIN_VOL_5M",     "2000"))  # $2k 5-min volume — catches coins before viral ($10k was post-move)
+MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "2"))     # ≥2 signal points — 1 confirmation + organic is enough at early bonding stage
 MAX_RUG_SCORE    = int(os.environ.get("MAX_RUG_SCORE",    "400"))   # rugcheck score ceiling (higher = riskier)
 
 # General
