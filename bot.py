@@ -2247,7 +2247,9 @@ def _verify_sell_and_retry(sig, trade, mint, clamped_return, reason):
         return  # tokens gone = sell worked even if status check uncertain
     # Tokens still in wallet — sell genuinely failed, retry once
     log("warn", f"Sell tx failed — {bal:.0f} tokens still in wallet — retrying", symbol)
-    retry_sig = execute_sell(bal, mint, symbol)
+    retry_sig = execute_sell(bal, mint, symbol,
+                             pump_swap=trade.get("pump_swap", False),
+                             raydium=trade.get("raydium", False))
     if retry_sig:
         log("ok", f"Sell retry submitted: {retry_sig[:12]}...", symbol)
         return
@@ -5623,6 +5625,7 @@ def admin_reset_all():
     with capital_lock:
         capital = STARTING_CAPITAL
     with trades_lock:
+        open_trades.clear()
         completed_trades.clear()
     with usdc_lock:
         usdc_locked = 0.0
@@ -5635,6 +5638,7 @@ def admin_reset_all():
 
     _save_daily_state()
     redis_save("bot_trades", [])
+    redis_save("bot_open_trades", [])
 
     log("ok", f"FULL RESET — capital=${STARTING_CAPITAL:.2f}, all history wiped")
     return jsonify({"ok": True, "msg": f"Full reset — capital restored to ${STARTING_CAPITAL:.2f}. Reload the page."})
@@ -5711,7 +5715,9 @@ def admin_force_sell(mint):
         if mint in open_trades:
             open_trades[mint]["_exiting"] = True
             trade = open_trades.pop(mint)
-    sig = execute_sell(sell_tokens, mint, symbol)
+    sig = execute_sell(sell_tokens, mint, symbol,
+                       pump_swap=(trade.get("pump_swap", False) if trade else False),
+                       raydium=(trade.get("raydium", False) if trade else False))
     if sig:
         if trade:
             price = trade.get("entry", 0)
