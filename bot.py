@@ -2392,12 +2392,17 @@ def _check_one_position(mint):
                 exit_trade(mint, price, "SPIKE_TIME", bond); return
 
         elif strategy == "copy":
-            move = ((price - trade["entry"]) / trade["entry"]) * 100
-            if move >= COPY_TP_PCT:
+            # Bond-based exits — same as bond runner; price feed unreliable for new tokens
+            move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
+            if move >= BOND_TP_PCT:
                 exit_trade(mint, price, "COPY_TP", bond); return
+            if bond >= BOND_GRAD_BOND and entry_gain_pct >= 3:
+                tight_tsl = price_high * (1 - BOND_GRAD_TSL / 100)
+                if price <= tight_tsl:
+                    exit_trade(mint, price, "COPY_GRAD_TSL", bond); return
             if price <= tsl_price:
                 exit_trade(mint, price, "COPY_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "COPY_SL", bond); return
-            if elapsed >= COPY_MAX_SECS:
+            if elapsed >= BOND_MAX_SECS:
                 exit_trade(mint, price, "COPY_TIME", bond); return
 
         elif strategy == "fast":
@@ -2666,7 +2671,9 @@ def copy_trade_loop():
                             log("ok", f"{tag} WR:{w['winrate']}% 5m={market.get('change5m',0):+.1f}% | ${amt:.2f} | sig={sig_score}", symbol)
                             notify(f"📋 {'PINNED' if w.get('pinned') else 'COPY'} {symbol}",
                                    f"Wallet: {addr[:8]}...\nWin rate: {w['winrate']}%\nAmount: ${amt:.2f}")
-                            enter_trade(mint, symbol, market["price"], amt, "copy", 0, 0)
+                            bond_now = get_bonding_details(mint)
+                            bond_entry_pct = bond_now["bond_pct"] if bond_now else 0
+                            enter_trade(mint, symbol, market["price"], amt, "copy", bond_entry_pct, 0)
                     time.sleep(0.5)
                 except Exception as e:
                     log("warn", f"Wallet {addr[:8]} activity: {e}", "COPY")
