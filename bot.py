@@ -1,7 +1,7 @@
 import os, time, threading, requests, json, re, csv, io
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, jsonify, Response, request
-from collections import defaultdict
+from collections import defaultdict, deque
 
 try:
     from solders.keypair import Keypair
@@ -224,7 +224,9 @@ MAX_OPEN      = int(os.environ.get("MAX_OPEN",      "10"))
 SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "2"))
 
 SOL_RPC         = os.environ.get("SOL_RPC", "https://api.mainnet-beta.solana.com")
-HELIUS_API_KEY  = os.environ.get("HELIUS_API_KEY", "")
+HELIUS_API_KEY        = os.environ.get("HELIUS_API_KEY", "")
+HELIUS_WEBHOOK_AUTH   = os.environ.get("HELIUS_WEBHOOK_AUTH", "")   # set same value in Helius dashboard → Auth Header
+RAILWAY_PUBLIC_DOMAIN = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")  # e.g. your-app.up.railway.app (no https://)
 PUMPPORTAL      = "https://pumpportal.fun/api/trade-local"
 
 def _rpc_endpoints():
@@ -312,6 +314,9 @@ _copied_mints     = {}   # mint -> timestamp, to avoid double-copy
 _copy_lock        = threading.Lock()
 _gmgn_backoff     = 0    # seconds to wait before retrying GMGN rank
 _sold_mints       = {}   # mint -> timestamp, cooldown after selling to prevent re-buy
+_webhook_queue    = deque(maxlen=500)  # Helius push events: (wallet_info_dict, act_dict)
+_helius_wh_id     = ""                 # registered Helius webhook ID (persisted to Redis)
+_helius_wh_lock   = threading.Lock()
 _bond_prev        = {}   # mint -> (bond_pct, timestamp) — velocity check: skip stalled bonds
 _bond_prev_lock   = threading.Lock()
 _watchlist        = {}   # mint -> {"res": action_result, "added_at": float} — qualified but couldn't enter
@@ -2602,8 +2607,36 @@ def fetch_smart_wallets():
         log("ok", f"Tracking {len(qualified)} wallets | WR {COPY_WINRATE_MIN}-{COPY_WINRATE_MAX}%", "COPY")
         for w in qualified:
             log("info", f"  {w['address'][:8]}... WR:{w['winrate']}%", "COPY")
+        # Re-register webhook so new wallet addresses are included
+        threading.Thread(target=_register_helius_webhook, daemon=True).start()
     except Exception as e:
         log("warn", f"fetch_smart_wallets: {e}", "COPY")
+
+def _parse_helius_enhanced_tx(tx, wallet_addr):
+    """Parse one Helius enhanced tx object into a buy-event dict.
+    Returns None if the tx is not a pump.fun buy into wallet_addr."""
+    if "PUMP" not in tx.get("source", "").upper():
+        return None
+    addr_lc = wallet_addr.lower()
+    mint = None
+    for t in tx.get("tokenTransfers", []):
+        if t.get("toUserAccount", "").lower() == addr_lc and t.get("mint"):
+            mint = t["mint"]
+            break
+    if not mint:
+        return None
+    sol_lamports = sum(
+        n.get("amount", 0)
+        for n in tx.get("nativeTransfers", [])
+        if n.get("fromUserAccount", "").lower() == addr_lc
+    )
+    sol_price = get_sol_price() or 150
+    return {
+        "token_address": mint,
+        "token_symbol":  mint[:8],
+        "timestamp":     tx.get("timestamp", 0),
+        "cost":          (sol_lamports / 1e9) * sol_price,
+    }
 
 def _helius_wallet_buys(addr):
     """Fetch recent pump.fun buys for a wallet via Helius Enhanced Transactions API.
@@ -2619,39 +2652,164 @@ def _helius_wallet_buys(addr):
         if res.status_code != 200:
             log("warn", f"Helius {res.status_code} for {addr[:8]}", "COPY")
             return []
-        sol_price = get_sol_price() or 150
-        acts = []
-        for tx in res.json():
-            ts     = tx.get("timestamp", 0)
-            source = tx.get("source", "").upper()
-            # Only pump.fun buys
-            if "PUMP" not in source:
-                continue
-            # Token received by this wallet = what they bought
-            mint = None
-            for t in tx.get("tokenTransfers", []):
-                if t.get("toUserAccount", "").lower() == addr.lower() and t.get("mint"):
-                    mint = t["mint"]
-                    break
-            if not mint:
-                continue
-            # SOL spent = native SOL leaving the wallet
-            sol_lamports = sum(
-                n.get("amount", 0)
-                for n in tx.get("nativeTransfers", [])
-                if n.get("fromUserAccount", "").lower() == addr.lower()
-            )
-            cost_usd = (sol_lamports / 1e9) * sol_price
-            acts.append({
-                "token_address": mint,
-                "token_symbol":  mint[:8],
-                "timestamp":     ts,
-                "cost":          cost_usd,
-            })
+        acts = [a for tx in res.json() if (a := _parse_helius_enhanced_tx(tx, addr))]
         return acts
     except Exception as e:
         log("warn", f"Helius wallet buys ({addr[:8]}): {e}", "COPY")
         return []
+
+def _all_tracked_addrs():
+    """Return set of all wallet addresses currently being tracked for copy trading."""
+    with _copy_lock:
+        addrs = {w["address"] for w in _copy_wallets}
+    addrs.update(TRACKED_WALLETS)
+    addrs.update(PINNED_WALLETS)
+    addrs.update(FAST_WALLETS)
+    return addrs
+
+def _register_helius_webhook():
+    """Create or update the Helius webhook so all tracked wallets push to this Railway instance.
+    No-op if HELIUS_API_KEY or RAILWAY_PUBLIC_DOMAIN are not set."""
+    global _helius_wh_id
+    if not HELIUS_API_KEY or not RAILWAY_PUBLIC_DOMAIN:
+        return
+    all_addrs = _all_tracked_addrs()
+    if not all_addrs:
+        return
+    webhook_url = f"https://{RAILWAY_PUBLIC_DOMAIN}/webhook/helius"
+    body = {
+        "webhookURL":       webhook_url,
+        "transactionTypes": ["SWAP"],
+        "accountAddresses": list(all_addrs),
+        "webhookType":      "enhanced",
+    }
+    if HELIUS_WEBHOOK_AUTH:
+        body["authHeader"] = HELIUS_WEBHOOK_AUTH
+    try:
+        with _helius_wh_lock:
+            wh_id = _helius_wh_id
+        if wh_id:
+            res = _session.put(
+                f"https://api.helius.xyz/v0/webhooks/{wh_id}",
+                params={"api-key": HELIUS_API_KEY},
+                json=body, timeout=12
+            )
+        else:
+            res = _session.post(
+                "https://api.helius.xyz/v0/webhooks",
+                params={"api-key": HELIUS_API_KEY},
+                json=body, timeout=12
+            )
+        if res.status_code in (200, 201):
+            new_id = res.json().get("webhookID", wh_id or "")
+            with _helius_wh_lock:
+                _helius_wh_id = new_id
+            redis_save("helius_wh_id", new_id)
+            verb = "updated" if wh_id else "registered"
+            log("ok", f"Helius webhook {verb}: {len(all_addrs)} addrs → {webhook_url}", "WH")
+        else:
+            log("warn", f"Helius webhook register failed {res.status_code}: {res.text[:120]}", "WH")
+    except Exception as e:
+        log("warn", f"Helius webhook register error: {e}", "WH")
+
+def _process_copy_act(w, act, source="POLL"):
+    """Evaluate and enter one copy trade opportunity.
+    w = wallet info dict (address, winrate, fast/pinned flags).
+    act = buy event dict (token_address, token_symbol, timestamp, cost).
+    source = "PUSH" (Helius webhook) or "POLL" (polling fallback).
+    Returns True if a trade was attempted."""
+    if daily_limit_reached():
+        return False
+    mint   = act.get("token_address", "")
+    symbol = act.get("token_symbol", mint[:8] if mint else "?")
+    if not mint:
+        return False
+    # Polling path: skip stale trades. Push events are always fresh.
+    if source == "POLL":
+        ts       = int(act.get("timestamp", 0) or 0)
+        age_secs = time.time() - ts if ts > 0 else 9999
+        if age_secs > COPY_MAX_AGE_SECS:
+            return False
+    with _copy_lock:
+        if mint in _copied_mints:
+            return False
+    with trades_lock:
+        if mint in open_trades:
+            return False
+    if mint in blacklisted_mints:
+        return False
+    with _copy_lock:
+        sold_at = _sold_mints.get(mint, 0)
+        if sold_at and time.time() - sold_at < SOLD_COOLDOWN_SECS:
+            return False
+    whale_cost = float(act.get("cost", act.get("cost_usd", act.get("usd_value", 0))) or 0)
+    if whale_cost > 0 and whale_cost < COPY_MIN_WHALE_USD:
+        log("info", f"COPY SKIP: whale only ${whale_cost:.0f}<{COPY_MIN_WHALE_USD:.0f}", symbol)
+        return False
+    is_fast = w.get("fast", False)
+    if not is_fast:
+        rug = run_rugcheck(mint)
+        if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
+            _blacklist_add(mint)
+            return False
+        if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
+            return False
+        holder_ok, holder_reason = check_holder_concentration(mint)
+        if not holder_ok:
+            log("warn", f"SKIP: {holder_reason}", symbol)
+            return False
+        dev_wallet = act.get("creator", "") or act.get("dev", "")
+        dev_ok, dev_reason = check_dev_history(dev_wallet)
+        if not dev_ok:
+            log("warn", f"SKIP: {dev_reason}", symbol)
+            return False
+        if gmgn_smart_money_selling(mint):
+            log("warn", "SKIP: smart money selling", symbol)
+            return False
+    sig_score = gmgn_signal_score(mint)
+    market = get_market_data(mint)
+    if not market or market["price"] <= 0:
+        bond_det = get_bonding_details(mint)
+        if not bond_det or bond_det.get("price_usd", 0) <= 0:
+            return False
+        market = {"price": bond_det["price_usd"], "liq": 0,
+                  "vol_m5": 0, "buys_m5": 0, "sells_m5": 0,
+                  "change5m": 0, "pair_address": ""}
+    if market.get("vol_m5", 0) < MIN_VOL_5M and market.get("pair_address"):
+        log("info", f"COPY SKIP: vol ${market.get('vol_m5',0):.0f}<{MIN_VOL_5M:.0f}", symbol)
+        return False
+    if not is_fast and market.get("pair_address") and market["liq"] < MIN_LIQ:
+        return False
+    with _copy_lock:
+        _copied_mints[mint] = time.time()
+    addr   = w["address"]
+    prefix = "[PUSH] " if source == "PUSH" else ""
+    amt    = trade_size()
+    if is_fast:
+        log("ok", f"{prefix}FAST {addr[:8]}... NO-FILTER | ${amt:.2f}", symbol)
+        notify(f"⚡ {'PUSH ' if source=='PUSH' else ''}FAST {symbol}",
+               f"Wallet: {addr[:8]}...\nAmount: ${amt:.2f}")
+        enter_trade(mint, symbol, market["price"], amt, "fast", 0, 0)
+    else:
+        tag = "PINNED" if w.get("pinned") else "COPY"
+        log("ok", f"{prefix}{tag} {addr[:8]}... WR:{w['winrate']}% 5m={market.get('change5m',0):+.1f}% | ${amt:.2f} | sig={sig_score}", symbol)
+        notify(f"📋 {'PUSH ' if source=='PUSH' else ''}{tag} {symbol}",
+               f"Wallet: {addr[:8]}...\nWin rate: {w['winrate']}%\nAmount: ${amt:.2f}")
+        bond_now = get_bonding_details(mint)
+        if not bond_now:
+            log("warn", "COPY SKIP: bond API unavailable — no price tracking", symbol)
+            with _copy_lock:
+                _copied_mints.pop(mint, None)
+            return False
+        bond_entry_pct = bond_now["bond_pct"]
+        entry_px = bond_now.get("price_usd", 0) or market["price"]
+        if entry_px <= 0:
+            log("warn", "COPY SKIP: no valid entry price", symbol)
+            with _copy_lock:
+                _copied_mints.pop(mint, None)
+            return False
+        enter_trade(mint, symbol, entry_px, amt, "copy", bond_entry_pct, 0)
+    return True
 
 def copy_trade_loop():
     time.sleep(15)
@@ -2668,14 +2826,29 @@ def copy_trade_loop():
                 fetch_smart_wallets()
 
             with _copy_lock:
-                wallets = list(_copy_wallets)
-                # Expire copied mints older than 10 minutes
                 now = time.time()
                 expired = [m for m, t in _copied_mints.items() if now - t > 1800]
                 for m in expired:
                     _copied_mints.pop(m, None)
 
-            # Merge tracked/pinned/fast wallets — keep dedup set updated as we add
+            # ── Drain Helius push queue first (instant, no polling lag) ──
+            drained = 0
+            while _webhook_queue:
+                try:
+                    w, act = _webhook_queue.popleft()
+                except IndexError:
+                    break
+                try:
+                    _process_copy_act(w, act, source="PUSH")
+                    drained += 1
+                except Exception as e:
+                    log("warn", f"Webhook act process: {e}", "PUSH")
+            if drained:
+                log("info", f"Drained {drained} webhook event(s)", "PUSH")
+
+            # ── Polling fallback — catches anything missed by webhook ──
+            with _copy_lock:
+                wallets = list(_copy_wallets)
             tracked_addrs = {w["address"] for w in wallets}
             for addr in TRACKED_WALLETS:
                 if addr not in tracked_addrs:
@@ -2697,106 +2870,13 @@ def copy_trade_loop():
             for w in wallets:
                 if daily_limit_reached():
                     break
-                addr = w["address"]
                 try:
-                    acts = _helius_wallet_buys(addr)
+                    acts = _helius_wallet_buys(w["address"])
                     for act in acts:
-                        mint   = act.get("token_address", "")
-                        symbol = act.get("token_symbol", mint[:8] if mint else "?")
-                        if not mint:
-                            continue
-                        # Only mirror very recent trades
-                        ts       = int(act.get("timestamp", 0) or 0)
-                        age_secs = time.time() - ts if ts > 0 else 9999
-                        if age_secs > COPY_MAX_AGE_SECS:
-                            continue
-                        with _copy_lock:
-                            if mint in _copied_mints:
-                                continue
-                        with trades_lock:
-                            if mint in open_trades:
-                                continue
-                        if mint in blacklisted_mints:
-                            continue
-                        # Skip recently sold tokens — respect the same cooldown as the scanner
-                        with _copy_lock:
-                            sold_at = _sold_mints.get(mint, 0)
-                            if sold_at and time.time() - sold_at < SOLD_COOLDOWN_SECS:
-                                continue
-                        # Minimum whale conviction — skip if they spent less than threshold
-                        whale_cost = float(act.get("cost", act.get("cost_usd", act.get("usd_value", 0))) or 0)
-                        if whale_cost > 0 and whale_cost < COPY_MIN_WHALE_USD:
-                            log("info", f"COPY SKIP: whale only ${whale_cost:.0f}<{COPY_MIN_WHALE_USD:.0f}", symbol)
-                            continue
-                        is_fast = w.get("fast", False)
-                        if not is_fast:
-                            # Safety checks — skipped entirely for fast wallets
-                            rug = run_rugcheck(mint)
-                            if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
-                                _blacklist_add(mint)
-                                continue
-                            if rug and rug.get("is_bundled") and BUNDLE_MODE == "avoid":
-                                continue
-                            holder_ok, holder_reason = check_holder_concentration(mint)
-                            if not holder_ok:
-                                log("warn", f"SKIP: {holder_reason}", symbol)
-                                continue
-                            dev_wallet = act.get("creator", "") or act.get("dev", "")
-                            dev_ok, dev_reason = check_dev_history(dev_wallet)
-                            if not dev_ok:
-                                log("warn", f"SKIP: {dev_reason}", symbol)
-                                continue
-                            if gmgn_smart_money_selling(mint):
-                                log("warn", "SKIP: smart money selling", symbol)
-                                continue
-                        sig_score = gmgn_signal_score(mint)
-                        market = get_market_data(mint)
-                        # For very new tokens DexScreener may not have price yet — use bond price
-                        if not market or market["price"] <= 0:
-                            bond_det = get_bonding_details(mint)
-                            if not bond_det or bond_det.get("price_usd", 0) <= 0:
-                                continue
-                            # Synthesize minimal market dict from bond data
-                            market = {"price": bond_det["price_usd"], "liq": 0,
-                                      "vol_m5": 0, "buys_m5": 0, "sells_m5": 0,
-                                      "change5m": 0, "pair_address": ""}
-                        # Volume gate — same threshold as scanner strategies
-                        if market.get("vol_m5", 0) < MIN_VOL_5M and market.get("pair_address"):
-                            log("info", f"COPY SKIP: vol ${market.get('vol_m5',0):.0f}<{MIN_VOL_5M:.0f}", symbol)
-                            continue
-                        if not is_fast and market.get("pair_address") and market["liq"] < MIN_LIQ:
-                            continue
-                        with _copy_lock:
-                            _copied_mints[mint] = time.time()
-                        amt = trade_size()
-                        if is_fast:
-                            tag = f"FAST {addr[:8]}..."
-                            log("ok", f"{tag} NO-FILTER | ${amt:.2f}", symbol)
-                            notify(f"⚡ FAST {symbol}", f"Wallet: {addr[:8]}...\nAmount: ${amt:.2f}")
-                            enter_trade(mint, symbol, market["price"], amt, "fast", 0, 0)
-                        else:
-                            tag = f"PINNED {addr[:8]}..." if w.get("pinned") else f"COPY {addr[:8]}..."
-                            log("ok", f"{tag} WR:{w['winrate']}% 5m={market.get('change5m',0):+.1f}% | ${amt:.2f} | sig={sig_score}", symbol)
-                            notify(f"📋 {'PINNED' if w.get('pinned') else 'COPY'} {symbol}",
-                                   f"Wallet: {addr[:8]}...\nWin rate: {w['winrate']}%\nAmount: ${amt:.2f}")
-                            bond_now = get_bonding_details(mint)
-                            if not bond_now:
-                                log("warn", "COPY SKIP: bond API unavailable — no price tracking", symbol)
-                                with _copy_lock:
-                                    _copied_mints.pop(mint, None)
-                                continue
-                            bond_entry_pct = bond_now["bond_pct"]
-                            # Use bond price as entry if DexScreener price is stale/zero
-                            entry_px = bond_now.get("price_usd", 0) or market["price"]
-                            if entry_px <= 0:
-                                log("warn", "COPY SKIP: no valid entry price", symbol)
-                                with _copy_lock:
-                                    _copied_mints.pop(mint, None)
-                                continue
-                            enter_trade(mint, symbol, entry_px, amt, "copy", bond_entry_pct, 0)
+                        _process_copy_act(w, act, source="POLL")
                     time.sleep(0.5)
                 except Exception as e:
-                    log("warn", f"Wallet {addr[:8]} activity: {e}", "COPY")
+                    log("warn", f"Wallet {w['address'][:8]} activity: {e}", "COPY")
         except Exception as e:
             log("err", f"Copy loop: {e}", "COPY")
         time.sleep(15)
@@ -5394,6 +5474,58 @@ setInterval(tickHists,3000);
 </script>
 </body></html>"""
     return html, 200
+
+@app.route("/webhook/helius", methods=["POST"])
+def helius_webhook():
+    """Receive real-time Helius push events for tracked wallet swaps.
+    Helius POSTs an array of enhanced transaction objects the instant a swap lands."""
+    if HELIUS_WEBHOOK_AUTH:
+        provided = (request.headers.get("Authorization", "") or
+                    request.headers.get("authHeader", ""))
+        if provided != HELIUS_WEBHOOK_AUTH:
+            return jsonify({"error": "Unauthorized"}), 401
+    try:
+        payload = request.get_json(silent=True) or []
+        if not isinstance(payload, list):
+            payload = [payload]
+
+        # Build addr→wallet_info lookup from all tracked sources
+        with _copy_lock:
+            addr_map = {w["address"].lower(): w for w in _copy_wallets}
+        for addr in TRACKED_WALLETS:
+            addr_map.setdefault(addr.lower(), {"address": addr, "winrate": 100.0})
+        for addr in PINNED_WALLETS:
+            addr_map.setdefault(addr.lower(), {"address": addr, "winrate": 100.0, "pinned": True})
+        for addr in FAST_WALLETS:
+            addr_map.setdefault(addr.lower(), {"address": addr, "winrate": 100.0, "fast": True})
+
+        enqueued = 0
+        for tx in payload:
+            # Identify which tracked wallet triggered this event (feePayer is the swapper)
+            fee_payer = tx.get("feePayer", "").lower()
+            wallet_info = addr_map.get(fee_payer)
+            if not wallet_info:
+                # Fallback: check token recipient fields
+                for t in tx.get("tokenTransfers", []):
+                    acct = t.get("toUserAccount", "").lower()
+                    if acct in addr_map:
+                        wallet_info = addr_map[acct]
+                        fee_payer = acct
+                        break
+            if not wallet_info:
+                continue
+            act = _parse_helius_enhanced_tx(tx, fee_payer)
+            if not act:
+                continue
+            _webhook_queue.append((wallet_info, act))
+            enqueued += 1
+
+        if enqueued:
+            log("info", f"Helius webhook: {enqueued} buy event(s) queued", "WH")
+        return jsonify({"ok": True, "enqueued": enqueued})
+    except Exception as e:
+        log("warn", f"Helius webhook handler: {e}", "WH")
+        return jsonify({"ok": False}), 200  # always 200 so Helius doesn't retry
 
 @app.route("/admin/tune-now", methods=["POST"])
 def admin_tune_now():
@@ -8781,6 +8913,11 @@ if __name__ == "__main__":
 
     _load_daily_state()
     _load_pause()
+    # Restore webhook ID so we update rather than create a duplicate on restart
+    _saved_wh_id = redis_load("helius_wh_id")
+    if _saved_wh_id:
+        with _helius_wh_lock:
+            _helius_wh_id = _saved_wh_id
     if not REDIS_URL or not REDIS_TOKEN:
         log("warn", "⚠️  No Redis configured — capital saved to /tmp only (wiped on redeploy). "
             "Set UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN in Railway for safe persistence.")
@@ -8798,6 +8935,7 @@ if __name__ == "__main__":
         threading.Thread(target=daily_summary_loop, daemon=True).start()
         if COPY_TRADE:
             threading.Thread(target=copy_trade_loop, daemon=True).start()
+            threading.Thread(target=_register_helius_webhook, daemon=True).start()
         t_signals = threading.Thread(target=run_signal_refresh_loop, daemon=True)
         t_signals.start()
         threading.Thread(target=run_dsc_refresh_loop, daemon=True).start()
