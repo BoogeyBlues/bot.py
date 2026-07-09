@@ -5129,6 +5129,28 @@ def admin_reset_capital():
     log("ok", f"Capital reset to ${STARTING_CAPITAL:.2f} via /admin/reset-capital")
     return jsonify({"ok": True, "msg": f"Capital reset to ${STARTING_CAPITAL:.2f} and win rate cleared"})
 
+@app.route("/set-capital/<float:amount>")
+def set_capital_get(amount):
+    """Manually set capital to a specific value. Clears ghost open positions. Keeps trade history."""
+    global capital
+    if amount <= 0 or amount > 100000:
+        return "Invalid amount", 400
+    cleared = []
+    with trades_lock:
+        for mint, t in list(open_trades.items()):
+            cleared.append(t["symbol"])
+            del open_trades[mint]
+        redis_save("bot_open_trades", [])
+    with capital_lock:
+        capital = float(amount)
+    with usdc_lock:
+        global usdc_locked
+        usdc_locked = 0.0
+    _save_daily_state()
+    ghost_msg = f" Cleared {len(cleared)} ghost(s): {', '.join(cleared)}." if cleared else ""
+    log("ok", f"Capital manually set to ${amount:.2f}.{ghost_msg}")
+    return f'<meta http-equiv="refresh" content="3;url=/">Capital set to ${amount:.2f}.{ghost_msg} Redirecting...'
+
 @app.route("/clear-usdc")
 def clear_usdc_get():
     global usdc_locked
