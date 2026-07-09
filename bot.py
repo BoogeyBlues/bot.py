@@ -101,7 +101,7 @@ ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # kept for ref
 
 # Bond Runner strategy
 BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "50"))  # 50%+ = confirmed momentum, less stall risk
-BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "60"))
+BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "75"))
 BOND_TP_PCT     = float(os.environ.get("BOND_TP_PCT",    "30"))  # raised from 20 — needs 3x R:R at low WR
 BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "8"))
 BOND_GRAD_BOND  = float(os.environ.get("BOND_GRAD_BOND", "90"))  # graduation imminent — tighten TSL
@@ -112,7 +112,7 @@ DEAD_PAIR_SECS      = int(os.environ.get("DEAD_PAIR_SECS",       "20"))  # exit 
 VOL_STALE_SECS      = int(os.environ.get("VOL_STALE_SECS",       "60"))  # exit if had volume but stalled 60s
 
 # Dormant Spike strategy
-SPIKE_MIN_AGE_H = float(os.environ.get("SPIKE_MIN_AGE_H", "12"))
+SPIKE_MIN_AGE_H = float(os.environ.get("SPIKE_MIN_AGE_H", "6"))
 SPIKE_MIN_1H    = float(os.environ.get("SPIKE_MIN_1H",    "30"))
 SPIKE_TP_PCT    = float(os.environ.get("SPIKE_TP_PCT",    "35"))   # raised from 20 — spikes run 30-50% before fading
 SPIKE_SL_PCT    = float(os.environ.get("SPIKE_SL_PCT",    "15"))
@@ -175,7 +175,6 @@ COPY_MIN_WHALE_USD   = float(os.environ.get("COPY_MIN_WHALE_USD",  "100"))  # sk
 TRACKED_WALLETS   = [w.strip() for w in os.environ.get("TRACKED_WALLETS", "").split(",") if w.strip()]
 # Pinned wallets — always monitored, mirror their exact USD trade size, use bot's own TP/SL/exits
 PINNED_WALLETS = [
-    "CxgPWvH2GoEDENELne2XKAR2z2Fr4shG2uaeyqZceGve",  # 41% exit rate, 80% pump.fun
     "2X4H5Y9C4Fy6Pf3wpq8Q4gMvLcWvfrrwDv2bdR8AAwQv",  # 96% exit rate, disciplined
 ]
 # Fast wallets — skip ALL safety filters, exit before the wallet does (tight TP/SL)
@@ -215,8 +214,8 @@ NTFY_TOPIC       = os.environ.get("NTFY_TOPIC", "")
 MIN_REPLIES      = int(os.environ.get("MIN_REPLIES",      "8"))
 MIN_SOCIALS      = int(os.environ.get("MIN_SOCIALS",       "1"))
 MIN_LIQ          = float(os.environ.get("MIN_LIQ",        "500"))
-MIN_VOL_5M       = float(os.environ.get("MIN_VOL_5M",     "10000")) # $10k 5-min volume — real momentum threshold
-MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "3"))     # require ≥3 signal points — blocks hot_search+profile junk (score=2 had no directional edge)
+MIN_VOL_5M       = float(os.environ.get("MIN_VOL_5M",     "2000"))  # $2k 5-min volume — catches coins before viral ($10k was post-move)
+MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "2"))     # ≥2 signal points — 1 confirmation + organic is enough at early bonding stage
 MAX_RUG_SCORE    = int(os.environ.get("MAX_RUG_SCORE",    "400"))   # rugcheck score ceiling (higher = riskier)
 
 # General
@@ -1278,7 +1277,7 @@ def check_holder_concentration(mint) -> tuple:
         data = r.json().get("data") or {}
         holders = data.get("holders") or data if isinstance(data, list) else []
         top10_pct = sum(float(h.get("amount_percentage") or h.get("percent") or 0) for h in holders[:10])
-        result = (False, f"top10={top10_pct:.0f}%") if top10_pct > 35 else (True, "")
+        result = (False, f"top10={top10_pct:.0f}%") if top10_pct > 55 else (True, "")
         _holder_cache[mint] = (now, result)
         return result
     except Exception:
@@ -1302,7 +1301,7 @@ def check_dev_history(dev_wallet) -> tuple:
             if float(t.get("token_ath_mc") or 0) > 50_000
             and float(t.get("market_cap") or 0) < float(t.get("token_ath_mc") or 1) * 0.05
         )
-        if rugs >= 1:   # was 2 — zero tolerance for devs with any rug history
+        if rugs >= 2:   # pump.fun: one dead coin is normal market cycle, two is a pattern
             return False, f"dev rugged {rugs}x"
         return True, ""
     except Exception:
@@ -2458,12 +2457,7 @@ def copy_trade_loop():
                             if gmgn_smart_money_selling(mint):
                                 log("warn", "SKIP: smart money selling", symbol)
                                 continue
-                            sig_score = gmgn_signal_score(mint)
-                            if sig_score < MIN_SIGNAL_SCORE:
-                                log("info", f"COPY SKIP: sig {sig_score}<{MIN_SIGNAL_SCORE}", symbol)
-                                continue
-                        else:
-                            sig_score = 0
+                        sig_score = gmgn_signal_score(mint)
                         market = get_market_data(mint)
                         if not market or market["price"] <= 0:
                             continue
@@ -2476,9 +2470,6 @@ def copy_trade_loop():
                             log("info", f"COPY SKIP: vol ${market.get('vol_m5',0):.0f}<{MIN_VOL_5M:.0f}", symbol)
                             continue
                         if not is_fast and market["liq"] < MIN_LIQ:
-                            continue
-                        if not is_fast and not is_1m_trending_up(market.get("pair_address", ""), market):
-                            log("info", f"COPY SKIP: 1m not trending up", symbol)
                             continue
                         with _copy_lock:
                             _copied_mints[mint] = time.time()
@@ -2549,15 +2540,13 @@ def _eval_coin(coin):
             _log_scan(symbol, mint, bond, _sig_pre, "sm", 6, "SMART $ SELLING")
             return None
         sig_score = gmgn_signal_score(mint) + dsc_signal_score(mint) + jup_token_signal_score(mint)
-        if sig_score < MIN_SIGNAL_SCORE:
-            _log_scan(symbol, mint, bond, _sig_pre, "sig", 7, f"SIG {sig_score}<{MIN_SIGNAL_SCORE}")
-            return None
+        # Bond runner buys BEFORE smart money arrives — no signal floor here
         # Bond velocity: skip if bond hasn't moved ≥0.2% in last 30s (loosened from 0.5%/2s)
         _now_ts = time.time()
         with _bond_prev_lock:
             _prev_bond, _prev_ts = _bond_prev.get(mint, (None, 0))
             _bond_prev[mint] = (bond, _now_ts)
-        if _prev_bond is not None and abs(bond - _prev_bond) < 0.2 and _now_ts - _prev_ts < 30:
+        if _prev_bond is not None and abs(bond - _prev_bond) < 0.2 and _now_ts - _prev_ts < 120:
             _log_scan(symbol, mint, bond, _sig_pre, "vel", 7, "BOND STALLED")
             return None
         market = get_market_data(mint)
@@ -2602,9 +2591,7 @@ def _eval_coin(coin):
             _log_scan(symbol, mint, bond, _sig_pre, "holder", 4, holder_reason[:18].upper())
             return None
         sig_score = gmgn_signal_score(mint) + dsc_signal_score(mint) + jup_token_signal_score(mint)
-        if sig_score < MIN_SIGNAL_SCORE:
-            _log_scan(symbol, mint, bond, _sig_pre, "sig", 7, f"SIG {sig_score}<{MIN_SIGNAL_SCORE}")
-            return None
+        # Trench runner near graduation — vol and price impact are the real gates, not signal score
         market = get_market_data(mint)
         if not market or not market.get("pair_address") or market["price"] <= 0:
             _log_scan(symbol, mint, bond, _sig_pre, "vol", 8, "NOT INDEXED YET")
@@ -3400,11 +3387,11 @@ def _home_inner():
     <a href="/" class="btn btn-gold">⚡ Refresh Now</a>
     <a href="/live" class="btn btn-ghost">📡 Live Feed</a>
     <a href="/trades" class="btn btn-ghost">💼 All Trades</a>
-    <button class="btn btn-ghost" style="border-color:rgba(0,229,255,.4);color:#00e5ff" onclick="adminPost('/admin/tune-now',{{}},'Run retune now and lock auto-tuning until next Monday 7am?')">🧠 Tune Now</button>
+    <button class="btn btn-ghost" style="border-color:rgba(0,229,255,.4);color:#00e5ff" onclick="adminPost('/admin/tune-now',{{}},null)">🧠 Tune Now</button>
     <button class="btn btn-ghost" onclick="adminPost('/admin/reset-daily',{{}},null)">🔄 Reset Daily</button>
-    <button class="btn btn-ghost" onclick="adminPost('/admin/reset-capital',{{}},'Reset capital to ${STARTING_CAPITAL:.2f}?')">💰 Reset Capital</button>
-    <button class="btn btn-ghost" style="border-color:#ff3355;color:#ff3355" onclick="adminPost('/admin/reset-all',{{}},'Reset capital to ${STARTING_CAPITAL:.2f}, clear win rate and daily counters?')">🗑️ Reset All</button>
-    <button class="btn btn-ghost" style="border-color:#888;color:#aaa;font-size:0.68rem" onclick="(()=>{{var k=prompt('Enter new API secret (leave blank to clear):',_getKey());if(k===null)return;_setKey(k);alert(k?'Key saved.':'Key cleared.');}})()">🔑 Set Key</button>
+    <button class="btn btn-ghost" onclick="adminPost('/admin/reset-capital',{{}},null)">💰 Reset Capital</button>
+    <button class="btn btn-ghost" style="border-color:#ff3355;color:#ff3355" onclick="adminPost('/admin/reset-all',{{}},null)">🗑️ Reset All</button>
+    <button class="btn btn-ghost" style="border-color:#888;color:#aaa;font-size:0.68rem" onclick="setApiKey()">🔑 Set Key</button>
   </div>
 
   <div class="cards">
@@ -3679,19 +3666,32 @@ pollStats();
 setInterval(pollStats,5000);
 function _getKey(){{return localStorage.getItem('api_secret')||'';}}
 function _setKey(k){{localStorage.setItem('api_secret',k||'');}}
-async function adminPost(url,body,confirmMsg){{
-  if(confirmMsg&&!confirm(confirmMsg))return;
+function showToast(msg){{
+  var t=document.getElementById('admin-toast');
+  if(!t){{t=document.createElement('div');t.id='admin-toast';
+    t.style.cssText='position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#00e5ff;color:#050a14;padding:10px 20px;border-radius:8px;font-weight:700;font-size:0.9rem;z-index:9999;transition:opacity 0.4s';
+    document.body.appendChild(t);}}
+  t.textContent=msg;t.style.opacity='1';
+  clearTimeout(t._hide);t._hide=setTimeout(()=>{{t.style.opacity='0';}},3000);
+}}
+function setApiKey(){{
+  var cur=_getKey();
+  var k=window.prompt?window.prompt('API secret (blank to clear):',cur):cur;
+  if(k===null)return;_setKey(k);showToast(k?'Key saved':'Key cleared');
+}}
+async function adminPost(url,body,_unused){{
   var s=_getKey();
-  if(!s){{s=prompt('API secret:');if(!s)return;_setKey(s);}}
-  var r=await fetch(url,{{method:'POST',headers:{{'X-API-Key':s,'Content-Type':'application/json'}},body:JSON.stringify(body)}});
-  var d=await r.json();
-  if(r.status===401){{
-    var k=prompt('Wrong API secret — enter correct key:');
-    if(!k)return;_setKey(k);
-    return adminPost(url,body,null);
-  }}
-  alert(d.msg||d.error||'Done');
-  pollStats();
+  var hdrs={{'Content-Type':'application/json'}};
+  if(s) hdrs['X-API-Key']=s;
+  try{{
+    var r=await fetch(url,{{method:'POST',headers:hdrs,body:JSON.stringify(body)}});
+    if(r.status===401){{
+      showToast('Need API key — tap Set Key first');return;
+    }}
+    var d=await r.json();
+    showToast(d.msg||d.error||'Done');
+    pollStats();
+  }}catch(e){{showToast('Error: '+e);}}
 }}
 async function togglePause(){{
   const btn=document.getElementById('pause-btn');
@@ -4204,18 +4204,23 @@ function refreshStatus(){{
 }}
 function _getKey(){{return localStorage.getItem('api_secret')||'';}}
 function _setKey(k){{localStorage.setItem('api_secret',k||'');}}
-async function adminPost(url,body,confirmMsg){{
-  if(confirmMsg&&!confirm(confirmMsg))return;
+function showToast(msg){{
+  var t=document.getElementById('admin-toast');
+  if(!t){{t=document.createElement('div');t.id='admin-toast';
+    t.style.cssText='position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#00e5ff;color:#050a14;padding:10px 20px;border-radius:8px;font-weight:700;font-size:0.9rem;z-index:9999;transition:opacity 0.4s';
+    document.body.appendChild(t);}}
+  t.textContent=msg;t.style.opacity='1';
+  clearTimeout(t._hide);t._hide=setTimeout(()=>{{t.style.opacity='0';}},3000);
+}}
+async function adminPost(url,body,_unused){{
   var s=_getKey();
-  if(!s){{s=prompt('API secret:');if(!s)return;_setKey(s);}}
-  var r=await fetch(url,{{method:'POST',headers:{{'X-API-Key':s,'Content-Type':'application/json'}},body:JSON.stringify(body)}});
-  var d=await r.json();
-  if(r.status===401){{
-    var k=prompt('Wrong API secret — enter correct key:');
-    if(!k)return;_setKey(k);
-    return adminPost(url,body,null);
-  }}
-  alert(d.msg||d.error||'Done');
+  var hdrs={{'Content-Type':'application/json'}};
+  if(s) hdrs['X-API-Key']=s;
+  try{{
+    var r=await fetch(url,{{method:'POST',headers:hdrs,body:JSON.stringify(body)}});
+    if(r.status===401){{showToast('Need API key — tap Set Key first');return;}}
+    var d=await r.json();
+    showToast(d.msg||d.error||'Done');
   refreshStatus();
 }}
 async function togglePause(){{
@@ -5048,31 +5053,41 @@ def admin_reset_daily():
 def admin_reset_capital():
     denied = _auth_required()
     if denied: return denied
-    global capital
+    global capital, usdc_locked
     with capital_lock:
         capital = STARTING_CAPITAL
     with trades_lock:
         completed_trades.clear()
+    with usdc_lock:
+        usdc_locked = 0.0
     _redis_cmd("DEL", "bot_trades")
     redis_save("bot_trades", [])
     _save_daily_state()
     log("ok", f"Capital reset to ${STARTING_CAPITAL:.2f} via /admin/reset-capital")
     return jsonify({"ok": True, "msg": f"Capital reset to ${STARTING_CAPITAL:.2f} and win rate cleared"})
 
+@app.route("/clear-usdc")
+def clear_usdc_get():
+    global usdc_locked
+    with usdc_lock:
+        usdc_locked = 0.0
+    _save_daily_state()
+    return '<meta http-equiv="refresh" content="2;url=/">USDC locked cleared to $0. Redirecting...'
+
 @app.route("/admin/reset-all", methods=["POST"])
 def admin_reset_all():
     denied = _auth_required()
     if denied: return denied
-    global capital
+    global capital, usdc_locked
     global _daily_trades, _daily_wins, _daily_losses, _daily_cap_notified
     global _day_start_cap
 
-    # Reset capital, win rate counters, and daily trade counters only.
-    # Does NOT touch trade history, open trades, Redis keys, or weekly state.
     with capital_lock:
         capital = STARTING_CAPITAL
     with trades_lock:
         completed_trades.clear()
+    with usdc_lock:
+        usdc_locked = 0.0
     with _daily_lock:
         _daily_trades       = 0
         _daily_wins         = 0
