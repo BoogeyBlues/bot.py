@@ -5043,11 +5043,13 @@ def admin_reset_daily():
 def admin_reset_capital():
     denied = _auth_required()
     if denied: return denied
-    global capital
+    global capital, usdc_locked
     with capital_lock:
         capital = STARTING_CAPITAL
     with trades_lock:
         completed_trades.clear()
+    with usdc_lock:
+        usdc_locked = 0.0
     _redis_cmd("DEL", "bot_trades")
     redis_save("bot_trades", [])
     _save_daily_state()
@@ -5058,16 +5060,16 @@ def admin_reset_capital():
 def admin_reset_all():
     denied = _auth_required()
     if denied: return denied
-    global capital
+    global capital, usdc_locked
     global _daily_trades, _daily_wins, _daily_losses, _daily_cap_notified
     global _day_start_cap
 
-    # Reset capital, win rate counters, and daily trade counters only.
-    # Does NOT touch trade history, open trades, Redis keys, or weekly state.
     with capital_lock:
         capital = STARTING_CAPITAL
     with trades_lock:
         completed_trades.clear()
+    with usdc_lock:
+        usdc_locked = 0.0
     with _daily_lock:
         _daily_trades       = 0
         _daily_wins         = 0
