@@ -1239,7 +1239,14 @@ def is_1m_trending_up(pair_address, market=None) -> bool:
         return True
 
 
+_sol_price_cache = (None, 0.0)  # (price, fetched_at) — tuple assignment is atomic in CPython
+_SOL_PRICE_TTL   = 30  # seconds — SOL price doesn't move >0.1% in 30s at normal volatility
+
 def get_sol_price():
+    global _sol_price_cache
+    cached_price, cached_ts = _sol_price_cache
+    if cached_price and time.time() - cached_ts < _SOL_PRICE_TTL:
+        return cached_price
     try:
         res   = _session.get(
             "https://api.dexscreener.com/latest/dex/pairs/solana/8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj",
@@ -1249,6 +1256,7 @@ def get_sol_price():
         if pairs:
             price = float(pairs[0].get("priceUsd", 0))
             if price > 0:
+                _sol_price_cache = (price, time.time())
                 return price
     except Exception:
         pass
@@ -1259,10 +1267,12 @@ def get_sol_price():
         )
         price = float(res.json()["solana"]["usd"])
         if price > 0:
+            _sol_price_cache = (price, time.time())
             return price
     except Exception:
         pass
-    return None
+    # Return stale cache rather than None — stale SOL price beats a failed bond price calc
+    return cached_price
 
 # ── JUPITER PRICE IMPACT ────────────────────────────────────────
 _jup_impact_cache = {}   # mint -> (timestamp, impact_pct)
@@ -1317,6 +1327,7 @@ def jup_price_impact(mint: str, usd_amount: float) -> float:
 # ── RUGCHECK ────────────────────────────────────────────────────
 _rug_cache    = {}  # mint -> (timestamp, result)
 _holder_cache = {}  # mint -> (timestamp, result)
+_dev_cache    = {}  # dev_wallet -> (timestamp, result)
 _CACHE_TTL    = 90  # seconds — rug/holder data doesn't change in 90s
 
 def run_rugcheck(mint):
@@ -1365,6 +1376,10 @@ def check_dev_history(dev_wallet) -> tuple:
     """(ok, reason) — ok=False if dev has 2+ tokens that rugged (>95% drop from ATH)."""
     if not dev_wallet:
         return True, ""
+    now = time.time()
+    hit = _dev_cache.get(dev_wallet)
+    if hit and now - hit[0] < _CACHE_TTL:
+        return hit[1]
     try:
         hdrs = {"User-Agent":"Mozilla/5.0","Referer":"https://gmgn.ai/","Origin":"https://gmgn.ai"}
         r = _session.get(
@@ -1379,9 +1394,9 @@ def check_dev_history(dev_wallet) -> tuple:
             if float(t.get("token_ath_mc") or 0) > 50_000
             and float(t.get("market_cap") or 0) < float(t.get("token_ath_mc") or 1) * 0.05
         )
-        if rugs >= 2:   # pump.fun: one dead coin is normal market cycle, two is a pattern
-            return False, f"dev rugged {rugs}x"
-        return True, ""
+        result = (False, f"dev rugged {rugs}x") if rugs >= 2 else (True, "")
+        _dev_cache[dev_wallet] = (now, result)
+        return result
     except Exception:
         return True, ""
 
@@ -5476,17 +5491,21 @@ def admin_sync_capital():
                 wallet_pk = Pubkey.from_string(WALLET)
                 sol_bal  = client.get_balance(wallet_pk).value / 1e9
                 sol_usd  = sol_bal * sol_price
-                # Read USDC balance
+                # Read USDC balance using direct JSON-RPC with jsonParsed encoding
+                # (SDK returns raw binary; hasattr(data, "parsed") is always False)
                 usdc_usd = 0.0
                 try:
-                    from solana.rpc.types import TokenAccountOpts
-                    resp = client.get_token_accounts_by_owner(
-                        wallet_pk, TokenAccountOpts(mint=Pubkey.from_string(USDC_MINT)))
-                    if resp.value:
-                        raw = resp.value[0].account.data
-                        if hasattr(raw, "parsed"):
-                            usdc_usd = float(raw.parsed.get("info", {})
-                                             .get("tokenAmount", {}).get("uiAmount", 0) or 0)
+                    usdc_resp = _session.post(rpc_url, json={
+                        "jsonrpc": "2.0", "id": 1,
+                        "method": "getTokenAccountsByOwner",
+                        "params": [WALLET, {"mint": USDC_MINT}, {"encoding": "jsonParsed"}]
+                    }, timeout=8)
+                    if usdc_resp.status_code == 200:
+                        for acct in usdc_resp.json().get("result", {}).get("value", []):
+                            ui = (acct.get("account", {}).get("data", {})
+                                  .get("parsed", {}).get("info", {})
+                                  .get("tokenAmount", {}).get("uiAmount", 0) or 0)
+                            usdc_usd += float(ui)
                 except Exception:
                     pass
                 usd = round(sol_usd + usdc_usd, 2)
