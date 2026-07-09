@@ -1277,7 +1277,7 @@ def check_holder_concentration(mint) -> tuple:
         data = r.json().get("data") or {}
         holders = data.get("holders") or data if isinstance(data, list) else []
         top10_pct = sum(float(h.get("amount_percentage") or h.get("percent") or 0) for h in holders[:10])
-        result = (False, f"top10={top10_pct:.0f}%") if top10_pct > 35 else (True, "")
+        result = (False, f"top10={top10_pct:.0f}%") if top10_pct > 55 else (True, "")
         _holder_cache[mint] = (now, result)
         return result
     except Exception:
@@ -1301,7 +1301,7 @@ def check_dev_history(dev_wallet) -> tuple:
             if float(t.get("token_ath_mc") or 0) > 50_000
             and float(t.get("market_cap") or 0) < float(t.get("token_ath_mc") or 1) * 0.05
         )
-        if rugs >= 1:   # was 2 — zero tolerance for devs with any rug history
+        if rugs >= 2:   # pump.fun: one dead coin is normal market cycle, two is a pattern
             return False, f"dev rugged {rugs}x"
         return True, ""
     except Exception:
@@ -2554,7 +2554,7 @@ def _eval_coin(coin):
         with _bond_prev_lock:
             _prev_bond, _prev_ts = _bond_prev.get(mint, (None, 0))
             _bond_prev[mint] = (bond, _now_ts)
-        if _prev_bond is not None and abs(bond - _prev_bond) < 0.2 and _now_ts - _prev_ts < 30:
+        if _prev_bond is not None and abs(bond - _prev_bond) < 0.2 and _now_ts - _prev_ts < 120:
             _log_scan(symbol, mint, bond, _sig_pre, "vel", 7, "BOND STALLED")
             return None
         market = get_market_data(mint)
