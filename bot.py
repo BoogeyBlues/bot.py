@@ -2486,6 +2486,54 @@ def fetch_smart_wallets():
     except Exception as e:
         log("warn", f"fetch_smart_wallets: {e}", "COPY")
 
+def _helius_wallet_buys(addr):
+    """Fetch recent pump.fun buys for a wallet via Helius Enhanced Transactions API.
+    Returns list of {token_address, token_symbol, timestamp, cost} dicts."""
+    if not HELIUS_API_KEY:
+        return []
+    try:
+        res = _session.get(
+            f"https://api.helius.xyz/v0/addresses/{addr}/transactions",
+            params={"api-key": HELIUS_API_KEY, "type": "SWAP", "limit": 10},
+            timeout=8
+        )
+        if res.status_code != 200:
+            log("warn", f"Helius {res.status_code} for {addr[:8]}", "COPY")
+            return []
+        sol_price = get_sol_price() or 150
+        acts = []
+        for tx in res.json():
+            ts     = tx.get("timestamp", 0)
+            source = tx.get("source", "").upper()
+            # Only pump.fun buys
+            if "PUMP" not in source:
+                continue
+            # Token received by this wallet = what they bought
+            mint = None
+            for t in tx.get("tokenTransfers", []):
+                if t.get("toUserAccount", "").lower() == addr.lower() and t.get("mint"):
+                    mint = t["mint"]
+                    break
+            if not mint:
+                continue
+            # SOL spent = native SOL leaving the wallet
+            sol_lamports = sum(
+                n.get("amount", 0)
+                for n in tx.get("nativeTransfers", [])
+                if n.get("fromUserAccount", "").lower() == addr.lower()
+            )
+            cost_usd = (sol_lamports / 1e9) * sol_price
+            acts.append({
+                "token_address": mint,
+                "token_symbol":  mint[:8],
+                "timestamp":     ts,
+                "cost":          cost_usd,
+            })
+        return acts
+    except Exception as e:
+        log("warn", f"Helius wallet buys ({addr[:8]}): {e}", "COPY")
+        return []
+
 def copy_trade_loop():
     time.sleep(15)
     fetch_smart_wallets()
@@ -2532,61 +2580,7 @@ def copy_trade_loop():
                     break
                 addr = w["address"]
                 try:
-                    # Try GMGN first; fall back to Solana RPC on failure
-                    acts = []
-                    try:
-                        res = _session.get(
-                            GMGN_ACTIVITY,
-                            params={"address": addr, "type": "buy", "limit": 5},
-                            headers={"User-Agent": "Mozilla/5.0"},
-                            timeout=8
-                        )
-                        if res.status_code == 200:
-                            acts = res.json().get("data", {}).get("activities", [])
-                    except Exception:
-                        pass
-                    # RPC fallback: parse recent pump.fun buys from on-chain sigs
-                    if not acts and _SOLANA_AVAILABLE:
-                        try:
-                            _rpc = Client(SOL_RPC)
-                            sigs = _rpc.get_signatures_for_address(
-                                Pubkey.from_string(addr), limit=8
-                            ).value or []
-                            PUMPFUN_PROG = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
-                            for s in sigs:
-                                if s.err:
-                                    continue
-                                age = time.time() - (s.block_time or 0)
-                                if age > COPY_MAX_AGE_SECS:
-                                    continue
-                                tx = _rpc.get_transaction(
-                                    s.signature, max_supported_transaction_version=0
-                                ).value
-                                if not tx:
-                                    continue
-                                try:
-                                    raw = tx.transaction
-                                    msg = getattr(raw, "message", None) or getattr(getattr(raw, "transaction", raw), "message", None)
-                                    if not msg:
-                                        continue
-                                except Exception:
-                                    continue
-                                prog_ids = [str(k) for k in (getattr(msg, "account_keys", None) or [])]
-                                if PUMPFUN_PROG not in prog_ids:
-                                    continue
-                                # Build minimal activity dict from RPC data
-                                # Token mint is typically account_keys[1] in pump.fun buys
-                                for key in prog_ids:
-                                    if key not in (PUMPFUN_PROG, addr, "11111111111111111111111111111111",
-                                                   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
-                                                   "SysvarRent111111111111111111111111111111111",
-                                                   "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
-                                                   "ComputeBudget111111111111111111111111111111"):
-                                        acts.append({"token_address": key, "token_symbol": key[:8],
-                                                     "timestamp": s.block_time or 0, "cost": 0})
-                                        break
-                        except Exception as _re:
-                            log("warn", f"RPC wallet fallback: {_re}", "COPY")
+                    acts = _helius_wallet_buys(addr)
                     for act in acts:
                         mint   = act.get("token_address", "")
                         symbol = act.get("token_symbol", mint[:8] if mint else "?")
