@@ -1140,9 +1140,15 @@ def get_bonding_details(mint):
         if res.status_code == 200:
             data  = res.json()
             vsol  = float(data.get("virtual_sol_reserves", 0) or 0)
+            vtr   = float(data.get("virtual_token_reserves", 1) or 1)
             bond  = min((vsol / 85_000_000_000) * 100, 99.9)
+            # Real price from constant-product curve: price_sol = vsol/vtr (lamports/raw_tokens)
+            # Convert: (vsol/1e9 SOL) / (vtr/1e6 tokens) = vsol/vtr * 1e-3 SOL per token
+            sol_price = get_sol_price() or 0
+            price_usd = (vsol / vtr * 1e-3 * sol_price) if sol_price and vtr > 0 else 0
             return {
                 "bond_pct":   round(bond, 1),
+                "price_usd":  price_usd,
                 "complete":   data.get("complete", False),
                 "replies":    int(data.get("reply_count", 0) or 0),
                 "twitter":    bool(data.get("twitter")),
@@ -2046,11 +2052,12 @@ def _verify_tx_landed(sig, mint, symbol, amount):
         try:
             bal = _check_token_balance(mint)
             if bal > 0:
-                # Tokens confirmed in wallet — remove unverified flag, trade is real
+                # Tokens confirmed — update actual count (slippage means estimate was wrong)
                 with trades_lock:
                     if mint in open_trades:
                         open_trades[mint].pop("_unverified", None)
-                log("ok", f"Buy confirmed: {bal:.0f} tokens in wallet ✓", symbol)
+                        open_trades[mint]["tokens"] = bal
+                log("ok", f"Buy confirmed: {bal:.0f} tokens in wallet ✓ (estimated {amount})", symbol)
                 return
         except Exception as e:
             log("warn", f"Balance check attempt {attempt}: {e}", symbol)
@@ -2135,29 +2142,38 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
     return True
 
 def _verify_sell_and_retry(sig, trade, mint, clamped_return, reason):
-    """Background: verify sell tx. If failed, retry sell once. If retry fails, log for manual action."""
-    for attempt, delay in [(1, 8), (2, 20)]:
-        time.sleep(delay)
-        try:
-            status = Client(SOL_RPC).get_signature_statuses([sig])
-            tx_s   = status.value[0] if status.value else None
-            if tx_s is not None and not tx_s.err:
-                return  # confirmed — all good
-        except Exception:
-            pass
-    # Sell failed on-chain — try once more immediately at market price
+    """Background: verify sell tx landed. Uses Helius first, balance check as ground truth."""
     symbol = trade["symbol"]
-    log("warn", f"Sell tx {sig[:12]}... failed on-chain — retrying sell", symbol)
-    retry_sig = execute_sell(trade["tokens"], mint, symbol)
+    for attempt, delay in [(1, 12), (2, 25)]:
+        time.sleep(delay)
+        for rpc_url in _rpc_endpoints():
+            try:
+                status = Client(rpc_url).get_signature_statuses([sig])
+                tx_s   = status.value[0] if status.value else None
+                if tx_s is not None and not tx_s.err:
+                    return  # confirmed on-chain — done
+                if tx_s is not None and tx_s.err:
+                    break  # explicitly failed — stop checking this attempt
+                break  # got response, tx pending — wait for next attempt
+            except Exception:
+                continue
+    # Status inconclusive — use token balance as ground truth
+    bal = _check_token_balance(mint)
+    if bal == 0:
+        log("ok", f"Sell confirmed via balance (tokens gone from wallet)", symbol)
+        return  # tokens gone = sell worked even if status check uncertain
+    # Tokens still in wallet — sell genuinely failed, retry once
+    log("warn", f"Sell tx failed — {bal:.0f} tokens still in wallet — retrying", symbol)
+    retry_sig = execute_sell(bal, mint, symbol)
     if retry_sig:
-        log("ok", f"Sell retry succeeded: {retry_sig[:12]}...", symbol)
-    else:
-        # Both sells failed — capital was already credited optimistically; walk it back
-        global capital
-        with capital_lock:
-            capital -= clamped_return
-        log("err", f"Sell failed twice — tokens may be stuck in wallet. Capital corrected by -${clamped_return:.2f}. Manual sell needed.", symbol)
-        notify(f"⚠️ STUCK {symbol}", f"Sell tx failed twice.\nTokens in wallet — sell manually in Phantom.\nCapital corrected -${clamped_return:.2f}")
+        log("ok", f"Sell retry submitted: {retry_sig[:12]}...", symbol)
+        return
+    # Retry also failed — tokens stuck, correct capital
+    global capital
+    with capital_lock:
+        capital -= clamped_return
+    log("err", f"Sell failed twice — tokens stuck. Capital -${clamped_return:.2f}. Sell manually in Phantom.", symbol)
+    notify(f"⚠️ STUCK {symbol}", f"Sell failed twice. Tokens still in wallet.\nSell manually in Phantom.\nCapital corrected -${clamped_return:.2f}")
 
 def exit_trade(mint, price, reason, bond=0):
     global capital
@@ -2268,16 +2284,17 @@ def _check_one_position(mint):
         details = get_bonding_details(mint)
         bond    = details["bond_pct"] if details else 0
 
-        # Bond/copy trades: derive price from bond% movement — faster and more reliable
-        # than DexScreener which has 30-60s lag and often returns 0 for new tokens
-        if strategy in ("bond", "copy", "bundle", "trench") and bond > 0 and trade.get("bond_entry", 0) > 0:
-            bond_move = bond - trade["bond_entry"]
-            price = trade["entry"] * (1 + bond_move / 100)
-            market = None
+        # Use real price from pump.fun virtual reserves — accurate constant-product AMM price
+        # Falls back to DexScreener for graduated/raydium tokens
+        market = None
+        if strategy in ("bond", "copy", "bundle", "trench") and details:
+            price = details.get("price_usd", 0) or 0
+            if price <= 0:
+                market = get_market_data(mint)
+                price = market["price"] if market and market["price"] > 0 else trade["entry"]
         else:
-            # Raydium/post-grad strategies need DexScreener price
             market = get_market_data(mint)
-            price  = market["price"] if market and market["price"] > 0 else trade["entry"]
+            price = market["price"] if market and market["price"] > 0 else trade["entry"]
 
         with trades_lock:
             if mint not in open_trades or open_trades[mint].get("_exiting"):
@@ -2645,17 +2662,20 @@ def copy_trade_loop():
                                 continue
                         sig_score = gmgn_signal_score(mint)
                         market = get_market_data(mint)
+                        # For very new tokens DexScreener may not have price yet — use bond price
                         if not market or market["price"] <= 0:
-                            continue
-                        # Require DexScreener indexing — no pair_address = no real volume data
-                        if not market.get("pair_address"):
-                            log("info", f"COPY SKIP: not indexed", symbol)
-                            continue
+                            bond_det = get_bonding_details(mint)
+                            if not bond_det or bond_det.get("price_usd", 0) <= 0:
+                                continue
+                            # Synthesize minimal market dict from bond data
+                            market = {"price": bond_det["price_usd"], "liq": 0,
+                                      "vol_m5": 0, "buys_m5": 0, "sells_m5": 0,
+                                      "change5m": 0, "pair_address": ""}
                         # Volume gate — same threshold as scanner strategies
-                        if market.get("vol_m5", 0) < MIN_VOL_5M:
+                        if market.get("vol_m5", 0) < MIN_VOL_5M and market.get("pair_address"):
                             log("info", f"COPY SKIP: vol ${market.get('vol_m5',0):.0f}<{MIN_VOL_5M:.0f}", symbol)
                             continue
-                        if not is_fast and market["liq"] < MIN_LIQ:
+                        if not is_fast and market.get("pair_address") and market["liq"] < MIN_LIQ:
                             continue
                         with _copy_lock:
                             _copied_mints[mint] = time.time()
@@ -2671,8 +2691,20 @@ def copy_trade_loop():
                             notify(f"📋 {'PINNED' if w.get('pinned') else 'COPY'} {symbol}",
                                    f"Wallet: {addr[:8]}...\nWin rate: {w['winrate']}%\nAmount: ${amt:.2f}")
                             bond_now = get_bonding_details(mint)
-                            bond_entry_pct = bond_now["bond_pct"] if bond_now else 0
-                            enter_trade(mint, symbol, market["price"], amt, "copy", bond_entry_pct, 0)
+                            if not bond_now:
+                                log("warn", "COPY SKIP: bond API unavailable — no price tracking", symbol)
+                                with _copy_lock:
+                                    _copied_mints.pop(mint, None)
+                                continue
+                            bond_entry_pct = bond_now["bond_pct"]
+                            # Use bond price as entry if DexScreener price is stale/zero
+                            entry_px = bond_now.get("price_usd", 0) or market["price"]
+                            if entry_px <= 0:
+                                log("warn", "COPY SKIP: no valid entry price", symbol)
+                                with _copy_lock:
+                                    _copied_mints.pop(mint, None)
+                                continue
+                            enter_trade(mint, symbol, entry_px, amt, "copy", bond_entry_pct, 0)
                     time.sleep(0.5)
                 except Exception as e:
                     log("warn", f"Wallet {addr[:8]} activity: {e}", "COPY")
