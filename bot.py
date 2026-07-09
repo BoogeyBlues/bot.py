@@ -2269,16 +2269,17 @@ def _check_one_position(mint):
 
         details = get_bonding_details(mint)
         bond    = details["bond_pct"] if details else 0
-        market  = get_market_data(mint)
-        price   = market["price"] if market and market["price"] > 0 else trade["entry"]
-    
-        # Paper mode price simulation
-        if PAPER_MODE and price == trade["entry"]:
-            if bond > 0 and trade.get("bond_entry", 0) > 0:
-                bond_move = bond - trade["bond_entry"]
-                price = trade["entry"] * (1 + bond_move / 100)
-            elif market and market.get("price", 0) > 0:
-                price = market["price"]
+
+        # Bond/copy trades: derive price from bond% movement — faster and more reliable
+        # than DexScreener which has 30-60s lag and often returns 0 for new tokens
+        if strategy in ("bond", "copy", "bundle", "trench") and bond > 0 and trade.get("bond_entry", 0) > 0:
+            bond_move = bond - trade["bond_entry"]
+            price = trade["entry"] * (1 + bond_move / 100)
+            market = None
+        else:
+            # Raydium/post-grad strategies need DexScreener price
+            market = get_market_data(mint)
+            price  = market["price"] if market and market["price"] > 0 else trade["entry"]
 
         with trades_lock:
             if mint not in open_trades or open_trades[mint].get("_exiting"):
@@ -3596,6 +3597,7 @@ def _home_inner():
     <button class="btn btn-ghost" onclick="adminPost('/admin/reset-daily',{{}},null)">🔄 Reset Daily</button>
     <button class="btn btn-ghost" onclick="adminPost('/admin/reset-capital',{{}},null)">💰 Reset Capital</button>
     <button class="btn btn-ghost" style="border-color:#00ff88;color:#00ff88;font-weight:700" onclick="(function(){{var v=prompt('Set capital to:','75');if(v&&!isNaN(parseFloat(v)))adminPost('/admin/set-capital',{{amount:parseFloat(v)}},null)}})()">💵 Set Capital</button>
+    <button class="btn btn-ghost" style="border-color:#00e5ff;color:#00e5ff;font-weight:700" onclick="adminPost('/admin/sync-capital',{{}},function(r){{alert('Synced: '+r.msg)}})">🔄 Sync Wallet</button>
     <button class="btn btn-ghost" style="border-color:#ff3355;color:#ff3355" onclick="adminPost('/admin/reset-all',{{}},null)">🗑️ Reset All</button>
     <button class="btn btn-ghost" style="border-color:#888;color:#aaa;font-size:0.68rem" onclick="setApiKey()">🔑 Set Key</button>
   </div>
@@ -5305,6 +5307,40 @@ def set_capital_get(amount):
     ghost_msg = f" Cleared {len(cleared)} ghost(s): {', '.join(cleared)}." if cleared else ""
     log("ok", f"Capital manually set to ${amount:.2f}.{ghost_msg}")
     return f'<meta http-equiv="refresh" content="3;url=/">Capital set to ${amount:.2f}.{ghost_msg} Redirecting...'
+
+@app.route("/admin/sync-capital", methods=["POST"])
+def admin_sync_capital():
+    """Read actual SOL balance from wallet via RPC and sync bot capital to it."""
+    denied = _auth_required()
+    if denied: return denied
+    global capital, _day_start_cap, _daily_cap_notified
+    if not WALLET or not _SOLANA_AVAILABLE:
+        return jsonify({"error": "No wallet configured"}), 400
+    sol_price = get_sol_price() or 0
+    if not sol_price:
+        return jsonify({"error": "Cannot fetch SOL price"}), 500
+    try:
+        for rpc_url in _rpc_endpoints():
+            try:
+                client = Client(rpc_url)
+                bal = client.get_balance(Pubkey.from_string(WALLET))
+                sol = bal.value / 1e9
+                usd = round(sol * sol_price, 2)
+                with capital_lock:
+                    old = capital
+                    capital = usd
+                with _daily_lock:
+                    _day_start_cap      = usd
+                    _daily_cap_notified = False
+                _save_daily_state()
+                log("ok", f"Capital synced from wallet: {sol:.4f} SOL = ${usd:.2f} (was ${old:.2f})")
+                return jsonify({"ok": True, "sol": sol, "usd": usd, "sol_price": sol_price,
+                                "msg": f"Synced to ${usd:.2f} ({sol:.4f} SOL @ ${sol_price:.0f})"})
+            except Exception:
+                continue
+        return jsonify({"error": "RPC unreachable"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/admin/set-capital", methods=["POST"])
 def admin_set_capital():
