@@ -3504,6 +3504,7 @@ def _home_inner():
     <button class="btn btn-ghost" style="border-color:rgba(0,229,255,.4);color:#00e5ff" onclick="adminPost('/admin/tune-now',{{}},null)">🧠 Tune Now</button>
     <button class="btn btn-ghost" onclick="adminPost('/admin/reset-daily',{{}},null)">🔄 Reset Daily</button>
     <button class="btn btn-ghost" onclick="adminPost('/admin/reset-capital',{{}},null)">💰 Reset Capital</button>
+    <button class="btn btn-ghost" style="border-color:#00ff88;color:#00ff88;font-weight:700" onclick="adminPost('/admin/set-capital',{{amount:105}},null)">💵 Set $105</button>
     <button class="btn btn-ghost" style="border-color:#ff3355;color:#ff3355" onclick="adminPost('/admin/reset-all',{{}},null)">🗑️ Reset All</button>
     <button class="btn btn-ghost" style="border-color:#888;color:#aaa;font-size:0.68rem" onclick="setApiKey()">🔑 Set Key</button>
   </div>
@@ -5201,6 +5202,32 @@ def set_capital_get(amount):
     ghost_msg = f" Cleared {len(cleared)} ghost(s): {', '.join(cleared)}." if cleared else ""
     log("ok", f"Capital manually set to ${amount:.2f}.{ghost_msg}")
     return f'<meta http-equiv="refresh" content="3;url=/">Capital set to ${amount:.2f}.{ghost_msg} Redirecting...'
+
+@app.route("/admin/set-capital", methods=["POST"])
+def admin_set_capital():
+    denied = _auth_required()
+    if denied: return denied
+    global capital, usdc_locked
+    try:
+        amount = float((request.json or {}).get("amount", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid amount"}), 400
+    if amount <= 0 or amount > 100000:
+        return jsonify({"error": "amount out of range"}), 400
+    cleared = []
+    with trades_lock:
+        for mint, t in list(open_trades.items()):
+            cleared.append(t["symbol"])
+            del open_trades[mint]
+        redis_save("bot_open_trades", [])
+    with capital_lock:
+        capital = float(amount)
+    with usdc_lock:
+        usdc_locked = 0.0
+    _save_daily_state()
+    ghost_msg = f" Cleared {len(cleared)} ghost(s): {', '.join(cleared)}." if cleared else ""
+    log("ok", f"Capital set to ${amount:.2f} via admin button.{ghost_msg}")
+    return jsonify({"ok": True, "msg": f"Capital set to ${amount:.2f}.{ghost_msg} Refresh to confirm."})
 
 @app.route("/clear-usdc")
 def clear_usdc_get():
