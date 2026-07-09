@@ -1829,6 +1829,55 @@ def lock_profit_to_usdc(profit_usd):
     except Exception as e:
         log("warn", f"USDC lock error: {e}", "USDC")
 
+# ── POOL DETECTION + BUY HELPER ──────────────────────────────────
+def _detect_pool(mint, symbol=""):
+    """Ask pump.fun which pool this coin is on. Falls back to pump-swap → pump."""
+    try:
+        r = _session.get(f"https://frontend-api.pump.fun/coins/{mint}", timeout=5)
+        if r.status_code == 200:
+            d = r.json()
+            if d.get("raydium_pool"):
+                log("info", f"Pool detect: raydium", symbol)
+                return "raydium"
+            if d.get("is_pump_swap") or d.get("pump_swap_pool") or d.get("is_cashback_enabled"):
+                log("info", f"Pool detect: pump-swap", symbol)
+                return "pump-swap"
+            log("info", f"Pool detect: pump", symbol)
+            return "pump"
+    except Exception as e:
+        log("warn", f"Pool detect failed ({e}) — trying pump-swap", symbol)
+    return "pump-swap"  # safer default: pump-swap works for most recent coins
+
+def _buy_with_pool(keypair, mint, symbol, sol_amount, pool):
+    """Call PumpPortal, sign, and send. Retries with pump if pump-swap returns error."""
+    pools_to_try = [pool]
+    if pool == "pump-swap":
+        pools_to_try.append("pump")
+    elif pool == "pump":
+        pools_to_try.append("pump-swap")
+
+    for p in pools_to_try:
+        try:
+            res = _session.post(
+                PUMPPORTAL,
+                headers={"Content-Type": "application/json"},
+                json={"publicKey": WALLET, "action": "buy", "mint": mint,
+                      "denominatedInSol": "true", "amount": sol_amount,
+                      "slippage": 50, "priorityFee": 0.001, "pool": p},
+                timeout=15
+            )
+            if res.status_code != 200:
+                log("warn", f"PumpPortal {p} pool {res.status_code} — trying next pool", symbol)
+                continue
+            tx  = VersionedTransaction(VersionedTransaction.from_bytes(res.content).message, [keypair])
+            sig = _send_tx(bytes(tx), symbol)
+            if sig:
+                log("ok", f"Bought via {p} pool", symbol)
+                return sig
+        except Exception as e:
+            log("warn", f"Buy attempt on {p} pool: {e}", symbol)
+    return None
+
 # ── TRADE EXECUTION ──────────────────────────────────────────────
 def execute_buy(mint, symbol, amount, pump_swap=False, raydium=False):
     if PAPER_MODE:
@@ -1861,27 +1910,15 @@ def execute_buy(mint, symbol, amount, pump_swap=False, raydium=False):
         except Exception as be:
             log("warn", f"SOL balance check failed: {be}", symbol)
 
+        # Detect correct pool from pump.fun API — avoids on-chain swap failure from pool mismatch
         if raydium:
             pool = "raydium"
         elif pump_swap:
             pool = "pump-swap"
         else:
-            pool = "pump"
+            pool = _detect_pool(mint, symbol)
 
-        res = _session.post(
-            PUMPPORTAL,
-            headers={"Content-Type": "application/json"},
-            json={"publicKey": WALLET, "action": "buy", "mint": mint,
-                  "denominatedInSol": "true", "amount": sol_amount,
-                  "slippage": 50, "priorityFee": 0.001, "pool": pool},
-            timeout=15
-        )
-        if res.status_code != 200:
-            log("err", f"PumpPortal {res.status_code}: {res.text[:120]}", symbol)
-            return None
-
-        tx  = VersionedTransaction(VersionedTransaction.from_bytes(res.content).message, [keypair])
-        sig = _send_tx(bytes(tx), symbol)
+        sig = _buy_with_pool(keypair, mint, symbol, sol_amount, pool)
         if sig:
             log("ok", f"solscan.io/tx/{sig}", symbol)
             return sig
