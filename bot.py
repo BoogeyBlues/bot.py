@@ -1947,32 +1947,44 @@ def execute_sell(tokens, mint, symbol, pump_swap=False, raydium=False):
         else:
             pools_to_try = ["pump", "pump-swap"]
 
-        keypair = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+        keypair  = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+        # PumpPortal expects integer token count — float can cause 400 rejection
+        tok_int  = int(tokens)
 
         for pool in pools_to_try:
-            try:
-                res = _session.post(
-                    PUMPPORTAL,
-                    headers={"Content-Type": "application/json"},
-                    json={"publicKey": WALLET, "action": "sell", "mint": mint,
-                          "denominatedInSol": "false", "amount": tokens,
-                          "slippage": 50, "priorityFee": 0.001, "pool": pool},
-                    timeout=15
-                )
-                if res.status_code != 200:
-                    log("warn", f"PumpPortal sell [{pool}] {res.status_code}: {res.text[:80]}", symbol)
-                    continue
-                tx  = VersionedTransaction(VersionedTransaction.from_bytes(res.content).message, [keypair])
-                sig = _send_tx(bytes(tx), symbol)
-                if sig:
-                    log("ok", f"Sold via {pool}! solscan.io/tx/{sig}", symbol)
-                    return sig
-            except Exception as pe:
-                log("warn", f"Sell attempt [{pool}]: {pe}", symbol)
-        log("err", "All sell pools failed", symbol)
+            for fetch_attempt in range(2):  # retry with fresh blockhash if broadcast fails
+                try:
+                    # Escalate priority fee on retry — exits during pumps need higher priority
+                    priority = 0.005 if fetch_attempt == 0 else 0.01
+                    res = _session.post(
+                        PUMPPORTAL,
+                        headers={"Content-Type": "application/json"},
+                        json={"publicKey": WALLET, "action": "sell", "mint": mint,
+                              "denominatedInSol": "false", "amount": tok_int,
+                              "slippage": 50, "priorityFee": priority, "pool": pool},
+                        timeout=15
+                    )
+                    if res.status_code != 200:
+                        log("warn", f"PumpPortal sell [{pool}] {res.status_code}: {res.text[:120]}", symbol)
+                        break  # 4xx/5xx — try next pool, not retry same pool
+                    if len(res.content) < 100:
+                        log("warn", f"PumpPortal [{pool}]: bad response ({len(res.content)}b): {res.text[:80]}", symbol)
+                        break
+                    tx  = VersionedTransaction(VersionedTransaction.from_bytes(res.content).message, [keypair])
+                    sig = _send_tx(bytes(tx), symbol)
+                    if sig:
+                        log("ok", f"Sold via {pool} | solscan.io/tx/{sig}", symbol)
+                        return sig
+                    # Broadcast failed — refetch fresh tx (fresh blockhash) and retry once
+                    log("warn", f"Sell broadcast failed [{pool}] attempt {fetch_attempt+1} — refetching tx", symbol)
+                    time.sleep(0.4)
+                except Exception as pe:
+                    log("warn", f"Sell [{pool}] attempt {fetch_attempt+1}: {type(pe).__name__}: {pe}", symbol)
+                    break  # exception on this pool — move to next pool
+        log("err", f"All sell pools exhausted for {symbol} ({mint[:8]})", symbol)
         return None
     except Exception as e:
-        log("err", f"Sell error: {e}", symbol)
+        log("err", f"Sell error: {type(e).__name__}: {e}", symbol)
         return None
 
 # ── PARTIAL EXIT ────────────────────────────────────────────────
@@ -3730,7 +3742,7 @@ def _home_inner():
     </div>
   </div>
   <canvas id="pm-chart" height="80" style="display:block;width:calc(100% - 28px);margin:6px 14px 8px;border-radius:10px"></canvas>
-  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;padding:0 14px 14px">
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;padding:0 14px 6px">
     <button onclick="miniAction('close')" style="background:#f8717114;color:#f87171;border:1px solid #f8717130;border-radius:12px;padding:14px 6px 10px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:4px;font-family:inherit;transition:all .13s">
       <span style="font-size:1.1rem">✕</span><span style="font-size:.8rem;font-weight:700;letter-spacing:.04em">CLOSE</span><span style="font-size:.52rem;color:#f8717180">full exit</span>
     </button>
@@ -3739,6 +3751,11 @@ def _home_inner():
     </button>
     <button onclick="miniAction('add')" style="background:#60a5fa12;color:#60a5fa;border:1px solid #60a5fa28;border-radius:12px;padding:14px 6px 10px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:4px;font-family:inherit;transition:all .13s">
       <span style="font-size:1.1rem">＋</span><span style="font-size:.8rem;font-weight:700;letter-spacing:.04em">ADD</span><span style="font-size:.52rem;color:#60a5fa80">compound</span>
+    </button>
+  </div>
+  <div style="padding:0 14px 14px">
+    <button onclick="miniAction('force')" style="width:100%;background:#ff335514;color:#ff3355;border:1px solid #ff335530;border-radius:12px;padding:10px 6px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;font-family:inherit;font-size:.8rem;font-weight:700;letter-spacing:.06em;transition:all .13s">
+      ⚡ FORCE SELL — bypass bot, sell wallet balance now
     </button>
   </div>
 </div>
@@ -3866,11 +3883,19 @@ async function miniAction(action){{
   if(action==='close') url=`/position/${{mint}}/close`;
   else if(action==='tp'){{url=`/position/${{mint}}/tp`;body={{fraction:0.4,label:'TP1'}};}}
   else if(action==='add'){{url=`/position/${{mint}}/compound`;body={{amount:5}};}}
+  else if(action==='force') url=`/admin/force-sell/${{mint}}`;
+  if(!url) return;
   try{{
-    await fetch(url,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:body?JSON.stringify(body):undefined}});
-    if(action==='close') closeMiniDrawer();
-    else fetchMiniPos();
-  }}catch(e){{}}
+    const s=localStorage.getItem('api_secret')||'';
+    const hdrs={{'Content-Type':'application/json'}};
+    if(s) hdrs['X-API-Key']=s;
+    const r=await fetch(url,{{method:'POST',headers:hdrs,body:body?JSON.stringify(body):undefined}});
+    const d=await r.json().catch(()=>({{}}));
+    if(action==='close'||action==='force'){{
+      if(d.ok===false) alert('Sell failed: '+(d.error||'check logs'));
+      else closeMiniDrawer();
+    }} else fetchMiniPos();
+  }}catch(e){{alert('Error: '+e);}}
 }}
 
 // ── Live stat polling ────────────────────────────────────
@@ -5571,6 +5596,48 @@ def admin_set_paper_mode():
     state = "PAPER" if PAPER_MODE else "LIVE"
     log("warn" if not PAPER_MODE else "ok", f"Mode switched to {state} via admin", "ADMIN")
     return jsonify({"ok": True, "paper_mode": PAPER_MODE, "mode": state})
+
+@app.route("/admin/force-sell/<mint>", methods=["POST"])
+def admin_force_sell(mint):
+    """Emergency: sell all tokens for a given mint immediately, regardless of open_trades state."""
+    global capital
+    denied = _auth_required()
+    if denied: return denied
+    # Get actual wallet balance as source of truth
+    bal = _check_token_balance(mint)
+    symbol = "UNKNOWN"
+    with trades_lock:
+        if mint in open_trades:
+            symbol = open_trades[mint].get("symbol", symbol)
+    if bal <= 0 and mint not in open_trades:
+        return jsonify({"ok": False, "error": "No tokens found in wallet and no open position"})
+    sell_tokens = bal if bal > 0 else open_trades.get(mint, {}).get("tokens", 0)
+    if sell_tokens <= 0:
+        return jsonify({"ok": False, "error": "Token balance is zero"})
+    log("warn", f"FORCE SELL {sell_tokens:.0f} tokens via admin", symbol)
+    # Close open position if tracked
+    trade = None
+    with trades_lock:
+        if mint in open_trades:
+            open_trades[mint]["_exiting"] = True
+            trade = open_trades.pop(mint)
+    sig = execute_sell(sell_tokens, mint, symbol)
+    if sig:
+        if trade:
+            price = trade.get("entry", 0)
+            amount = trade.get("amount", 0)
+            partial = trade.get("partial_proceeds", 0.0)
+            clamped = max(0.0, amount - partial)
+            with capital_lock:
+                capital += clamped
+            log("ok", f"Force sell succeeded: {sig[:12]}... Capital +${clamped:.2f}", symbol)
+        return jsonify({"ok": True, "sig": sig, "tokens_sold": sell_tokens, "symbol": symbol})
+    else:
+        if trade:
+            with trades_lock:
+                trade.pop("_exiting", None)
+                open_trades[mint] = trade
+        return jsonify({"ok": False, "error": "Sell transaction failed — check logs. Position restored.", "symbol": symbol})
 
 @app.route("/log", methods=["GET"])
 def get_log():
@@ -7665,10 +7732,18 @@ def positions_api():
 
 @app.route("/position/<mint>/close", methods=["POST"])
 def position_close(mint):
+    global capital
     with trades_lock:
         if mint not in open_trades:
             return jsonify({"error": "not found"}), 404
         trade = dict(open_trades[mint])
+    if not PAPER_MODE:
+        # Use actual wallet balance for sell amount — slippage means stored count may differ
+        real_bal = _check_token_balance(mint)
+        if real_bal > 0:
+            with trades_lock:
+                if mint in open_trades:
+                    open_trades[mint]["tokens"] = real_bal
     price = _pos_price(trade)
     exit_trade(mint, price, "MANUAL_CLOSE", trade.get("bond_high", 0))
     return jsonify({"ok": True})
