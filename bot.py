@@ -622,6 +622,8 @@ def _reset_daily_if_needed():
         prev = time.gmtime(time.time() - 86400)
         day_key = time.strftime("%Y-%m-%d", prev) + f"@{TRADE_START_HOUR:02d}"
     today = day_key   # reuse variable name so the block below works unchanged
+    with capital_lock:
+        _cap_snap = capital  # snapshot before _daily_lock to avoid holding both simultaneously
     with _daily_lock:
         if _daily_date != today:
             if _daily_date:
@@ -630,7 +632,7 @@ def _reset_daily_if_needed():
                     "trades":  _daily_trades,
                     "wins":    _daily_wins,
                     "losses":  _daily_losses,
-                    "capital": capital,
+                    "capital": _cap_snap,
                 })
             if not _week_start_date:
                 _week_start_date = today
@@ -640,7 +642,7 @@ def _reset_daily_if_needed():
             _daily_losses  = 0
             _daily_cap_notified = False
             # _pause_until intentionally NOT reset here — pause survives day rollover
-            _day_start_cap = capital  # snapshot for daily loss % guard
+            _day_start_cap = _cap_snap  # snapshot for daily loss % guard
             limit = daily_trade_limit()
             with capital_lock:
                 cap = capital
@@ -3199,7 +3201,9 @@ def scanner_loop():
                         continue
                 if gmint in blacklisted_mints or daily_limit_reached():
                     continue
-                if time.time() - _sold_mints.get(gmint, 0) < SOLD_COOLDOWN_SECS:
+                with _copy_lock:
+                    _gmint_sold_at = _sold_mints.get(gmint, 0)
+                if time.time() - _gmint_sold_at < SOLD_COOLDOWN_SECS:
                     continue
                 if gc.get("replies", 0) < MIN_REPLIES:
                     log("info", f"MIGRATION SKIP: replies {gc.get('replies',0)}<{MIN_REPLIES}", gc["symbol"])
@@ -3251,7 +3255,8 @@ def scanner_loop():
                 with _copy_lock:
                     if sig_mint in _copied_mints:
                         continue
-                if time.time() - _sold_mints.get(sig_mint, 0) < SOLD_COOLDOWN_SECS:
+                    _sig_sold_at = _sold_mints.get(sig_mint, 0)
+                if time.time() - _sig_sold_at < SOLD_COOLDOWN_SECS:
                     continue
                 if daily_limit_reached():
                     break
@@ -3313,7 +3318,8 @@ def scanner_loop():
                 with _copy_lock:
                     if dsc_mint in _copied_mints:
                         continue
-                if time.time() - _sold_mints.get(dsc_mint, 0) < SOLD_COOLDOWN_SECS:
+                    _dsc_sold_at = _sold_mints.get(dsc_mint, 0)
+                if time.time() - _dsc_sold_at < SOLD_COOLDOWN_SECS:
                     continue
                 if daily_limit_reached():
                     break
@@ -3381,7 +3387,8 @@ def scanner_loop():
                 with _copy_lock:
                     if jup_mint in _copied_mints:
                         continue
-                if time.time() - _sold_mints.get(jup_mint, 0) < SOLD_COOLDOWN_SECS:
+                    _jup_sold_at = _sold_mints.get(jup_mint, 0)
+                if time.time() - _jup_sold_at < SOLD_COOLDOWN_SECS:
                     continue
                 if daily_limit_reached():
                     break
