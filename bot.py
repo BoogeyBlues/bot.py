@@ -282,6 +282,8 @@ _bundle_deployers = {}   # deployer wallet -> {"count": int, "first_seen": float
 BUNDLE_DEPLOYER_THRESHOLD = 2  # block deployer after N bundled launches
 trade_log         = []
 completed_trades  = []
+_trade_id_lock    = threading.Lock()
+_trade_id_counter = 0
 log_lock          = threading.Lock()
 scan_active       = True
 _milestones_hit   = set()
@@ -572,6 +574,10 @@ def _load_daily_state():
     if trades_data:
         completed_trades.clear()
         completed_trades.extend(trades_data)
+        # Seed monotonic counter above the highest existing ID to prevent collisions after redeploy
+        with _trade_id_lock:
+            global _trade_id_counter
+            _trade_id_counter = max((t.get("id", 0) for t in trades_data), default=0)
         log("ok", f"Reloaded {len(completed_trades)} completed trades")
 
     # Ensure TUNE_PAUSED_UNTIL is always set to a future Monday — never left at 0.0
@@ -1885,7 +1891,7 @@ def _buy_with_pool(keypair, mint, symbol, sol_amount, pool):
                 headers={"Content-Type": "application/json"},
                 json={"publicKey": WALLET, "action": "buy", "mint": mint,
                       "denominatedInSol": "true", "amount": sol_amount,
-                      "slippage": 50, "priorityFee": 0.001, "pool": p},
+                      "slippage": 50, "priorityFee": 0.005, "pool": p},
                 timeout=15
             )
             if res.status_code != 200:
@@ -2011,7 +2017,8 @@ def _partial_exit(mint, price, fraction, label):
         if mint not in open_trades:
             return
         trade = open_trades[mint]
-        tokens_to_sell = trade["tokens"] * fraction
+        # Truncate to int: execute_sell sends int to PumpPortal; state must match
+        tokens_to_sell = int(trade["tokens"] * fraction)
         if tokens_to_sell <= 0:
             return
         entry     = trade["entry"]
@@ -2114,28 +2121,43 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
     if daily_limit_reached():
         _log_scan(symbol, mint, bond_entry, 0, "cap", -1, "DAILY CAP / COOLDOWN")
         return False
-    with trades_lock:
-        if mint in open_trades or len(open_trades) >= MAX_OPEN:
-            return False
-    # Skip recently sold coins — configurable cooldown (default 5 min)
+
+    # Skip recently sold coins — check before any reservation
     with _copy_lock:
         sold_at = _sold_mints.get(mint, 0)
         if sold_at and time.time() - sold_at < SOLD_COOLDOWN_SECS:
             return False
+
+    # Atomically reserve capital — check + deduct in one lock acquisition to prevent
+    # two concurrent scanner threads from both passing the check and double-spending
     with capital_lock:
         if capital < amount:
             return False
+        capital -= amount  # RESERVED: refunded below if buy fails
+
+    # Atomically reserve trade slot — prevent exceeding MAX_OPEN under concurrent load.
+    # Uses _unverified=True so monitor skips the placeholder until real data is written.
+    # Lock order: trades_lock outer, capital_lock inner — consistent with _cleanup_ghost.
+    with trades_lock:
+        if mint in open_trades or len(open_trades) >= MAX_OPEN:
+            with capital_lock:
+                capital += amount  # Release reservation
+            return False
+        open_trades[mint] = {"symbol": symbol, "mint": mint, "_unverified": True}
 
     tx = execute_buy(mint, symbol, amount, pump_swap=pump_swap, raydium=raydium)
     if not tx:
+        # Buy failed — release both reservations
+        with trades_lock:
+            open_trades.pop(mint, None)
+        with capital_lock:
+            capital += amount
         return False
 
     with _daily_lock:
         _daily_trades += 1
 
-    with capital_lock:
-        capital -= amount
-
+    # Capital already deducted during reservation — just write the full trade record
     with trades_lock:
         open_trades[mint] = {
             "symbol":            symbol,
@@ -2150,7 +2172,7 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
             "bond_prev":         bond_entry,
             "bond_last_moved":   time.time(),
             "bond_slip_start":   None,
-            "price_high":        entry_price,   # trailing SL tracks peak price
+            "price_high":        entry_price,
             "replies":           replies,
             "pump_swap":         pump_swap,
             "raydium":           raydium,
@@ -2257,8 +2279,12 @@ def exit_trade(mint, price, reason, bond=0):
     record_daily_trade(won=(pnl > 0))
 
     pnl_pct = round(pnl / max(amount, 1e-12) * 100, 2)
+    global _trade_id_counter
+    with _trade_id_lock:
+        _trade_id_counter += 1
+        trade_id = _trade_id_counter
     rec = {
-        "id":         len(completed_trades) + 1,
+        "id":         trade_id,
         "symbol":     trade["symbol"],
         "mint":       mint,
         "strategy":   trade["strategy"],
