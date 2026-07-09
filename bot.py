@@ -2462,15 +2462,55 @@ def copy_trade_loop():
                     break
                 addr = w["address"]
                 try:
-                    res = _session.get(
-                        GMGN_ACTIVITY,
-                        params={"address": addr, "type": "buy", "limit": 5},
-                        headers={"User-Agent": "Mozilla/5.0"},
-                        timeout=8
-                    )
-                    if res.status_code != 200:
-                        continue
-                    acts = res.json().get("data", {}).get("activities", [])
+                    # Try GMGN first; fall back to Solana RPC on failure
+                    acts = []
+                    try:
+                        res = _session.get(
+                            GMGN_ACTIVITY,
+                            params={"address": addr, "type": "buy", "limit": 5},
+                            headers={"User-Agent": "Mozilla/5.0"},
+                            timeout=8
+                        )
+                        if res.status_code == 200:
+                            acts = res.json().get("data", {}).get("activities", [])
+                    except Exception:
+                        pass
+                    # RPC fallback: parse recent pump.fun buys from on-chain sigs
+                    if not acts and _SOLANA_AVAILABLE:
+                        try:
+                            _rpc = Client(SOL_RPC)
+                            sigs = _rpc.get_signatures_for_address(
+                                Pubkey.from_string(addr), limit=8
+                            ).value or []
+                            PUMPFUN_PROG = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+                            for s in sigs:
+                                if s.err:
+                                    continue
+                                age = time.time() - (s.block_time or 0)
+                                if age > COPY_MAX_AGE_SECS:
+                                    continue
+                                tx = _rpc.get_transaction(
+                                    s.signature, max_supported_transaction_version=0
+                                ).value
+                                if not tx:
+                                    continue
+                                msg = tx.transaction.message
+                                prog_ids = [str(k) for k in msg.account_keys]
+                                if PUMPFUN_PROG not in prog_ids:
+                                    continue
+                                # Build minimal activity dict from RPC data
+                                # Token mint is typically account_keys[1] in pump.fun buys
+                                for key in prog_ids:
+                                    if key not in (PUMPFUN_PROG, addr, "11111111111111111111111111111111",
+                                                   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                                                   "SysvarRent111111111111111111111111111111111",
+                                                   "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+                                                   "ComputeBudget111111111111111111111111111111"):
+                                        acts.append({"token_address": key, "token_symbol": key[:8],
+                                                     "timestamp": s.block_time or 0, "cost": 0})
+                                        break
+                        except Exception as _re:
+                            log("warn", f"RPC wallet fallback: {_re}", "COPY")
                     for act in acts:
                         mint   = act.get("token_address", "")
                         symbol = act.get("token_symbol", mint[:8] if mint else "?")
@@ -2613,10 +2653,21 @@ def _eval_coin(coin):
             _log_scan(symbol, mint, bond, _sig_pre, "vel", 7, "BOND STALLED")
             return None
         market = get_market_data(mint)
-        # Require DexScreener indexing — no pair address means no volume data, skip
         if not market or not market.get("pair_address") or market["price"] <= 0:
-            _log_scan(symbol, mint, bond, _sig_pre, "vol", 8, "NOT INDEXED YET")
-            return None
+            # DexScreener hasn't indexed yet — derive price from bonding curve
+            _sol_p = get_sol_price()
+            _vtok  = coin.get("vtok", 0)
+            _vsol  = coin.get("vsol", 0)
+            _curve_price = (_vsol / _vtok * 1e6) * _sol_p if (_vtok > 0 and _sol_p) else 0
+            if _curve_price <= 0:
+                _log_scan(symbol, mint, bond, _sig_pre, "vol", 8, "NO PRICE DATA")
+                return None
+            # Skip DexScreener volume/momentum/impact gates — bonding curve is the exit
+            _log_scan(symbol, mint, bond, _sig_pre, "vol", 8, f"CURVE ${_curve_price:.6f}")
+            return {"action": "trade", "strategy": "bond", "mint": mint, "symbol": symbol,
+                    "price": _curve_price, "bond": bond, "sig_score": sig_score,
+                    "pump_swap": coin.get("pump_swap", False),
+                    "market": {"price": _curve_price, "liq": 0, "vol_m5": 0}}
         if market.get("vol_m5", 0) < MIN_VOL_5M:
             _log_scan(symbol, mint, bond, _sig_pre, "vol", 8, f"VOL ${market['vol_m5']:.0f}<{MIN_VOL_5M:.0f}")
             return None
