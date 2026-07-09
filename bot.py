@@ -6,6 +6,7 @@ from collections import defaultdict
 try:
     from solders.keypair import Keypair
     from solders.transaction import VersionedTransaction
+    from solders.pubkey import Pubkey
     from solana.rpc.api import Client
     from solana.rpc.types import TxOpts
     _SOLANA_AVAILABLE = True
@@ -1801,11 +1802,32 @@ def execute_buy(mint, symbol, amount, pump_swap=False, raydium=False):
         log("ok", f"[PAPER] Buy ${amount:.2f} -> {symbol}", symbol)
         return "PAPER_TX"
     try:
+        # Validate private key format before any network calls
+        try:
+            keypair = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+        except Exception as ke:
+            log("err", f"INVALID PRIVATE KEY: {ke} — check Railway WALLET_PRIVATE_KEY (must be Phantom base58, ~88 chars)", symbol)
+            return None
+
         sol_price = get_sol_price()
         if not sol_price:
             log("err", "Cannot get SOL price — buy aborted", symbol)
             return None
         sol_amount = round(amount / sol_price, 6)
+
+        # Check SOL balance before calling PumpPortal
+        try:
+            _rpc = Client(SOL_RPC)
+            bal_resp = _rpc.get_balance(Pubkey.from_string(WALLET))
+            sol_balance = bal_resp.value / 1e9
+            min_needed = sol_amount + 0.005  # tx cost ~0.001–0.005 SOL
+            if sol_balance < min_needed:
+                log("err", f"LOW SOL: have {sol_balance:.4f} SOL, need {min_needed:.4f} (${amount:.2f} buy + gas) — top up Phantom", symbol)
+                return None
+            log("info", f"Wallet: {sol_balance:.4f} SOL available", symbol)
+        except Exception as be:
+            log("warn", f"SOL balance check failed: {be}", symbol)
+
         if raydium:
             pool = "raydium"
         elif pump_swap:
@@ -1822,21 +1844,20 @@ def execute_buy(mint, symbol, amount, pump_swap=False, raydium=False):
             timeout=15
         )
         if res.status_code != 200:
-            log("err", f"PumpPortal buy {res.status_code}: {res.text[:80]}", symbol)
+            log("err", f"PumpPortal {res.status_code}: {res.text[:120]}", symbol)
             return None
 
-        keypair = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
-        tx      = VersionedTransaction(VersionedTransaction.from_bytes(res.content).message, [keypair])
-        client  = Client(SOL_RPC)
-        result  = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True, preflight_commitment="confirmed"))
-        sig     = str(result.value)
+        tx     = VersionedTransaction(VersionedTransaction.from_bytes(res.content).message, [keypair])
+        client = Client(SOL_RPC)
+        result = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True, preflight_commitment="confirmed"))
+        sig    = str(result.value)
         if sig and len(sig) > 10:
-            log("ok", f"Bought! sig={sig[:20]}...", symbol)
-            log("ok", f"https://solscan.io/tx/{sig}", symbol)
+            log("ok", f"TX sent: {sig[:20]}... solscan.io/tx/{sig}", symbol)
             return sig
+        log("err", f"RPC returned empty sig — tx may not have landed", symbol)
         return None
     except Exception as e:
-        log("err", f"Buy error: {e}", symbol)
+        log("err", f"Buy error [{type(e).__name__}]: {e}", symbol)
         return None
 
 def execute_sell(tokens, mint, symbol, pump_swap=False, raydium=False):
@@ -5142,6 +5163,40 @@ def admin_resume():
 def get_log():
     return jsonify({"logs": trade_log[-100:]})
 
+@app.route("/wallet-check")
+def wallet_check():
+    lines = [
+        "<pre style='font-family:monospace;font-size:13px;line-height:1.8;padding:20px;background:#050a14;color:#c8d8f0;min-height:100vh'>",
+        f"<b style='color:#00e5ff'>WALLET DIAGNOSTIC</b>",
+        "",
+        f"PAPER_MODE  : {'YES (simulated — no real trades)' if PAPER_MODE else '<b style=color:#00ff88>NO — LIVE MODE</b>'}",
+        f"WALLET      : {'<b style=color:#00ff88>' + WALLET[:8] + '...</b> (set)' if WALLET else '<b style=color:#ff3355>NOT SET</b> — add WALLET env var'}",
+        f"PRIVATE KEY : {'SET (' + str(len(WALLET_PRIVATE_KEY)) + ' chars)' if WALLET_PRIVATE_KEY else '<b style=color:#ff3355>NOT SET</b> — add WALLET_PRIVATE_KEY env var'}",
+    ]
+    if WALLET_PRIVATE_KEY and not PAPER_MODE and _SOLANA_AVAILABLE:
+        try:
+            kp = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+            lines.append(f"KEY FORMAT  : <b style='color:#00ff88'>VALID</b> (derived pubkey={str(kp.pubkey())[:16]}...)")
+        except Exception as ke:
+            lines.append(f"KEY FORMAT  : <b style='color:#ff3355'>INVALID — {ke}</b>")
+            lines.append(f"             → Must be Phantom base58 (~88 chars), NOT a JSON array")
+    if WALLET and _SOLANA_AVAILABLE:
+        try:
+            _c = Client(SOL_RPC)
+            br = _c.get_balance(Pubkey.from_string(WALLET))
+            sol_bal = br.value / 1e9
+            color = "#00ff88" if sol_bal >= 0.01 else "#ff3355"
+            lines.append(f"SOL BALANCE : <b style='color:{color}'>{sol_bal:.6f} SOL</b> {'✓' if sol_bal >= 0.01 else '⚠ LOW — need ≥0.01 SOL for gas'}")
+        except Exception as be:
+            lines.append(f"SOL BALANCE : CHECK FAILED ({be})")
+    lines.append("")
+    lines.append(f"REDIS       : {'connected' if REDIS_URL else 'NOT SET (trades lost on restart)'}")
+    lines.append(f"SOLANA LIB  : {'available' if _SOLANA_AVAILABLE else 'NOT INSTALLED'}")
+    lines.append("")
+    lines.append("<a style='color:#00e5ff' href='/'>← Back to dashboard</a>")
+    lines.append("</pre>")
+    return "\n".join(lines)
+
 @app.route("/live/api", methods=["GET"])
 def live_api():
     """Polled every 3s by the live page — returns open trades + recent events."""
@@ -5168,6 +5223,7 @@ def live_api():
     recent_closed = list(reversed(completed_trades[-30:]))
     with _scan_log_lock:
         sl = list(scan_log[:20])
+    recent_errors = [e for e in trade_log[-80:] if e.get("tag") in ("err", "warn")][-8:]
     return jsonify({
         "ts":       round(time.time()),
         "capital":  round(cap, 2),
@@ -5177,6 +5233,7 @@ def live_api():
         "paused":   _pause_until > time.time(),
         "today":    {"trades": _daily_trades, "wins": _daily_wins, "losses": _daily_losses},
         "scan_log": sl,
+        "errors":   recent_errors,
     })
 
 @app.route("/live", methods=["GET"])
@@ -5835,6 +5892,18 @@ function renderEvents(d){
         '<div class="tr-detail">'+(t.exit_reason||t.result||'EXIT')+'</div>'+
       '</div>'+
       '<div class="tr-pnl '+(win?'pos':'neg')+'">'+(win?'+':'')+' $'+Math.abs(t.pnl||0).toFixed(2)+'</div>'+
+      '</div>');
+  });
+  (d.errors||[]).forEach(function(e){
+    rows.push(
+      '<div class="trade-row" style="border-color:rgba(255,51,85,.2);background:rgba(255,51,85,.06)">'+
+      '<div class="tr-time">'+e.time+'</div>'+
+      '<div class="tr-icon loss">&#x26A0;</div>'+
+      '<div class="tr-body">'+
+        '<div class="tr-sym" style="color:#ff3355">'+(e.symbol||'BOT')+'</div>'+
+        '<div class="tr-tags"><span class="tag tag-loss">'+(e.tag||'err').toUpperCase()+'</span></div>'+
+        '<div class="tr-detail" style="font-size:8px;color:#ff8899">'+e.msg+'</div>'+
+      '</div>'+
       '</div>');
   });
   if(!rows.length)rows.push('<div style="font-family:monospace;font-size:9px;color:var(--muted);text-align:center;padding:20px">No events yet</div>');
