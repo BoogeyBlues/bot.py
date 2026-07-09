@@ -443,6 +443,8 @@ def daily_trade_limit():
 def _save_daily_state():
     with capital_lock:
         cap_snapshot = capital
+    with usdc_lock:
+        usdc_snap = usdc_locked
     with _copy_lock:
         sold_snapshot = dict(_sold_mints)
     with _watchlist_lock:
@@ -471,7 +473,7 @@ def _save_daily_state():
         "bundle_deployers": _bundle_deployers,
         "sold_mints":     sold_snapshot,
         "watchlist":      wl_snapshot,
-        "usdc_locked":    usdc_locked,
+        "usdc_locked":    usdc_snap,
     }
     try:
         with open(STATE_FILE, "w") as f:
@@ -710,13 +712,25 @@ def daily_limit_reached():
 
 def record_daily_trade(won):
     global _daily_wins, _daily_losses, _pause_until
+    trigger_retune = False
     with _daily_lock:
         if won:
             _daily_wins += 1
         else:
             _daily_losses += 1
+            # Loss-streak guard: DAILY_LOSS_MAX consecutive losses → short cooldown + retune
+            if _daily_losses >= DAILY_LOSS_MAX and _pause_until <= time.time():
+                _pause_until   = time.time() + LOSS_COOLDOWN_HRS * 3600
+                trigger_retune = True
+                log("warn",
+                    f"Loss streak {_daily_losses} — pausing {LOSS_COOLDOWN_HRS*60:.0f}min, retuning",
+                    "RISK")
         log("ok" if won else "info",
             f"Daily: {_daily_trades} trades | {_daily_wins}W {_daily_losses}L")
+    if trigger_retune:
+        notify(f"⚠️ Loss Streak {_daily_losses}",
+               f"Pausing {LOSS_COOLDOWN_HRS*60:.0f} min and retuning strategies.")
+        threading.Thread(target=_retune_strategies, daemon=True).start()
     _save_daily_state()
 
 def _record_bundle_deployer(dev_wallet: str, symbol: str):
