@@ -1943,6 +1943,41 @@ def _partial_exit(mint, price, fraction, label):
     notify(f"📤 {label} {symbol}", f"Sold {pct_sold}% at +{move_pct:.1f}%\nProceeds: +${proceeds:.4f}\nCapital: ${capital:.2f}")
 
 
+# ── GHOST POSITION CLEANUP ───────────────────────────────────────
+def _verify_tx_landed(sig, mint, symbol, amount):
+    """Background: check tx 6s after entry. If failed on-chain, remove ghost + refund capital."""
+    time.sleep(6)
+    try:
+        client = Client(SOL_RPC)
+        status = client.get_signature_statuses([sig])
+        tx_status = status.value[0] if status.value else None
+        if tx_status is None:
+            # Not confirmed yet — check once more after another 10s
+            time.sleep(10)
+            status = client.get_signature_statuses([sig])
+            tx_status = status.value[0] if status.value else None
+        if tx_status and tx_status.err:
+            log("err", f"TX failed on-chain ({tx_status.err}) — removing ghost position", symbol)
+            _cleanup_ghost(mint, amount, symbol)
+        elif tx_status is None:
+            log("warn", f"TX unconfirmed after 16s — treating as ghost, cleaning up", symbol)
+            _cleanup_ghost(mint, amount, symbol)
+        else:
+            log("ok", f"TX confirmed on-chain ✓", symbol)
+    except Exception as e:
+        log("warn", f"TX verify error: {e}", symbol)
+
+def _cleanup_ghost(mint, amount, symbol):
+    global capital
+    with trades_lock:
+        if mint in open_trades:
+            open_trades.pop(mint)
+            with capital_lock:
+                capital += amount
+            redis_save("bot_open_trades", list(open_trades.values()))
+            log("ok", f"Ghost cleared — ${amount:.2f} refunded to capital", symbol)
+            notify(f"⚠️ Ghost Cleared {symbol}", f"TX failed on-chain. ${amount:.2f} refunded.")
+
 # ── ENTER / EXIT ─────────────────────────────────────────────────
 def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, replies=0, pump_swap=False, raydium=False):
     global capital, _daily_trades
@@ -2002,6 +2037,9 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
     # Persist immediately so restart won't re-buy this position
     with trades_lock:
         redis_save("bot_open_trades", list(open_trades.values()))
+    # Background: verify tx actually landed on-chain, clean up ghost if not
+    if not PAPER_MODE and tx not in (None, "PAPER_TX"):
+        threading.Thread(target=_verify_tx_landed, args=(tx, mint, symbol, amount), daemon=True).start()
     return True
 
 def exit_trade(mint, price, reason, bond=0):
@@ -5098,6 +5136,22 @@ def clear_usdc_get():
         usdc_locked = 0.0
     _save_daily_state()
     return '<meta http-equiv="refresh" content="2;url=/">USDC locked cleared to $0. Redirecting...'
+
+@app.route("/clear-ghosts")
+def clear_ghosts_get():
+    """Remove ghost open positions (bot recorded them but tx failed on-chain). Refunds capital."""
+    global capital
+    cleared = []
+    with trades_lock:
+        for mint, t in list(open_trades.items()):
+            with capital_lock:
+                capital += t["amount"]
+            cleared.append(f"{t['symbol']} (${t['amount']:.2f})")
+            del open_trades[mint]
+        redis_save("bot_open_trades", list(open_trades.values()))
+    _save_daily_state()
+    msg = f"Cleared {len(cleared)} ghost(s): {', '.join(cleared)}. Capital refunded." if cleared else "No open positions to clear."
+    return f'<meta http-equiv="refresh" content="3;url=/">{msg} Redirecting...'
 
 @app.route("/admin/reset-all", methods=["POST"])
 def admin_reset_all():
