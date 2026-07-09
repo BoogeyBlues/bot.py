@@ -3611,7 +3611,7 @@ def _home_inner():
     <button class="btn btn-ghost" style="border-color:rgba(0,229,255,.4);color:#00e5ff" onclick="adminPost('/admin/tune-now',{{}},null)">🧠 Tune Now</button>
     <button class="btn btn-ghost" onclick="adminPost('/admin/reset-daily',{{}},null)">🔄 Reset Daily</button>
     <button class="btn btn-ghost" onclick="adminPost('/admin/reset-capital',{{}},null)">💰 Reset Capital</button>
-    <button class="btn btn-ghost" style="border-color:#00ff88;color:#00ff88;font-weight:700" onclick="adminPost('/admin/set-capital',{{amount:105.20,target_pnl:17.24}},null)">💵 Set $105.20</button>
+    <button class="btn btn-ghost" style="border-color:#00ff88;color:#00ff88;font-weight:700" onclick="(function(){{var v=prompt('Set capital to:','75');if(v&&!isNaN(parseFloat(v)))adminPost('/admin/set-capital',{{amount:parseFloat(v)}},null)}})()">💵 Set Capital</button>
     <button class="btn btn-ghost" style="border-color:#ff3355;color:#ff3355" onclick="adminPost('/admin/reset-all',{{}},null)">🗑️ Reset All</button>
     <button class="btn btn-ghost" style="border-color:#888;color:#aaa;font-size:0.68rem" onclick="setApiKey()">🔑 Set Key</button>
   </div>
