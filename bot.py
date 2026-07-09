@@ -5310,7 +5310,7 @@ def set_capital_get(amount):
 
 @app.route("/admin/sync-capital", methods=["POST"])
 def admin_sync_capital():
-    """Read actual SOL balance from wallet via RPC and sync bot capital to it."""
+    """Read SOL + USDC balance from wallet and sync bot capital."""
     denied = _auth_required()
     if denied: return denied
     global capital, _day_start_cap, _daily_cap_notified
@@ -5319,23 +5319,40 @@ def admin_sync_capital():
     sol_price = get_sol_price() or 0
     if not sol_price:
         return jsonify({"error": "Cannot fetch SOL price"}), 500
+    USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
     try:
         for rpc_url in _rpc_endpoints():
             try:
-                client = Client(rpc_url)
-                bal = client.get_balance(Pubkey.from_string(WALLET))
-                sol = bal.value / 1e9
-                usd = round(sol * sol_price, 2)
+                client   = Client(rpc_url)
+                wallet_pk = Pubkey.from_string(WALLET)
+                sol_bal  = client.get_balance(wallet_pk).value / 1e9
+                sol_usd  = sol_bal * sol_price
+                # Read USDC balance
+                usdc_usd = 0.0
+                try:
+                    from solana.rpc.types import TokenAccountOpts
+                    resp = client.get_token_accounts_by_owner(
+                        wallet_pk, TokenAccountOpts(mint=Pubkey.from_string(USDC_MINT)))
+                    if resp.value:
+                        raw = resp.value[0].account.data
+                        if hasattr(raw, "parsed"):
+                            usdc_usd = float(raw.parsed.get("info", {})
+                                             .get("tokenAmount", {}).get("uiAmount", 0) or 0)
+                except Exception:
+                    pass
+                usd = round(sol_usd + usdc_usd, 2)
+                old = capital
                 with capital_lock:
-                    old = capital
                     capital = usd
                 with _daily_lock:
                     _day_start_cap      = usd
                     _daily_cap_notified = False
                 _save_daily_state()
-                log("ok", f"Capital synced from wallet: {sol:.4f} SOL = ${usd:.2f} (was ${old:.2f})")
-                return jsonify({"ok": True, "sol": sol, "usd": usd, "sol_price": sol_price,
-                                "msg": f"Synced to ${usd:.2f} ({sol:.4f} SOL @ ${sol_price:.0f})"})
+                msg = (f"Synced to ${usd:.2f} "
+                       f"({sol_bal:.4f} SOL=${sol_usd:.2f} + USDC=${usdc_usd:.2f} @ ${sol_price:.0f}/SOL)")
+                log("ok", f"Capital synced: was ${old:.2f} → ${usd:.2f} | wallet={WALLET[:8]}...")
+                return jsonify({"ok": True, "sol": sol_bal, "usdc": usdc_usd,
+                                "usd": usd, "sol_price": sol_price, "wallet": WALLET, "msg": msg})
             except Exception:
                 continue
         return jsonify({"error": "RPC unreachable"}), 500
