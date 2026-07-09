@@ -439,6 +439,8 @@ def daily_trade_limit():
 
 # ── DAILY LIMITS ─────────────────────────────────────────────────
 def _save_daily_state():
+    with capital_lock:
+        cap_snapshot = capital
     with _copy_lock:
         sold_snapshot = dict(_sold_mints)
     with _watchlist_lock:
@@ -449,7 +451,7 @@ def _save_daily_state():
         "wins":           _daily_wins,
         "losses":         _daily_losses,
         "pause_until":    _pause_until,
-        "capital":        capital,
+        "capital":        cap_snapshot,
         "week_start":     _week_start_date,
         "week_logs":      _week_day_logs,
         "day_start_cap":       _day_start_cap,
@@ -580,12 +582,26 @@ def _load_daily_state():
     # Restore open positions so bot doesn't re-buy after crash/redeploy
     saved_open = redis_load("bot_open_trades")
     if saved_open:
+        needs_verify = []
         with trades_lock:
             for t in saved_open:
                 mint = t.get("mint")
                 if mint and mint not in open_trades:
+                    # Clear sell-side flag — exit_trade will re-set it when it actually runs
+                    t.pop("_exiting", None)
+                    # Track which positions need buy verification restarted
+                    if t.pop("_unverified", None):
+                        needs_verify.append((mint, t.get("symbol", "?"), t.get("amount", 0)))
                     open_trades[mint] = t
-        log("ok", f"Restored {len(saved_open)} open position(s) from Redis")
+        # Restart buy-verification threads outside the lock
+        for mint, symbol, amount in needs_verify:
+            threading.Thread(
+                target=_verify_tx_landed,
+                args=("RESTART", mint, symbol, amount),
+                daemon=True
+            ).start()
+        log("ok", f"Restored {len(saved_open)} open position(s) from Redis"
+            + (f" — {len(needs_verify)} awaiting buy confirm" if needs_verify else ""))
 
 def _reset_daily_if_needed():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses, _pause_until
@@ -2078,14 +2094,16 @@ def _verify_tx_landed(sig, mint, symbol, amount):
             _cleanup_ghost(mint, amount, symbol)
 
 def _cleanup_ghost(mint, amount, symbol):
-    global capital
+    global capital, _daily_trades
     with trades_lock:
         if mint in open_trades:
             open_trades.pop(mint)
             with capital_lock:
                 capital += amount
+            with _daily_lock:
+                _daily_trades = max(0, _daily_trades - 1)
             redis_save("bot_open_trades", list(open_trades.values()))
-            log("ok", f"Ghost cleared — ${amount:.2f} refunded to capital", symbol)
+            log("ok", f"Ghost cleared — ${amount:.2f} refunded, daily trade counter corrected", symbol)
             notify(f"⚠️ Ghost Cleared {symbol}", f"TX failed on-chain. ${amount:.2f} refunded.")
 
 # ── ENTER / EXIT ─────────────────────────────────────────────────
@@ -3066,11 +3084,11 @@ def scanner_loop():
                         market = get_market_data(mint)
                         if (market and market["price"] > 0 and market["liq"] >= MIN_LIQ
                                 and market.get("vol_m5", 0) >= MIN_VOL_5M):
-                            with trades_lock:
-                                if len(open_trades) < MAX_OPEN and mint not in open_trades:
-                                    amt = trade_size()
-                                    log("ok", f"BUNDLE RIDE | bond={bond:.1f}% | sig={sig_score}", symbol)
-                                    enter_trade(mint, symbol, market["price"], amt, "bundle", bond, 0, pump_swap=coin.get("pump_swap", False))
+                            # enter_trade acquires trades_lock internally — don't hold it here
+                            if len(open_trades) < MAX_OPEN and mint not in open_trades:
+                                amt = trade_size()
+                                log("ok", f"BUNDLE RIDE | bond={bond:.1f}% | sig={sig_score}", symbol)
+                                enter_trade(mint, symbol, market["price"], amt, "bundle", bond, 0, pump_swap=coin.get("pump_swap", False))
                     continue
 
                 if BOND_ENTRY_MIN <= bond <= BOND_ENTRY_MAX:
