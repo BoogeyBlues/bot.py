@@ -176,7 +176,7 @@ COPY_MIN_WHALE_USD   = float(os.environ.get("COPY_MIN_WHALE_USD",  "100"))  # sk
 TRACKED_WALLETS   = [w.strip() for w in os.environ.get("TRACKED_WALLETS", "").split(",") if w.strip()]
 # Pinned wallets — always monitored, mirror their exact USD trade size, use bot's own TP/SL/exits
 PINNED_WALLETS = [
-    "2X4H5Y9C4Fy6Pf3wpq8Q4gMvLcWvfrrwDv2bdR8AAwQv",  # 96% exit rate, disciplined
+    # add verified wallets here — mirror exact USD size, use bot's own TP/SL/exits
 ]
 # Fast wallets — skip ALL safety filters, exit before the wallet does (tight TP/SL)
 FAST_WALLETS = [
