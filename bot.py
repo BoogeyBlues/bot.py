@@ -1840,7 +1840,7 @@ def execute_buy(mint, symbol, amount, pump_swap=False, raydium=False):
             headers={"Content-Type": "application/json"},
             json={"publicKey": WALLET, "action": "buy", "mint": mint,
                   "denominatedInSol": "true", "amount": sol_amount,
-                  "slippage": 15, "priorityFee": 0.01, "pool": pool},
+                  "slippage": 30, "priorityFee": 0.01, "pool": pool},
             timeout=15
         )
         if res.status_code != 200:
@@ -1876,13 +1876,17 @@ def execute_sell(tokens, mint, symbol, pump_swap=False, raydium=False):
             headers={"Content-Type": "application/json"},
             json={"publicKey": WALLET, "action": "sell", "mint": mint,
                   "denominatedInSol": "false", "amount": tokens,
-                  "slippage": 15, "priorityFee": 0.01, "pool": pool},
+                  "slippage": 30, "priorityFee": 0.01, "pool": pool},
             timeout=15
         )
         if res.status_code != 200:
-            log("err", f"PumpPortal sell {res.status_code}: {res.text[:80]}", symbol)
+            log("err", f"PumpPortal sell {res.status_code}: {res.text[:120]}", symbol)
             return None
-        keypair = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+        try:
+            keypair = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+        except Exception as ke:
+            log("err", f"INVALID PRIVATE KEY on sell: {ke}", symbol)
+            return None
         tx      = VersionedTransaction(VersionedTransaction.from_bytes(res.content).message, [keypair])
         client  = Client(SOL_RPC)
         result  = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True, preflight_commitment="confirmed"))
