@@ -5066,6 +5066,14 @@ def admin_reset_capital():
     log("ok", f"Capital reset to ${STARTING_CAPITAL:.2f} via /admin/reset-capital")
     return jsonify({"ok": True, "msg": f"Capital reset to ${STARTING_CAPITAL:.2f} and win rate cleared"})
 
+@app.route("/clear-usdc")
+def clear_usdc_get():
+    global usdc_locked
+    with usdc_lock:
+        usdc_locked = 0.0
+    _save_daily_state()
+    return '<meta http-equiv="refresh" content="2;url=/">USDC locked cleared to $0. Redirecting...'
+
 @app.route("/admin/reset-all", methods=["POST"])
 def admin_reset_all():
     denied = _auth_required()
