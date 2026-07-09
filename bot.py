@@ -673,9 +673,9 @@ def daily_limit_reached():
                 cap_now = capital
             loss_pct = (_day_start_cap - cap_now) / _day_start_cap * 100
             if loss_pct >= MAX_DAILY_LOSS_PCT:
-                log("warn", f"Daily loss guard: down {loss_pct:.1f}% today (${_day_start_cap - cap_now:.2f}) — stopping until tomorrow")
                 if not _daily_cap_notified:
                     _daily_cap_notified = True
+                    log("warn", f"Daily loss guard: down {loss_pct:.1f}% today (${_day_start_cap - cap_now:.2f}) — stopping until tomorrow")
                     notify(
                         f"🛑 *Boogeys Sniper* — Loss Guard\n"
                         f"Down {loss_pct:.1f}% today (${_day_start_cap - cap_now:.2f})\n"
@@ -5230,20 +5230,23 @@ def admin_tune_now():
 def admin_reset_daily():
     denied = _auth_required()
     if denied: return denied
-    global _daily_trades, _daily_wins, _daily_losses, _pause_until, _daily_cap_notified
+    global _daily_trades, _daily_wins, _daily_losses, _pause_until, _daily_cap_notified, _day_start_cap
+    with capital_lock:
+        cap_now = capital
     with _daily_lock:
         _daily_trades        = 0
         _daily_wins          = 0
         _daily_losses        = 0
         _pause_until         = 0.0
         _daily_cap_notified  = False
+        _day_start_cap       = cap_now  # reset loss guard baseline to current capital
     with trades_lock:
         completed_trades.clear()
     _redis_cmd("DEL", "bot_trades")
     redis_save("bot_trades", [])
     _save_daily_state()
-    log("ok", "Daily state reset via /admin/reset-daily")
-    return jsonify({"ok": True, "msg": "Daily counters and win rate reset — bot will resume trading"})
+    log("ok", f"Daily state reset via /admin/reset-daily — loss guard baseline reset to ${cap_now:.2f}")
+    return jsonify({"ok": True, "msg": "Daily counters reset — bot will resume trading"})
 
 @app.route("/admin/reset-capital", methods=["POST"])
 def admin_reset_capital():
@@ -5265,7 +5268,7 @@ def admin_reset_capital():
 @app.route("/set-capital/<float:amount>")
 def set_capital_get(amount):
     """Manually set capital to a specific value. Clears ghost open positions. Keeps trade history."""
-    global capital
+    global capital, _day_start_cap, _daily_cap_notified
     if amount <= 0 or amount > 100000:
         return "Invalid amount", 400
     cleared = []
@@ -5276,6 +5279,9 @@ def set_capital_get(amount):
         redis_save("bot_open_trades", [])
     with capital_lock:
         capital = float(amount)
+    with _daily_lock:
+        _day_start_cap      = float(amount)
+        _daily_cap_notified = False
     with usdc_lock:
         global usdc_locked
         usdc_locked = 0.0
@@ -5305,9 +5311,13 @@ def admin_set_capital():
             del open_trades[mint]
         redis_save("bot_open_trades", [])
 
-    # Set capital
+    # Set capital and reset loss guard baseline
+    global _day_start_cap, _daily_cap_notified
     with capital_lock:
         capital = float(amount)
+    with _daily_lock:
+        _day_start_cap      = float(amount)
+        _daily_cap_notified = False
     with usdc_lock:
         usdc_locked = 0.0
 
