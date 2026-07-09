@@ -213,7 +213,7 @@ NTFY_TOPIC       = os.environ.get("NTFY_TOPIC", "")
 
 # Social / quality gates
 MIN_REPLIES      = int(os.environ.get("MIN_REPLIES",      "8"))
-MIN_SOCIALS      = int(os.environ.get("MIN_SOCIALS",       "1"))
+MIN_SOCIALS      = int(os.environ.get("MIN_SOCIALS",       "0"))
 MIN_LIQ          = float(os.environ.get("MIN_LIQ",        "500"))
 MIN_VOL_5M       = float(os.environ.get("MIN_VOL_5M",     "2000"))  # $2k 5-min volume — catches coins before viral ($10k was post-move)
 MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "2"))     # ≥2 signal points — 1 confirmation + organic is enough at early bonding stage
@@ -2527,8 +2527,14 @@ def copy_trade_loop():
                                 ).value
                                 if not tx:
                                     continue
-                                msg = tx.transaction.message
-                                prog_ids = [str(k) for k in msg.account_keys]
+                                try:
+                                    raw = tx.transaction
+                                    msg = getattr(raw, "message", None) or getattr(getattr(raw, "transaction", raw), "message", None)
+                                    if not msg:
+                                        continue
+                                except Exception:
+                                    continue
+                                prog_ids = [str(k) for k in (getattr(msg, "account_keys", None) or [])]
                                 if PUMPFUN_PROG not in prog_ids:
                                     continue
                                 # Build minimal activity dict from RPC data
@@ -2929,9 +2935,14 @@ def scanner_loop():
                 bond   = coin.get("bond_pct", 0)
                 if mint in _black_snap or mint in _open_snap:
                     continue
-                social_count = sum([bool(coin.get("twitter")), bool(coin.get("telegram")), bool(coin.get("website"))])
+                _soc = coin.get("socials") or {}
+                social_count = sum([
+                    bool(coin.get("twitter") or coin.get("twitter_url") or _soc.get("twitter")),
+                    bool(coin.get("telegram") or coin.get("telegram_url") or _soc.get("telegram")),
+                    bool(coin.get("website") or coin.get("website_url") or _soc.get("website")),
+                ])
                 if social_count < MIN_SOCIALS:
-                    _log_scan(symbol, mint, bond, social_count, "social", 0, f"ONLY {social_count}/1 SOCIALS")
+                    _log_scan(symbol, mint, bond, social_count, "social", 0, f"ONLY {social_count}/{MIN_SOCIALS} SOCIALS")
                     continue
                 n_social += 1
                 last_trade = coin.get("last_trade", 0)
