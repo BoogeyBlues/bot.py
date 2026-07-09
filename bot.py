@@ -3054,6 +3054,12 @@ def scanner_loop():
                 expired_c = [m for m, ts in _copied_mints.items() if _now_ts - ts > 1800]
                 for m in expired_c:
                     _copied_mints.pop(m, None)
+            # Expire blacklist entries older than 24h (TTL checked at startup from Redis, but
+            # not during the lifetime of the process — blacklist would grow unbounded otherwise)
+            _bl_expired = [m for m, ts in list(_blacklist_ts.items()) if _now_ts - ts > 86400]
+            for m in _bl_expired:
+                blacklisted_mints.discard(m)
+                _blacklist_ts.pop(m, None)
             with trades_lock:
                 num_open = len(open_trades)
             if num_open >= MAX_OPEN:
