@@ -103,7 +103,7 @@ ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # kept for ref
 # Bond Runner strategy
 BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "50"))  # 50%+ = confirmed momentum, less stall risk
 BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "75"))
-BOND_TP_PCT     = float(os.environ.get("BOND_TP_PCT",    "30"))  # raised from 20 — needs 3x R:R at low WR
+BOND_TP_PCT     = float(os.environ.get("BOND_TP_PCT",    "20"))  # 20% TP — catches fast movers before rug
 BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "8"))
 BOND_GRAD_BOND  = float(os.environ.get("BOND_GRAD_BOND", "90"))  # graduation imminent — tighten TSL
 BOND_GRAD_TSL   = float(os.environ.get("BOND_GRAD_TSL",  "3"))   # tight TSL % near graduation
@@ -139,7 +139,7 @@ SLIP_DROP_TO   = float(os.environ.get("SLIP_DROP_TO",  "85"))
 SLIP_WAIT_SECS = int(os.environ.get("SLIP_WAIT_SECS",  "6"))
 
 # Trailing stop loss — activates once trade is up TSL_ACTIVATE_PCT, then trails BOND_SL_PCT below peak
-TSL_ACTIVATE_PCT = float(os.environ.get("TSL_ACTIVATE_PCT", "25"))  # lock-in starts at +25% — avoids cutting near-TP trades
+TSL_ACTIVATE_PCT = float(os.environ.get("TSL_ACTIVATE_PCT", "12"))  # trailing SL kicks in at +12% — locks gains before rug
 SHARP_DROP_PCT = float(os.environ.get("SHARP_DROP_PCT", "4"))
 
 # Partial take-profit — scale out to lock gains without killing the run
@@ -1932,33 +1932,38 @@ def execute_sell(tokens, mint, symbol, pump_swap=False, raydium=False):
         log("ok", f"[PAPER] Sell {symbol}", symbol)
         return "PAPER_TX"
     try:
-        if raydium:
-            pool = "raydium"
-        elif pump_swap:
-            pool = "pump-swap"
+        # Always detect pool fresh — stored flags from buy time can be stale/wrong
+        detected = _detect_pool(mint, symbol)
+        if detected == "raydium":
+            pools_to_try = ["raydium"]
+        elif detected == "pump-swap":
+            pools_to_try = ["pump-swap", "pump"]
         else:
-            pool = "pump"
-        res = _session.post(
-            PUMPPORTAL,
-            headers={"Content-Type": "application/json"},
-            json={"publicKey": WALLET, "action": "sell", "mint": mint,
-                  "denominatedInSol": "false", "amount": tokens,
-                  "slippage": 50, "priorityFee": 0.001, "pool": pool},
-            timeout=15
-        )
-        if res.status_code != 200:
-            log("err", f"PumpPortal sell {res.status_code}: {res.text[:120]}", symbol)
-            return None
-        try:
-            keypair = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
-        except Exception as ke:
-            log("err", f"INVALID PRIVATE KEY on sell: {ke}", symbol)
-            return None
-        tx  = VersionedTransaction(VersionedTransaction.from_bytes(res.content).message, [keypair])
-        sig = _send_tx(bytes(tx), symbol)
-        if sig:
-            log("ok", f"Sold! solscan.io/tx/{sig}", symbol)
-            return sig
+            pools_to_try = ["pump", "pump-swap"]
+
+        keypair = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+
+        for pool in pools_to_try:
+            try:
+                res = _session.post(
+                    PUMPPORTAL,
+                    headers={"Content-Type": "application/json"},
+                    json={"publicKey": WALLET, "action": "sell", "mint": mint,
+                          "denominatedInSol": "false", "amount": tokens,
+                          "slippage": 50, "priorityFee": 0.001, "pool": pool},
+                    timeout=15
+                )
+                if res.status_code != 200:
+                    log("warn", f"PumpPortal sell [{pool}] {res.status_code}: {res.text[:80]}", symbol)
+                    continue
+                tx  = VersionedTransaction(VersionedTransaction.from_bytes(res.content).message, [keypair])
+                sig = _send_tx(bytes(tx), symbol)
+                if sig:
+                    log("ok", f"Sold via {pool}! solscan.io/tx/{sig}", symbol)
+                    return sig
+            except Exception as pe:
+                log("warn", f"Sell attempt [{pool}]: {pe}", symbol)
+        log("err", "All sell pools failed", symbol)
         return None
     except Exception as e:
         log("err", f"Sell error: {e}", symbol)
