@@ -223,8 +223,41 @@ MAX_RUG_SCORE    = int(os.environ.get("MAX_RUG_SCORE",    "400"))   # rugcheck s
 MAX_OPEN      = int(os.environ.get("MAX_OPEN",      "10"))
 SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "2"))
 
-SOL_RPC     = "https://api.mainnet-beta.solana.com"
-PUMPPORTAL  = "https://pumpportal.fun/api/trade-local"
+SOL_RPC         = os.environ.get("SOL_RPC", "https://api.mainnet-beta.solana.com")
+HELIUS_API_KEY  = os.environ.get("HELIUS_API_KEY", "")
+PUMPPORTAL      = "https://pumpportal.fun/api/trade-local"
+
+def _rpc_endpoints():
+    """Return ordered list of RPCs to try. Helius first if key is set."""
+    rpcs = []
+    if HELIUS_API_KEY:
+        rpcs.append(f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}")
+    rpcs.append(SOL_RPC)
+    if "mainnet-beta.solana.com" in SOL_RPC:
+        rpcs.append("https://rpc.ankr.com/solana")
+        rpcs.append("https://solana-mainnet.rpc.extrnode.com")
+    return list(dict.fromkeys(rpcs))  # deduplicate, preserve order
+
+def _send_tx(tx_bytes, symbol=""):
+    """Send signed tx across multiple RPCs with retry. Returns sig or None."""
+    for rpc_url in _rpc_endpoints():
+        rpc_name = rpc_url.split("/")[2].split("?")[0]
+        for attempt in range(2):
+            try:
+                client = Client(rpc_url)
+                result = client.send_raw_transaction(
+                    tx_bytes, opts=TxOpts(skip_preflight=True, preflight_commitment="confirmed")
+                )
+                sig = str(result.value)
+                if sig and len(sig) > 10:
+                    log("ok", f"TX landed via {rpc_name}: {sig[:14]}...", symbol)
+                    return sig
+            except Exception as e:
+                log("warn", f"RPC {rpc_name} attempt {attempt+1}: {e}", symbol)
+                if attempt == 0:
+                    time.sleep(0.5)
+    log("err", "All RPCs failed — tx not sent", symbol)
+    return None
 DATA_DIR    = os.environ.get("DATA_DIR", "/tmp")
 os.makedirs(DATA_DIR, exist_ok=True)
 LEARN_FILE  = os.path.join(DATA_DIR, "bot_learn.json")
@@ -1817,7 +1850,7 @@ def execute_buy(mint, symbol, amount, pump_swap=False, raydium=False):
 
         # Check SOL balance before calling PumpPortal
         try:
-            _rpc = Client(SOL_RPC)
+            _rpc = Client(_rpc_endpoints()[0])
             bal_resp = _rpc.get_balance(Pubkey.from_string(WALLET))
             sol_balance = bal_resp.value / 1e9
             min_needed = sol_amount + 0.005  # tx cost ~0.001–0.005 SOL
@@ -1847,14 +1880,11 @@ def execute_buy(mint, symbol, amount, pump_swap=False, raydium=False):
             log("err", f"PumpPortal {res.status_code}: {res.text[:120]}", symbol)
             return None
 
-        tx     = VersionedTransaction(VersionedTransaction.from_bytes(res.content).message, [keypair])
-        client = Client(SOL_RPC)
-        result = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True, preflight_commitment="confirmed"))
-        sig    = str(result.value)
-        if sig and len(sig) > 10:
-            log("ok", f"TX sent: {sig[:20]}... solscan.io/tx/{sig}", symbol)
+        tx  = VersionedTransaction(VersionedTransaction.from_bytes(res.content).message, [keypair])
+        sig = _send_tx(bytes(tx), symbol)
+        if sig:
+            log("ok", f"solscan.io/tx/{sig}", symbol)
             return sig
-        log("err", f"RPC returned empty sig — tx may not have landed", symbol)
         return None
     except Exception as e:
         log("err", f"Buy error [{type(e).__name__}]: {e}", symbol)
@@ -1887,12 +1917,10 @@ def execute_sell(tokens, mint, symbol, pump_swap=False, raydium=False):
         except Exception as ke:
             log("err", f"INVALID PRIVATE KEY on sell: {ke}", symbol)
             return None
-        tx      = VersionedTransaction(VersionedTransaction.from_bytes(res.content).message, [keypair])
-        client  = Client(SOL_RPC)
-        result  = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True, preflight_commitment="confirmed"))
-        sig     = str(result.value)
-        if sig and len(sig) > 10:
-            log("ok", f"Sold! sig={sig[:20]}...", symbol)
+        tx  = VersionedTransaction(VersionedTransaction.from_bytes(res.content).message, [keypair])
+        sig = _send_tx(bytes(tx), symbol)
+        if sig:
+            log("ok", f"Sold! solscan.io/tx/{sig}", symbol)
             return sig
         return None
     except Exception as e:
