@@ -3504,7 +3504,7 @@ def _home_inner():
     <button class="btn btn-ghost" style="border-color:rgba(0,229,255,.4);color:#00e5ff" onclick="adminPost('/admin/tune-now',{{}},null)">🧠 Tune Now</button>
     <button class="btn btn-ghost" onclick="adminPost('/admin/reset-daily',{{}},null)">🔄 Reset Daily</button>
     <button class="btn btn-ghost" onclick="adminPost('/admin/reset-capital',{{}},null)">💰 Reset Capital</button>
-    <button class="btn btn-ghost" style="border-color:#00ff88;color:#00ff88;font-weight:700" onclick="adminPost('/admin/set-capital',{{amount:105.20}},null)">💵 Set $105.20</button>
+    <button class="btn btn-ghost" style="border-color:#00ff88;color:#00ff88;font-weight:700" onclick="adminPost('/admin/set-capital',{{amount:105.20,target_pnl:17.24}},null)">💵 Set $105.20</button>
     <button class="btn btn-ghost" style="border-color:#ff3355;color:#ff3355" onclick="adminPost('/admin/reset-all',{{}},null)">🗑️ Reset All</button>
     <button class="btn btn-ghost" style="border-color:#888;color:#aaa;font-size:0.68rem" onclick="setApiKey()">🔑 Set Key</button>
   </div>
@@ -5207,27 +5207,58 @@ def set_capital_get(amount):
 def admin_set_capital():
     denied = _auth_required()
     if denied: return denied
-    global capital, usdc_locked
+    global capital, usdc_locked, _daily_trades, _daily_wins, _daily_losses
+    body = request.json or {}
     try:
-        amount = float((request.json or {}).get("amount", 0))
+        amount = float(body.get("amount", 0))
     except (TypeError, ValueError):
         return jsonify({"error": "invalid amount"}), 400
     if amount <= 0 or amount > 100000:
         return jsonify({"error": "amount out of range"}), 400
+
+    # Clear ghost open positions
     cleared = []
     with trades_lock:
         for mint, t in list(open_trades.items()):
             cleared.append(t["symbol"])
             del open_trades[mint]
         redis_save("bot_open_trades", [])
+
+    # Set capital
     with capital_lock:
         capital = float(amount)
     with usdc_lock:
         usdc_locked = 0.0
+
+    # Remove ghost completed trades if target_pnl provided
+    removed_trade = None
+    target_pnl = body.get("target_pnl")
+    if target_pnl is not None:
+        try:
+            target_pnl = float(target_pnl)
+            current_sum = sum(t.get("pnl", 0) for t in completed_trades)
+            excess = current_sum - target_pnl
+            if abs(excess) > 0.01 and completed_trades:
+                # Find and remove the trade closest to the excess (the ghost)
+                ghost = min(completed_trades, key=lambda t: abs(t.get("pnl", 0) - excess))
+                completed_trades.remove(ghost)
+                removed_trade = ghost.get("symbol", "?")
+                # Fix daily counters
+                with _daily_lock:
+                    if ghost.get("pnl", 0) > 0:
+                        _daily_wins   = max(0, _daily_wins - 1)
+                    else:
+                        _daily_losses = max(0, _daily_losses - 1)
+                    _daily_trades = max(0, _daily_trades - 1)
+                redis_save("bot_trades", list(completed_trades))
+        except Exception as e:
+            log("warn", f"target_pnl cleanup error: {e}")
+
     _save_daily_state()
-    ghost_msg = f" Cleared {len(cleared)} ghost(s): {', '.join(cleared)}." if cleared else ""
-    log("ok", f"Capital set to ${amount:.2f} via admin button.{ghost_msg}")
-    return jsonify({"ok": True, "msg": f"Capital set to ${amount:.2f}.{ghost_msg} Refresh to confirm."})
+    ghost_msg = f" Cleared open ghost(s): {', '.join(cleared)}." if cleared else ""
+    pnl_msg   = f" Removed ghost trade ({removed_trade})." if removed_trade else ""
+    log("ok", f"Capital set to ${amount:.2f} via admin.{ghost_msg}{pnl_msg}")
+    return jsonify({"ok": True, "msg": f"Capital ${amount:.2f}.{ghost_msg}{pnl_msg} Refresh to confirm."})
 
 @app.route("/clear-usdc")
 def clear_usdc_get():
