@@ -2016,26 +2016,24 @@ def _partial_exit(mint, price, fraction, label):
 # ── GHOST POSITION CLEANUP ───────────────────────────────────────
 def _check_token_balance(mint):
     """Return wallet's token balance for a mint. 0 if not found or error."""
-    if not WALLET or not _SOLANA_AVAILABLE:
+    if not WALLET:
         return 0
     for rpc_url in _rpc_endpoints():
         try:
-            client = Client(rpc_url)
-            wallet_pk = Pubkey.from_string(WALLET)
-            mint_pk   = Pubkey.from_string(mint)
-            from solana.rpc.types import TokenAccountOpts
-            resp = client.get_token_accounts_by_owner(wallet_pk, TokenAccountOpts(mint=mint_pk))
-            if resp.value:
-                for acct in resp.value:
-                    parsed = acct.account.data
-                    if hasattr(parsed, "parsed"):
-                        ui = parsed.parsed.get("info", {}).get("tokenAmount", {}).get("uiAmount", 0)
-                        if ui and ui > 0:
-                            return ui
-                    # fallback: non-zero amount field
-                    amt = getattr(getattr(acct.account.data, "parsed", None), "info", {})
-                    if amt:
-                        return 1  # exists with some balance
+            resp = _session.post(rpc_url, json={
+                "jsonrpc": "2.0", "id": 1,
+                "method": "getTokenAccountsByOwner",
+                "params": [WALLET, {"mint": mint}, {"encoding": "jsonParsed"}]
+            }, timeout=8)
+            if resp.status_code != 200:
+                continue
+            accounts = resp.json().get("result", {}).get("value", [])
+            for acct in accounts:
+                ui = (acct.get("account", {}).get("data", {})
+                      .get("parsed", {}).get("info", {})
+                      .get("tokenAmount", {}).get("uiAmount", 0) or 0)
+                if ui > 0:
+                    return ui
             return 0
         except Exception:
             continue
@@ -4346,6 +4344,7 @@ def status():
       <div class="val" style="color:{scan_c};font-size:1.4rem">{scan_t}</div>
       <div class="sub">{'Looking for entries' if scan_t=='SCANNING' else f'Resumes {time.strftime("%H:%M", time.localtime(_pause_until))}' if paused else 'Capital too low'}</div>
       <button id="pause-btn" onclick="togglePause()" style="margin-top:8px;padding:5px 14px;border-radius:4px;border:1px solid {'#fbbf24' if not paused else '#4ade80'};background:transparent;color:{'#fbbf24' if not paused else '#4ade80'};font-size:0.72rem;font-weight:700;letter-spacing:.06em;cursor:pointer">{'⏸ PAUSE' if not paused else '▶ RESUME'}</button>
+      <button id="paper-btn" onclick="togglePaperMode()" style="margin-top:4px;padding:5px 14px;border-radius:4px;border:1px solid {'#f5c542' if PAPER_MODE else '#ff3355'};background:transparent;color:{'#f5c542' if PAPER_MODE else '#ff3355'};font-size:0.72rem;font-weight:700;letter-spacing:.06em;cursor:pointer">{'📄 PAPER' if PAPER_MODE else '🔴 GO PAPER'}</button>
     </div>
     <div class="stat">
       <div class="lbl">Daily Drawdown</div>
@@ -4448,6 +4447,28 @@ async function togglePause(){{
   }} catch(e){{ alert('Error: '+e); }}
   btn.disabled=false;
   refreshStatus();
+}}
+async function togglePaperMode(){{
+  const btn=document.getElementById('paper-btn');
+  if(!btn) return;
+  const isLive=btn.textContent.includes('GO PAPER');
+  btn.disabled=true;
+  btn.textContent='...';
+  var s=_getKey();
+  var hdrs={{'Content-Type':'application/json'}};
+  if(s) hdrs['X-API-Key']=s;
+  try{{
+    var r=await fetch('/admin/paper-mode',{{method:'POST',headers:hdrs,body:JSON.stringify({{enabled:isLive}})}});
+    var d=await r.json();
+    if(d.ok){{
+      const p=d.paper_mode;
+      btn.textContent=p?'📄 PAPER':'🔴 GO PAPER';
+      btn.style.color=p?'#f5c542':'#ff3355';
+      btn.style.borderColor=p?'#f5c542':'#ff3355';
+      showToast(p?'📄 PAPER MODE ON — no real trades':'🔴 LIVE MODE — real funds active');
+    }}
+  }}catch(e){{alert('Error: '+e);}}
+  btn.disabled=false;
 }}
 refreshStatus();
 setInterval(refreshStatus,5000);
@@ -5507,6 +5528,17 @@ def admin_resume():
     _persist_pause(0.0)
     log("ok", "Scanner RESUMED via admin endpoint")
     return jsonify({"ok": True, "msg": "Scanner resumed"})
+
+@app.route("/admin/paper-mode", methods=["POST"])
+def admin_set_paper_mode():
+    global PAPER_MODE
+    denied = _auth_required()
+    if denied: return denied
+    data = request.get_json(silent=True) or {}
+    PAPER_MODE = bool(data.get("enabled", True))
+    state = "PAPER" if PAPER_MODE else "LIVE"
+    log("warn" if not PAPER_MODE else "ok", f"Mode switched to {state} via admin", "ADMIN")
+    return jsonify({"ok": True, "paper_mode": PAPER_MODE, "mode": state})
 
 @app.route("/log", methods=["GET"])
 def get_log():
