@@ -2457,12 +2457,7 @@ def copy_trade_loop():
                             if gmgn_smart_money_selling(mint):
                                 log("warn", "SKIP: smart money selling", symbol)
                                 continue
-                            sig_score = gmgn_signal_score(mint)
-                            if sig_score < MIN_SIGNAL_SCORE:
-                                log("info", f"COPY SKIP: sig {sig_score}<{MIN_SIGNAL_SCORE}", symbol)
-                                continue
-                        else:
-                            sig_score = 0
+                        sig_score = gmgn_signal_score(mint)
                         market = get_market_data(mint)
                         if not market or market["price"] <= 0:
                             continue
@@ -2475,9 +2470,6 @@ def copy_trade_loop():
                             log("info", f"COPY SKIP: vol ${market.get('vol_m5',0):.0f}<{MIN_VOL_5M:.0f}", symbol)
                             continue
                         if not is_fast and market["liq"] < MIN_LIQ:
-                            continue
-                        if not is_fast and not is_1m_trending_up(market.get("pair_address", ""), market):
-                            log("info", f"COPY SKIP: 1m not trending up", symbol)
                             continue
                         with _copy_lock:
                             _copied_mints[mint] = time.time()
