@@ -3387,11 +3387,11 @@ def _home_inner():
     <a href="/" class="btn btn-gold">⚡ Refresh Now</a>
     <a href="/live" class="btn btn-ghost">📡 Live Feed</a>
     <a href="/trades" class="btn btn-ghost">💼 All Trades</a>
-    <button class="btn btn-ghost" style="border-color:rgba(0,229,255,.4);color:#00e5ff" onclick="adminPost('/admin/tune-now',{{}},'Run retune now and lock auto-tuning until next Monday 7am?')">🧠 Tune Now</button>
+    <button class="btn btn-ghost" style="border-color:rgba(0,229,255,.4);color:#00e5ff" onclick="adminPost('/admin/tune-now',{{}},null)">🧠 Tune Now</button>
     <button class="btn btn-ghost" onclick="adminPost('/admin/reset-daily',{{}},null)">🔄 Reset Daily</button>
-    <button class="btn btn-ghost" onclick="adminPost('/admin/reset-capital',{{}},'Reset capital to ${STARTING_CAPITAL:.2f}?')">💰 Reset Capital</button>
-    <button class="btn btn-ghost" style="border-color:#ff3355;color:#ff3355" onclick="adminPost('/admin/reset-all',{{}},'Reset capital to ${STARTING_CAPITAL:.2f}, clear win rate and daily counters?')">🗑️ Reset All</button>
-    <button class="btn btn-ghost" style="border-color:#888;color:#aaa;font-size:0.68rem" onclick="(()=>{{var k=prompt('Enter new API secret (leave blank to clear):',_getKey());if(k===null)return;_setKey(k);alert(k?'Key saved.':'Key cleared.');}})()">🔑 Set Key</button>
+    <button class="btn btn-ghost" onclick="adminPost('/admin/reset-capital',{{}},null)">💰 Reset Capital</button>
+    <button class="btn btn-ghost" style="border-color:#ff3355;color:#ff3355" onclick="adminPost('/admin/reset-all',{{}},null)">🗑️ Reset All</button>
+    <button class="btn btn-ghost" style="border-color:#888;color:#aaa;font-size:0.68rem" onclick="setApiKey()">🔑 Set Key</button>
   </div>
 
   <div class="cards">
@@ -3666,20 +3666,32 @@ pollStats();
 setInterval(pollStats,5000);
 function _getKey(){{return localStorage.getItem('api_secret')||'';}}
 function _setKey(k){{localStorage.setItem('api_secret',k||'');}}
-async function adminPost(url,body,confirmMsg){{
-  if(confirmMsg&&!confirm(confirmMsg))return;
+function showToast(msg){{
+  var t=document.getElementById('admin-toast');
+  if(!t){{t=document.createElement('div');t.id='admin-toast';
+    t.style.cssText='position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#00e5ff;color:#050a14;padding:10px 20px;border-radius:8px;font-weight:700;font-size:0.9rem;z-index:9999;transition:opacity 0.4s';
+    document.body.appendChild(t);}}
+  t.textContent=msg;t.style.opacity='1';
+  clearTimeout(t._hide);t._hide=setTimeout(()=>{{t.style.opacity='0';}},3000);
+}}
+function setApiKey(){{
+  var cur=_getKey();
+  var k=window.prompt?window.prompt('API secret (blank to clear):',cur):cur;
+  if(k===null)return;_setKey(k);showToast(k?'Key saved':'Key cleared');
+}}
+async function adminPost(url,body,_unused){{
   var s=_getKey();
   var hdrs={{'Content-Type':'application/json'}};
   if(s) hdrs['X-API-Key']=s;
-  var r=await fetch(url,{{method:'POST',headers:hdrs,body:JSON.stringify(body)}});
-  if(r.status===401){{
-    var k=prompt('API secret required:');
-    if(!k)return;_setKey(k);
-    return adminPost(url,body,null);
-  }}
-  var d=await r.json();
-  alert(d.msg||d.error||'Done');
-  pollStats();
+  try{{
+    var r=await fetch(url,{{method:'POST',headers:hdrs,body:JSON.stringify(body)}});
+    if(r.status===401){{
+      showToast('Need API key — tap Set Key first');return;
+    }}
+    var d=await r.json();
+    showToast(d.msg||d.error||'Done');
+    pollStats();
+  }}catch(e){{showToast('Error: '+e);}}
 }}
 async function togglePause(){{
   const btn=document.getElementById('pause-btn');
@@ -4192,19 +4204,23 @@ function refreshStatus(){{
 }}
 function _getKey(){{return localStorage.getItem('api_secret')||'';}}
 function _setKey(k){{localStorage.setItem('api_secret',k||'');}}
-async function adminPost(url,body,confirmMsg){{
-  if(confirmMsg&&!confirm(confirmMsg))return;
+function showToast(msg){{
+  var t=document.getElementById('admin-toast');
+  if(!t){{t=document.createElement('div');t.id='admin-toast';
+    t.style.cssText='position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#00e5ff;color:#050a14;padding:10px 20px;border-radius:8px;font-weight:700;font-size:0.9rem;z-index:9999;transition:opacity 0.4s';
+    document.body.appendChild(t);}}
+  t.textContent=msg;t.style.opacity='1';
+  clearTimeout(t._hide);t._hide=setTimeout(()=>{{t.style.opacity='0';}},3000);
+}}
+async function adminPost(url,body,_unused){{
   var s=_getKey();
   var hdrs={{'Content-Type':'application/json'}};
   if(s) hdrs['X-API-Key']=s;
-  var r=await fetch(url,{{method:'POST',headers:hdrs,body:JSON.stringify(body)}});
-  if(r.status===401){{
-    var k=prompt('API secret required:');
-    if(!k)return;_setKey(k);
-    return adminPost(url,body,null);
-  }}
-  var d=await r.json();
-  alert(d.msg||d.error||'Done');
+  try{{
+    var r=await fetch(url,{{method:'POST',headers:hdrs,body:JSON.stringify(body)}});
+    if(r.status===401){{showToast('Need API key — tap Set Key first');return;}}
+    var d=await r.json();
+    showToast(d.msg||d.error||'Done');
   refreshStatus();
 }}
 async function togglePause(){{
