@@ -3677,14 +3677,15 @@ function _setKey(k){{localStorage.setItem('api_secret',k||'');}}
 async function adminPost(url,body,confirmMsg){{
   if(confirmMsg&&!confirm(confirmMsg))return;
   var s=_getKey();
-  if(!s){{s=prompt('API secret:');if(!s)return;_setKey(s);}}
-  var r=await fetch(url,{{method:'POST',headers:{{'X-API-Key':s,'Content-Type':'application/json'}},body:JSON.stringify(body)}});
-  var d=await r.json();
+  var hdrs={{'Content-Type':'application/json'}};
+  if(s) hdrs['X-API-Key']=s;
+  var r=await fetch(url,{{method:'POST',headers:hdrs,body:JSON.stringify(body)}});
   if(r.status===401){{
-    var k=prompt('Wrong API secret — enter correct key:');
+    var k=prompt('API secret required:');
     if(!k)return;_setKey(k);
     return adminPost(url,body,null);
   }}
+  var d=await r.json();
   alert(d.msg||d.error||'Done');
   pollStats();
 }}
@@ -4202,14 +4203,15 @@ function _setKey(k){{localStorage.setItem('api_secret',k||'');}}
 async function adminPost(url,body,confirmMsg){{
   if(confirmMsg&&!confirm(confirmMsg))return;
   var s=_getKey();
-  if(!s){{s=prompt('API secret:');if(!s)return;_setKey(s);}}
-  var r=await fetch(url,{{method:'POST',headers:{{'X-API-Key':s,'Content-Type':'application/json'}},body:JSON.stringify(body)}});
-  var d=await r.json();
+  var hdrs={{'Content-Type':'application/json'}};
+  if(s) hdrs['X-API-Key']=s;
+  var r=await fetch(url,{{method:'POST',headers:hdrs,body:JSON.stringify(body)}});
   if(r.status===401){{
-    var k=prompt('Wrong API secret — enter correct key:');
+    var k=prompt('API secret required:');
     if(!k)return;_setKey(k);
     return adminPost(url,body,null);
   }}
+  var d=await r.json();
   alert(d.msg||d.error||'Done');
   refreshStatus();
 }}
