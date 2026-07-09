@@ -2122,31 +2122,58 @@ def exit_trade(mint, price, reason, bond=0):
     with trades_lock:
         if mint not in open_trades:
             return
-        trade = open_trades.pop(mint)
+        # Mark as exiting but keep in open_trades until sell confirms on-chain
+        if open_trades[mint].get("_exiting"):
+            return
+        open_trades[mint]["_exiting"] = True
+        trade = dict(open_trades[mint])
 
     amount           = trade["amount"]
     partial_proceeds = trade.get("partial_proceeds", 0.0)
-    remaining_tokens = trade["tokens"]   # already reduced by any _partial_exit calls
+    remaining_tokens = trade["tokens"]
     hold_m = (time.time() - trade["opened_at"]) / 60
 
-    # Value of the remaining tokens at exit price
-    final_value = remaining_tokens * price if price > 0 else 0
-
-    # Total PnL across the whole position (partials already returned to capital)
-    pnl = (partial_proceeds + final_value) - amount
-    pnl = max(-amount, min(pnl, amount * 5))   # clamp: can't lose more than bet, cap at 5x
-
-    # Capital gets back the clamped amount — same bound as pnl so we can't gain billions
-    # from a near-zero entry price producing trillions of tokens
+    final_value    = remaining_tokens * price if price > 0 else 0
+    pnl            = (partial_proceeds + final_value) - amount
+    pnl            = max(-amount, min(pnl, amount * 5))
     clamped_return = max(0.0, amount - partial_proceeds + pnl)
 
-    # Execute sell FIRST; only credit capital once the transaction is confirmed
-    sell_ok = execute_sell(trade["tokens"], mint, trade["symbol"], pump_swap=trade.get("pump_swap", False), raydium=trade.get("raydium", False))
-    if sell_ok:
-        with capital_lock:
-            capital += clamped_return
-    else:
-        log("err", f"Sell tx failed — capital not credited, tokens may still be in wallet", trade["symbol"])
+    sell_sig = execute_sell(trade["tokens"], mint, trade["symbol"],
+                            pump_swap=trade.get("pump_swap", False),
+                            raydium=trade.get("raydium", False))
+    if not sell_sig:
+        # Sell tx couldn't even be sent — put position back, retry next price tick
+        with trades_lock:
+            if mint in open_trades:
+                open_trades[mint].pop("_exiting", None)
+        log("err", f"Sell tx rejected — position kept open, will retry", trade["symbol"])
+        return
+
+    # Verify sell actually landed on-chain (up to ~20s); if not, restore position
+    sell_confirmed = False
+    for attempt, delay in [(1, 6), (2, 14)]:
+        time.sleep(delay)
+        try:
+            status = Client(SOL_RPC).get_signature_statuses([sell_sig])
+            tx_s   = status.value[0] if status.value else None
+            if tx_s is not None and not tx_s.err:
+                sell_confirmed = True
+                break
+        except Exception:
+            pass
+
+    if not sell_confirmed:
+        with trades_lock:
+            if mint in open_trades:
+                open_trades[mint].pop("_exiting", None)
+        log("err", f"Sell tx {sell_sig[:12]}... not confirmed — position restored, will retry", trade["symbol"])
+        return
+
+    # Sell confirmed — now safe to remove position and credit capital
+    with trades_lock:
+        open_trades.pop(mint, None)
+    with capital_lock:
+        capital += clamped_return
 
     sign = "+" if pnl >= 0 else ""
     log("ok" if pnl >= 0 else "err",
