@@ -227,6 +227,7 @@ SOL_RPC         = os.environ.get("SOL_RPC", "https://api.mainnet-beta.solana.com
 HELIUS_API_KEY        = os.environ.get("HELIUS_API_KEY", "")
 HELIUS_WEBHOOK_AUTH   = os.environ.get("HELIUS_WEBHOOK_AUTH", "")   # set same value in Helius dashboard → Auth Header
 RAILWAY_PUBLIC_DOMAIN = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")  # e.g. your-app.up.railway.app (no https://)
+BIRDEYE_API_KEY       = os.environ.get("BIRDEYE_API_KEY", "")
 PUMPPORTAL      = "https://pumpportal.fun/api/trade-local"
 
 def _rpc_endpoints():
@@ -1207,23 +1208,33 @@ def get_market_data(mint):
     try:
         res   = _session.get(f"https://api.dexscreener.com/latest/dex/tokens/{mint}", timeout=8)
         pairs = [p for p in res.json().get("pairs", []) if p.get("chainId") == "solana"]
-        if not pairs:
-            return None
-        pair = max(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
-        vol  = pair.get("volume", {})
-        txns = pair.get("txns",   {}).get("m5", {})
-        return {
-            "price":        float(pair.get("priceUsd", 0) or 0),
-            "liq":          float(pair.get("liquidity", {}).get("usd", 0) or 0),
-            "change1h":     float(pair.get("priceChange", {}).get("h1", 0) or 0),
-            "change5m":     float(pair.get("priceChange", {}).get("m5", 0) or 0),
-            "vol_m5":       float(vol.get("m5", 0) or 0),
-            "vol_h1":       float(vol.get("h1", 0) or 0),
-            "buys_m5":      int(txns.get("buys", 0) or 0),
-            "sells_m5":     int(txns.get("sells", 0) or 0),
-            "pair_address": pair.get("pairAddress", ""),
-            "age_h":        (time.time() - float(pair.get("pairCreatedAt", time.time() * 1000)) / 1000) / 3600,
-        }
+        if pairs:
+            pair = max(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
+            vol  = pair.get("volume", {})
+            txns = pair.get("txns",   {}).get("m5", {})
+            dex_price = float(pair.get("priceUsd", 0) or 0)
+            # Fill a zero DexScreener price from Birdeye (coin may be indexed but price missing)
+            if dex_price <= 0:
+                dex_price = get_birdeye_price(mint) or 0
+            return {
+                "price":        dex_price,
+                "liq":          float(pair.get("liquidity", {}).get("usd", 0) or 0),
+                "change1h":     float(pair.get("priceChange", {}).get("h1", 0) or 0),
+                "change5m":     float(pair.get("priceChange", {}).get("m5", 0) or 0),
+                "vol_m5":       float(vol.get("m5", 0) or 0),
+                "vol_h1":       float(vol.get("h1", 0) or 0),
+                "buys_m5":      int(txns.get("buys", 0) or 0),
+                "sells_m5":     int(txns.get("sells", 0) or 0),
+                "pair_address": pair.get("pairAddress", ""),
+                "age_h":        (time.time() - float(pair.get("pairCreatedAt", time.time() * 1000)) / 1000) / 3600,
+            }
+        # DexScreener has no pairs yet — try Birdeye for a price-only fallback
+        be_price = get_birdeye_price(mint)
+        if be_price:
+            return {"price": be_price, "liq": 0, "change1h": 0, "change5m": 0,
+                    "vol_m5": 0, "vol_h1": 0, "buys_m5": 0, "sells_m5": 0,
+                    "pair_address": "", "age_h": 0}
+        return None
     except Exception:
         return None
 
@@ -1247,6 +1258,35 @@ def is_1m_trending_up(pair_address, market=None) -> bool:
 _sol_price_cache = (None, 0.0)  # (price, fetched_at) — tuple assignment is atomic in CPython
 _SOL_PRICE_TTL   = 30  # seconds — SOL price doesn't move >0.1% in 30s at normal volatility
 
+_BIRDEYE_TTL    = 15  # seconds — shorter TTL than SOL cache; used for token prices too
+_birdeye_cache  = {}  # mint -> (timestamp, price)
+_WSOL_MINT      = "So11111111111111111111111111111111111111112"
+
+def get_birdeye_price(mint):
+    """Return USD price for any Solana token via Birdeye. Cached for _BIRDEYE_TTL seconds.
+    Returns None if API key not set or request fails."""
+    if not BIRDEYE_API_KEY:
+        return None
+    now = time.time()
+    hit = _birdeye_cache.get(mint)
+    if hit and now - hit[0] < _BIRDEYE_TTL:
+        return hit[1]
+    try:
+        res = _session.get(
+            "https://public-api.birdeye.so/defi/price",
+            params={"address": mint},
+            headers={"X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana"},
+            timeout=6
+        )
+        if res.status_code == 200:
+            price = float(res.json().get("data", {}).get("value", 0) or 0)
+            if price > 0:
+                _birdeye_cache[mint] = (now, price)
+                return price
+    except Exception:
+        pass
+    return None
+
 def get_sol_price():
     global _sol_price_cache
     cached_price, cached_ts = _sol_price_cache
@@ -1265,6 +1305,11 @@ def get_sol_price():
                 return price
     except Exception:
         pass
+    # Birdeye fallback — faster than CoinGecko, no rate limits with API key
+    be_price = get_birdeye_price(_WSOL_MINT)
+    if be_price:
+        _sol_price_cache = (be_price, time.time())
+        return be_price
     try:
         res   = _session.get(
             "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd",
