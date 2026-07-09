@@ -5352,6 +5352,61 @@ def admin_resume():
 def get_log():
     return jsonify({"logs": trade_log[-100:]})
 
+@app.route("/debug")
+def debug_view():
+    with capital_lock:
+        cap = capital
+    with _scan_log_lock:
+        recent_scans = list(scan_log[:30])
+    errs = [e for e in trade_log[-200:] if e.get("tag") in ("err","warn")][-20:]
+    result_counts = {}
+    for s in recent_scans:
+        r = s.get("result","?")
+        result_counts[r] = result_counts.get(r, 0) + 1
+
+    rows = ""
+    for s in recent_scans:
+        color = {"trade":"#00ff88","pass":"#00e5ff"}.get(s.get("result",""), "#ff3355")
+        rows += (f"<tr>"
+                 f"<td>{s.get('sym','?')}</td>"
+                 f"<td>{s.get('bond',0):.1f}%</td>"
+                 f"<td>{s.get('fi',0)}</td>"
+                 f"<td style='color:{color}'>{s.get('result','?').upper()}</td>"
+                 f"<td style='color:#aaa'>{s.get('msg','')}</td>"
+                 f"<td style='color:#555;font-size:.7rem'>{s.get('ts','')}</td>"
+                 f"</tr>")
+
+    err_rows = ""
+    for e in reversed(errs):
+        err_rows += f"<tr><td style='color:#888'>{e.get('time','')}</td><td style='color:#ff3355'>{e.get('symbol','')}</td><td>{e.get('msg','')}</td></tr>"
+
+    summary = " | ".join(f"{k.upper()}: {v}" for k,v in sorted(result_counts.items(), key=lambda x:-x[1]))
+    return f"""<!doctype html><html><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Debug — Scanner</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:#050a14;color:#c8d8f0;font-family:monospace;font-size:13px;padding:16px}}
+h2{{color:#00e5ff;margin-bottom:4px}}
+.sub{{color:#555;font-size:.75rem;margin-bottom:16px}}
+table{{width:100%;border-collapse:collapse;margin-bottom:24px}}
+th{{color:#555;text-align:left;padding:4px 8px;border-bottom:1px solid #1a2340;font-size:.7rem;text-transform:uppercase}}
+td{{padding:5px 8px;border-bottom:1px solid #0d1525;font-size:.8rem}}
+.summary{{background:#0d1525;padding:10px 14px;border-radius:6px;color:#00e5ff;margin-bottom:20px;font-size:.8rem}}
+a{{color:#00e5ff;text-decoration:none}}
+</style></head><body>
+<h2>Scanner Debug</h2>
+<div class='sub'>Capital: ${cap:.2f} | Paper: {PAPER_MODE} | Scanning: {scan_active}</div>
+<div class='summary'>{summary or "No scans yet — scanner may not be running"}</div>
+<h2 style='color:#aaa;font-size:.85rem;margin-bottom:8px'>Last 30 Coin Evaluations</h2>
+<table><thead><tr><th>Symbol</th><th>Bond</th><th>Filter#</th><th>Result</th><th>Reason</th><th>Time</th></tr></thead>
+<tbody>{rows or "<tr><td colspan=6 style='color:#555;padding:16px'>No evaluations yet</td></tr>"}</tbody></table>
+<h2 style='color:#ff3355;font-size:.85rem;margin-bottom:8px'>Recent Errors / Warnings</h2>
+<table><thead><tr><th>Time</th><th>Symbol</th><th>Message</th></tr></thead>
+<tbody>{err_rows or "<tr><td colspan=3 style='color:#555;padding:16px'>None</td></tr>"}</tbody></table>
+<a href='/'>← Dashboard</a> | <a href='/debug'>Refresh</a>
+</body></html>"""
+
 @app.route("/wallet-check")
 def wallet_check():
     lines = [
