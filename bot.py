@@ -1840,7 +1840,7 @@ def execute_buy(mint, symbol, amount, pump_swap=False, raydium=False):
             headers={"Content-Type": "application/json"},
             json={"publicKey": WALLET, "action": "buy", "mint": mint,
                   "denominatedInSol": "true", "amount": sol_amount,
-                  "slippage": 50, "priorityFee": 0.01, "pool": pool},
+                  "slippage": 50, "priorityFee": 0.001, "pool": pool},
             timeout=15
         )
         if res.status_code != 200:
@@ -1876,7 +1876,7 @@ def execute_sell(tokens, mint, symbol, pump_swap=False, raydium=False):
             headers={"Content-Type": "application/json"},
             json={"publicKey": WALLET, "action": "sell", "mint": mint,
                   "denominatedInSol": "false", "amount": tokens,
-                  "slippage": 50, "priorityFee": 0.01, "pool": pool},
+                  "slippage": 50, "priorityFee": 0.001, "pool": pool},
             timeout=15
         )
         if res.status_code != 200:
