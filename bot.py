@@ -1945,27 +1945,31 @@ def _partial_exit(mint, price, fraction, label):
 
 # ── GHOST POSITION CLEANUP ───────────────────────────────────────
 def _verify_tx_landed(sig, mint, symbol, amount):
-    """Background: check tx 6s after entry. If failed on-chain, remove ghost + refund capital."""
-    time.sleep(6)
-    try:
-        client = Client(SOL_RPC)
-        status = client.get_signature_statuses([sig])
-        tx_status = status.value[0] if status.value else None
-        if tx_status is None:
-            # Not confirmed yet — check once more after another 10s
-            time.sleep(10)
+    """Background: check tx on-chain. If failed OR unverifiable, remove ghost + refund capital."""
+    for attempt, delay in [(1, 8), (2, 15), (3, 30)]:
+        time.sleep(delay)
+        try:
+            client = Client(SOL_RPC)
             status = client.get_signature_statuses([sig])
             tx_status = status.value[0] if status.value else None
-        if tx_status and tx_status.err:
-            log("err", f"TX failed on-chain ({tx_status.err}) — removing ghost position", symbol)
-            _cleanup_ghost(mint, amount, symbol)
-        elif tx_status is None:
-            log("warn", f"TX unconfirmed after 16s — treating as ghost, cleaning up", symbol)
-            _cleanup_ghost(mint, amount, symbol)
-        else:
-            log("ok", f"TX confirmed on-chain ✓", symbol)
-    except Exception as e:
-        log("warn", f"TX verify error: {e}", symbol)
+            if tx_status is None:
+                if attempt < 3:
+                    continue  # not seen yet, retry
+                log("warn", f"TX unconfirmed after 3 checks ({delay}s) — ghost cleanup", symbol)
+                _cleanup_ghost(mint, amount, symbol)
+                return
+            if tx_status.err:
+                log("err", f"TX failed on-chain ({tx_status.err}) — ghost cleanup", symbol)
+                _cleanup_ghost(mint, amount, symbol)
+                return
+            log("ok", f"TX confirmed on-chain ✓ (attempt {attempt})", symbol)
+            return
+        except Exception as e:
+            log("warn", f"TX verify attempt {attempt} error: {e} — will retry", symbol)
+            if attempt == 3:
+                # Can't reach RPC — safer to clean up than leave capital locked forever
+                log("warn", f"RPC unreachable after 3 attempts — ghost cleanup to free capital", symbol)
+                _cleanup_ghost(mint, amount, symbol)
 
 def _cleanup_ghost(mint, amount, symbol):
     global capital
@@ -2028,9 +2032,10 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
             "raydium":           raydium,
             "partial_tp_done":   0,
             "partial_proceeds":  0.0,
+            "tx":                tx if tx not in (None, "PAPER_TX") else "",
         }
 
-    log("ok", f"ENTER [{strategy.upper()}] ${amount:.2f} | bond={bond_entry:.1f}%", symbol)
+    log("ok", f"ENTER [{strategy.upper()}] ${amount:.2f} | bond={bond_entry:.1f}% | tx={str(tx)[:12]}...", symbol)
     _log_scan(symbol, mint, bond_entry, 0, "pass", -1, f"ENTERED [{strategy.upper()}] ${amount:.2f}")
     notify(f"🟢 BUY {symbol}",
            f"Strategy: {strategy.upper()}\nAmount: ${amount:.2f}\nBond: {bond_entry:.1f}%\nReplies: {replies}")
@@ -3598,6 +3603,7 @@ def _home_inner():
       <div style="display:flex;gap:6px;margin-top:4px;align-items:center">
         <span id="pm-badge" style="font-size:.6rem;font-weight:700;letter-spacing:.06em;padding:2px 7px;border-radius:5px;background:#60a5fa18;color:#60a5fa;border:1px solid #60a5fa30;text-transform:uppercase">—</span>
         <span id="pm-held" style="font-size:.6rem;color:#5a5a7a">—</span>
+        <a id="pm-tx-link" href="#" target="_blank" style="display:none;font-size:.6rem;color:#00e5ff;text-decoration:none;border:1px solid #00e5ff33;padding:1px 6px;border-radius:4px">Solscan ↗</a>
       </div>
     </div>
     <div style="text-align:right">
@@ -3683,7 +3689,7 @@ async function fetchMiniPos(){{
   try{{
     const r=await fetch('/positions/api');
     const d=await r.json();
-    const pos=(d.open||[]).find(p=>p.mint===_pm.mint);
+    const pos=(d.positions||[]).find(p=>p.mint===_pm.mint);
     if(!pos){{closeMiniDrawer();return;}}
     const pnl=pos.pnl||0;
     document.getElementById('pm-sym').textContent=pos.symbol||'—';
@@ -3694,6 +3700,11 @@ async function fetchMiniPos(){{
     pe.style.color=pnl>=0?'#4ade80':'#f87171';
     document.getElementById('pm-price').textContent='\$'+(pos.price||pos.entry||0).toFixed(8);
     document.getElementById('pm-bond').textContent=(pos.bond_high||0).toFixed(1)+'%';
+    const txLink=document.getElementById('pm-tx-link');
+    if(txLink){{
+      if(pos.tx){{txLink.href='https://solscan.io/tx/'+pos.tx;txLink.style.display='inline';}}
+      else{{txLink.style.display='none';}}
+    }}
     _pm.hist.push(pos.price||pos.entry||0);
     if(_pm.hist.length>40)_pm.hist.shift();
     _drawMiniChart(pos.entry||0);
@@ -7433,6 +7444,7 @@ def positions_api():
                 "partial_proceeds": partial,
                 "pnl":            round(pnl, 4),
                 "pnl_pct":        round(pnl / max(amount, 1e-12) * 100, 2),
+                "tx":             t.get("tx", ""),
             })
     with capital_lock:
         cap = capital
