@@ -2014,32 +2014,51 @@ def _partial_exit(mint, price, fraction, label):
 
 
 # ── GHOST POSITION CLEANUP ───────────────────────────────────────
+def _check_token_balance(mint):
+    """Return wallet's token balance for a mint. 0 if not found or error."""
+    if not WALLET or not _SOLANA_AVAILABLE:
+        return 0
+    for rpc_url in _rpc_endpoints():
+        try:
+            client = Client(rpc_url)
+            wallet_pk = Pubkey.from_string(WALLET)
+            mint_pk   = Pubkey.from_string(mint)
+            from solana.rpc.types import TokenAccountOpts
+            resp = client.get_token_accounts_by_owner(wallet_pk, TokenAccountOpts(mint=mint_pk))
+            if resp.value:
+                for acct in resp.value:
+                    parsed = acct.account.data
+                    if hasattr(parsed, "parsed"):
+                        ui = parsed.parsed.get("info", {}).get("tokenAmount", {}).get("uiAmount", 0)
+                        if ui and ui > 0:
+                            return ui
+                    # fallback: non-zero amount field
+                    amt = getattr(getattr(acct.account.data, "parsed", None), "info", {})
+                    if amt:
+                        return 1  # exists with some balance
+            return 0
+        except Exception:
+            continue
+    return 0
+
 def _verify_tx_landed(sig, mint, symbol, amount):
-    """Background: check tx on-chain. If failed OR unverifiable, remove ghost + refund capital."""
-    for attempt, delay in [(1, 8), (2, 15), (3, 30)]:
+    """Background: check wallet token balance. If tokens never arrived, cleanup ghost."""
+    for attempt, delay in [(1, 10), (2, 20), (3, 30)]:
         time.sleep(delay)
         try:
-            client = Client(SOL_RPC)
-            status = client.get_signature_statuses([sig])
-            tx_status = status.value[0] if status.value else None
-            if tx_status is None:
-                if attempt < 3:
-                    continue  # not seen yet, retry
-                log("warn", f"TX unconfirmed after 3 checks ({delay}s) — ghost cleanup", symbol)
-                _cleanup_ghost(mint, amount, symbol)
+            bal = _check_token_balance(mint)
+            if bal > 0:
+                # Tokens confirmed in wallet — remove unverified flag, trade is real
+                with trades_lock:
+                    if mint in open_trades:
+                        open_trades[mint].pop("_unverified", None)
+                log("ok", f"Buy confirmed: {bal:.0f} tokens in wallet ✓", symbol)
                 return
-            if tx_status.err:
-                log("err", f"TX failed on-chain ({tx_status.err}) — ghost cleanup", symbol)
-                _cleanup_ghost(mint, amount, symbol)
-                return
-            log("ok", f"TX confirmed on-chain ✓ (attempt {attempt})", symbol)
-            return
         except Exception as e:
-            log("warn", f"TX verify attempt {attempt} error: {e} — will retry", symbol)
-            if attempt == 3:
-                # Can't reach RPC — safer to clean up than leave capital locked forever
-                log("warn", f"RPC unreachable after 3 attempts — ghost cleanup to free capital", symbol)
-                _cleanup_ghost(mint, amount, symbol)
+            log("warn", f"Balance check attempt {attempt}: {e}", symbol)
+        if attempt == 3:
+            log("warn", f"No tokens found after {10+20+30}s — ghost cleanup", symbol)
+            _cleanup_ghost(mint, amount, symbol)
 
 def _cleanup_ghost(mint, amount, symbol):
     global capital
@@ -2103,16 +2122,16 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
             "partial_tp_done":   0,
             "partial_proceeds":  0.0,
             "tx":                tx if tx not in (None, "PAPER_TX") else "",
+            "_unverified":       not PAPER_MODE and tx not in (None, "PAPER_TX"),
         }
 
     log("ok", f"ENTER [{strategy.upper()}] ${amount:.2f} | bond={bond_entry:.1f}% | tx={str(tx)[:12]}...", symbol)
     _log_scan(symbol, mint, bond_entry, 0, "pass", -1, f"ENTERED [{strategy.upper()}] ${amount:.2f}")
     notify(f"🟢 BUY {symbol}",
            f"Strategy: {strategy.upper()}\nAmount: ${amount:.2f}\nBond: {bond_entry:.1f}%\nReplies: {replies}")
-    # Persist immediately so restart won't re-buy this position
     with trades_lock:
         redis_save("bot_open_trades", list(open_trades.values()))
-    # Background: verify tx actually landed on-chain, clean up ghost if not
+    # Background: verify tokens landed in wallet, cleanup ghost if not
     if not PAPER_MODE and tx not in (None, "PAPER_TX"):
         threading.Thread(target=_verify_tx_landed, args=(tx, mint, symbol, amount), daemon=True).start()
     return True
@@ -2239,6 +2258,9 @@ def _check_one_position(mint):
     try:
         with trades_lock:
             if mint not in open_trades or open_trades[mint].get("_exiting"):
+                return
+            # Skip until token balance confirmed in wallet (~60s window)
+            if open_trades[mint].get("_unverified"):
                 return
             trade = dict(open_trades[mint])
         symbol   = trade["symbol"]
