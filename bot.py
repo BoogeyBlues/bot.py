@@ -2046,6 +2046,10 @@ def execute_sell(tokens, mint, symbol, pump_swap=False, raydium=False):
     if PAPER_MODE:
         log("ok", f"[PAPER] Sell {symbol}", symbol)
         return "PAPER_TX"
+    tok_int = int(tokens)
+    if tok_int <= 0:
+        log("err", f"Sell aborted: token count rounds to 0 (raw={tokens})", symbol)
+        return None
     try:
         # Always detect pool fresh — stored flags from buy time can be stale/wrong
         detected = _detect_pool(mint, symbol)
@@ -2057,8 +2061,6 @@ def execute_sell(tokens, mint, symbol, pump_swap=False, raydium=False):
             pools_to_try = ["pump", "pump-swap"]
 
         keypair  = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
-        # PumpPortal expects integer token count — float can cause 400 rejection
-        tok_int  = int(tokens)
 
         for pool in pools_to_try:
             for fetch_attempt in range(2):  # retry with fresh blockhash if broadcast fails
