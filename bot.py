@@ -603,9 +603,13 @@ def _load_daily_state():
                 if mint and mint not in open_trades:
                     # Clear sell-side flag — exit_trade will re-set it when it actually runs
                     t.pop("_exiting", None)
-                    # Track which positions need buy verification restarted
-                    if t.pop("_unverified", None):
+                    # Track which positions need buy verification restarted.
+                    # Keep _unverified=True in the dict so the monitor loop doesn't
+                    # try to manage an unconfirmed position during the 10-60s check window.
+                    if t.get("_unverified"):
                         needs_verify.append((mint, t.get("symbol", "?"), t.get("amount", 0)))
+                    else:
+                        t.pop("_unverified", None)
                     open_trades[mint] = t
         # Restart buy-verification threads outside the lock
         for mint, symbol, amount in needs_verify:
@@ -2276,6 +2280,8 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
 
 def _verify_sell_and_retry(sig, trade, mint, clamped_return, reason):
     """Background: verify sell tx landed. Uses Helius first, balance check as ground truth."""
+    if sig == "PAPER_TX":
+        return  # paper mode — no on-chain tx to verify
     symbol = trade["symbol"]
     for attempt, delay in [(1, 12), (2, 25)]:
         time.sleep(delay)
@@ -5885,9 +5891,12 @@ def admin_force_sell(mint):
     with trades_lock:
         if mint in open_trades:
             symbol = open_trades[mint].get("symbol", symbol)
-    if bal <= 0 and mint not in open_trades:
+    with trades_lock:
+        _in_open = mint in open_trades
+        _open_tokens = open_trades.get(mint, {}).get("tokens", 0)
+    if bal <= 0 and not _in_open:
         return jsonify({"ok": False, "error": "No tokens found in wallet and no open position"})
-    sell_tokens = bal if bal > 0 else open_trades.get(mint, {}).get("tokens", 0)
+    sell_tokens = bal if bal > 0 else _open_tokens
     if sell_tokens <= 0:
         return jsonify({"ok": False, "error": "Token balance is zero"})
     log("warn", f"FORCE SELL {sell_tokens:.0f} tokens via admin", symbol)
@@ -5902,13 +5911,24 @@ def admin_force_sell(mint):
                        raydium=(trade.get("raydium", False) if trade else False))
     if sig:
         if trade:
-            price = trade.get("entry", 0)
-            amount = trade.get("amount", 0)
+            amount  = trade.get("amount", 0)
             partial = trade.get("partial_proceeds", 0.0)
-            clamped = max(0.0, amount - partial)
+            # Get exit price — try bonding details then market data; fall back to entry
+            _det = get_bonding_details(mint)
+            exit_price = (_det.get("price_usd", 0) or 0) if _det else 0
+            if exit_price <= 0:
+                _mkt = get_market_data(mint)
+                exit_price = (_mkt["price"] if _mkt and _mkt["price"] > 0 else 0)
+            if exit_price <= 0:
+                exit_price = trade.get("entry", 0)
+            final_value = sell_tokens * exit_price if exit_price > 0 else (amount - partial)
+            pnl = (partial + final_value) - amount
+            pnl = max(-amount, min(pnl, amount * 5))
+            clamped = max(0.0, amount - partial + pnl)
             with capital_lock:
                 capital += clamped
-            log("ok", f"Force sell succeeded: {sig[:12]}... Capital +${clamped:.2f}", symbol)
+            sign = "+" if pnl >= 0 else ""
+            log("ok", f"Force sell succeeded: {sig[:12]}... PnL {sign}${pnl:.4f} | Capital +${clamped:.2f}", symbol)
         return jsonify({"ok": True, "sig": sig, "tokens_sold": sell_tokens, "symbol": symbol})
     else:
         if trade:
