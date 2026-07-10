@@ -1007,12 +1007,14 @@ def auto_tune(history):
         if len(sl_losses) > len(bond_losses) * 0.6 and BOND_SL_PCT > 6:
             BOND_SL_PCT = round(BOND_SL_PCT - 1, 1)  # tighten SL to cut losses faster
 
-        # Tune BOND_TP_PCT toward where winners actually peaked
+        # Tune BOND_TP_PCT toward where winners actually peaked.
+        # Must stay above PARTIAL_TP2_PCT so the partial scale-out cascade can run first.
         bond_tp_wins = [t for t in bond_wins if t.get("pnl", 0) > 0]
         if bond_tp_wins:
             avg_win_pnl_pct = sum((t["pnl"] / max(t["amount"], 0.01)) * 100 for t in bond_tp_wins) / len(bond_tp_wins)
-            # Nudge TP toward actual winner peak — stay in 10-35% range for scalping
-            BOND_TP_PCT = round(max(10, min(35, avg_win_pnl_pct * 0.85)), 1)
+            # Floor = PARTIAL_TP2_PCT + 2 so partial exits always fire before full TP
+            _tp_floor = PARTIAL_TP2_PCT + 2
+            BOND_TP_PCT = round(max(_tp_floor, min(35, avg_win_pnl_pct * 0.85)), 1)
 
         # Spike tuning — keep within scalping range
         if spike_wr > bond_wr + 0.2 and SPIKE_TP_PCT < 40:
