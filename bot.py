@@ -3352,10 +3352,21 @@ def scanner_loop():
                         continue
                     strategy = res["strategy"]
                     amt = trade_size()
-                    # Re-fetch price — eval happened in a parallel pool, price may be stale
+                    # Re-fetch price — eval happened in a parallel pool, price may be stale.
+                    # Bond/trench/bundle tokens are pre-graduation and often not on DexScreener
+                    # yet — fall back to pump.fun bonding curve price for those strategies.
                     fresh = get_market_data(res["mint"])
                     if not fresh or fresh["price"] <= 0:
-                        continue
+                        if strategy in ("bond", "bundle", "trench"):
+                            _det = get_bonding_details(res["mint"])
+                            _cpx = (_det.get("price_usd", 0) or 0) if _det else 0
+                            if _cpx <= 0:
+                                _cpx = res.get("price", 0)
+                            if _cpx <= 0:
+                                continue
+                            fresh = {"price": _cpx, "liq": 0, "vol_m5": 0}
+                        else:
+                            continue
                     m = fresh
                     if strategy == "bond":
                         log("ok", f"BOND RUNNER | bond={res['bond']:.1f}% 5m={m.get('change5m',0):+.1f}% | sig={res['sig_score']}", res["symbol"])
