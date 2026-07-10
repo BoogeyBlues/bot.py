@@ -109,8 +109,8 @@ BOND_GRAD_BOND  = float(os.environ.get("BOND_GRAD_BOND", "90"))  # graduation im
 BOND_GRAD_TSL   = float(os.environ.get("BOND_GRAD_TSL",  "3"))   # tight TSL % near graduation
 BOND_MAX_SECS       = int(os.environ.get("BOND_MAX_SECS",       "600"))  # 10 min — early runners need time
 BOND_STALE_SECS     = int(os.environ.get("BOND_STALE_SECS",     "180"))  # 3 min — allow brief consolidations
-DEAD_PAIR_SECS      = int(os.environ.get("DEAD_PAIR_SECS",       "45"))  # exit if zero bond movement in 45s (buffer for transient API failures)
-VOL_STALE_SECS      = int(os.environ.get("VOL_STALE_SECS",       "60"))  # exit if had volume but stalled 60s
+DEAD_PAIR_SECS      = int(os.environ.get("DEAD_PAIR_SECS",       "90"))  # exit if zero bond movement in 90s
+VOL_STALE_SECS      = int(os.environ.get("VOL_STALE_SECS",       "120")) # exit if had volume but stalled 120s
 
 # Dormant Spike strategy
 SPIKE_MIN_AGE_H = float(os.environ.get("SPIKE_MIN_AGE_H", "6"))
@@ -319,8 +319,6 @@ _sold_mints       = {}   # mint -> timestamp, cooldown after selling to prevent 
 _webhook_queue    = deque(maxlen=500)  # Helius push events: (wallet_info_dict, act_dict)
 _helius_wh_id     = ""                 # registered Helius webhook ID (persisted to Redis)
 _helius_wh_lock   = threading.Lock()
-_bond_prev        = {}   # mint -> (bond_pct, timestamp) — velocity check: skip stalled bonds
-_bond_prev_lock   = threading.Lock()
 _watchlist        = {}   # mint -> {"res": action_result, "added_at": float} — qualified but couldn't enter
 _watchlist_lock   = threading.Lock()
 WATCHLIST_TTL_SECS = int(os.environ.get("WATCHLIST_TTL_SECS", "300"))  # 5 min before watchlist entry expires
@@ -3010,14 +3008,8 @@ def _eval_coin(coin):
             return None
         sig_score = gmgn_signal_score(mint) + dsc_signal_score(mint) + jup_token_signal_score(mint)
         # Bond runner buys BEFORE smart money arrives — no signal floor here
-        # Bond velocity: skip if bond hasn't moved ≥0.2% in last 30s (loosened from 0.5%/2s)
-        _now_ts = time.time()
-        with _bond_prev_lock:
-            _prev_bond, _prev_ts = _bond_prev.get(mint, (None, 0))
-            _bond_prev[mint] = (bond, _now_ts)
-        if _prev_bond is not None and abs(bond - _prev_bond) < 0.2 and _now_ts - _prev_ts < 120:
-            _log_scan(symbol, mint, bond, _sig_pre, "vel", 7, "BOND STALLED")
-            return None
+        # (velocity gate removed — DEAD exit at 45s handles stalled bonds post-entry,
+        #  pre-filtering on velocity kills legitimate entries in slow markets)
         market = get_market_data(mint)
         if not market or not market.get("pair_address") or market["price"] <= 0:
             # DexScreener hasn't indexed yet — derive price from bonding curve
@@ -3279,8 +3271,8 @@ def scanner_loop():
                     continue
                 n_social += 1
                 last_trade = coin.get("last_trade", 0)
-                if last_trade > 0 and time.time() - last_trade / 1000 > 300:
-                    _log_scan(symbol, mint, bond, social_count, "active", 1, "LAST TRADE >5MIN")
+                if last_trade > 0 and time.time() - last_trade / 1000 > 480:
+                    _log_scan(symbol, mint, bond, social_count, "active", 1, "LAST TRADE >8MIN")
                     continue
                 n_active += 1
 
