@@ -298,11 +298,12 @@ TRADE_START_HOUR = int(os.environ.get("TRADE_START_HOUR", "0"))
 TRADE_END_HOUR   = int(os.environ.get("TRADE_END_HOUR",   "0"))
 
 # Daily tracking — resets at TRADE_START_HOUR
-_daily_date       = ""
-_daily_trades     = 0
-_daily_wins       = 0
-_daily_losses     = 0
-_day_start_cap    = 0.0    # capital at start of day — used for daily loss % guard
+_daily_date         = ""
+_daily_trades       = 0
+_daily_wins         = 0
+_daily_losses       = 0
+_consecutive_losses = 0    # reset on every win; loss guard checks this, not daily total
+_day_start_cap      = 0.0    # capital at start of day — used for daily loss % guard
 _pause_until      = 0.0    # Unix timestamp — bot pauses trading until this time
 _daily_cap_notified = False  # prevent Telegram spam when daily cap is active
 _daily_lock       = threading.Lock()
@@ -623,7 +624,7 @@ def _load_daily_state():
 
 def _reset_daily_if_needed():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses, _pause_until
-    global _week_start_date, _week_day_logs, _day_start_cap, _daily_cap_notified
+    global _week_start_date, _week_day_logs, _day_start_cap, _daily_cap_notified, _consecutive_losses
     # Rollover key = "YYYY-MM-DD@HH" where HH is TRADE_START_HOUR.
     # This means the "trading day" starts at TRADE_START_HOUR (not midnight).
     now = time.gmtime()
@@ -648,10 +649,11 @@ def _reset_daily_if_needed():
                 })
             if not _week_start_date:
                 _week_start_date = today
-            _daily_date    = today
-            _daily_trades  = 0
-            _daily_wins    = 0
-            _daily_losses  = 0
+            _daily_date         = today
+            _daily_trades       = 0
+            _daily_wins         = 0
+            _daily_losses       = 0
+            _consecutive_losses = 0
             _daily_cap_notified = False
             # _pause_until intentionally NOT reset here — pause survives day rollover
             _day_start_cap = _cap_snap  # snapshot for daily loss % guard
@@ -721,24 +723,26 @@ def daily_limit_reached():
         return False
 
 def record_daily_trade(won):
-    global _daily_wins, _daily_losses, _pause_until
+    global _daily_wins, _daily_losses, _pause_until, _consecutive_losses
     trigger_retune = False
     with _daily_lock:
         if won:
+            _consecutive_losses = 0  # reset streak on any win
             _daily_wins += 1
         else:
-            _daily_losses += 1
-            # Loss-streak guard: DAILY_LOSS_MAX consecutive losses → short cooldown + retune
-            if _daily_losses >= DAILY_LOSS_MAX and _pause_until <= time.time():
+            _daily_losses      += 1
+            _consecutive_losses += 1
+            # Loss-streak guard: DAILY_LOSS_MAX *consecutive* losses → short cooldown + retune
+            if _consecutive_losses >= DAILY_LOSS_MAX and _pause_until <= time.time():
                 _pause_until   = time.time() + LOSS_COOLDOWN_HRS * 3600
                 trigger_retune = True
                 log("warn",
-                    f"Loss streak {_daily_losses} — pausing {LOSS_COOLDOWN_HRS*60:.0f}min, retuning",
+                    f"Loss streak {_consecutive_losses} consecutive — pausing {LOSS_COOLDOWN_HRS*60:.0f}min, retuning",
                     "RISK")
         log("ok" if won else "info",
-            f"Daily: {_daily_trades} trades | {_daily_wins}W {_daily_losses}L")
+            f"Daily: {_daily_trades} trades | {_daily_wins}W {_daily_losses}L | streak:{_consecutive_losses}L")
     if trigger_retune:
-        notify(f"⚠️ Loss Streak {_daily_losses}",
+        notify(f"⚠️ Loss Streak {_consecutive_losses}",
                f"Pausing {LOSS_COOLDOWN_HRS*60:.0f} min and retuning strategies.")
         threading.Thread(target=_retune_strategies, daemon=True).start()
     _save_daily_state()
@@ -2234,17 +2238,21 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
             return False
         open_trades[mint] = {"symbol": symbol, "mint": mint, "_unverified": True}
 
+    # Reserve daily slot before buy so two concurrent threads can't both slip through
+    # the limit check during the seconds execute_buy() takes.
+    with _daily_lock:
+        _daily_trades += 1
+
     tx = execute_buy(mint, symbol, amount, pump_swap=pump_swap, raydium=raydium)
     if not tx:
-        # Buy failed — release both reservations
+        # Buy failed — release all reservations
         with trades_lock:
             open_trades.pop(mint, None)
         with capital_lock:
             capital += amount
+        with _daily_lock:
+            _daily_trades = max(0, _daily_trades - 1)
         return False
-
-    with _daily_lock:
-        _daily_trades += 1
 
     # Capital already deducted during reservation — just write the full trade record
     with trades_lock:
@@ -2269,6 +2277,7 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
             "partial_proceeds":  0.0,
             "tx":                tx if tx not in (None, "PAPER_TX") else "",
             "_unverified":       not PAPER_MODE and tx not in (None, "PAPER_TX"),
+            "_last_price":       entry_price,
         }
 
     log("ok", f"ENTER [{strategy.upper()}] ${amount:.2f} | bond={bond_entry:.1f}% | tx={str(tx)[:12]}...", symbol)
@@ -2310,14 +2319,22 @@ def _verify_sell_and_retry(sig, trade, mint, clamped_return, reason):
     retry_sig = execute_sell(bal, mint, symbol,
                              pump_swap=trade.get("pump_swap", False),
                              raydium=trade.get("raydium", False))
-    if retry_sig:
-        log("ok", f"Sell retry submitted: {retry_sig[:12]}...", symbol)
-        return
-    # Retry also failed — tokens stuck, correct capital
+    if retry_sig and retry_sig != "PAPER_TX":
+        log("ok", f"Sell retry submitted: {retry_sig[:12]}... — verifying in 20s", symbol)
+        time.sleep(20)
+        bal_after = _check_token_balance(mint)
+        if bal_after == 0:
+            log("ok", f"Sell retry confirmed — tokens gone", symbol)
+            return  # retry landed on-chain
+        log("err", f"Sell retry also failed on-chain — {bal_after:.0f} tokens still in wallet", symbol)
+        # fall through to capital correction below
+    elif not retry_sig:
+        log("err", "Sell retry submit failed", symbol)
+    # Capital was optimistically credited — correct it now
     global capital
     with capital_lock:
         capital -= clamped_return
-    log("err", f"Sell failed twice — tokens stuck. Capital -${clamped_return:.2f}. Sell manually in Phantom.", symbol)
+    log("err", f"Sell failed — tokens stuck. Capital -${clamped_return:.2f}. Sell manually in Phantom.", symbol)
     notify(f"⚠️ STUCK {symbol}", f"Sell failed twice. Tokens still in wallet.\nSell manually in Phantom.\nCapital corrected -${clamped_return:.2f}")
 
 def exit_trade(mint, price, reason, bond=0):
@@ -2435,15 +2452,16 @@ def _check_one_position(mint):
 
         # Use real price from pump.fun virtual reserves — accurate constant-product AMM price
         # Falls back to DexScreener for graduated/raydium tokens
+        # Falls back to _last_price (not entry) so SL/TSL can still fire when both APIs are down
         market = None
         if strategy in ("bond", "copy", "bundle", "trench") and details:
             price = details.get("price_usd", 0) or 0
             if price <= 0:
                 market = get_market_data(mint)
-                price = market["price"] if market and market["price"] > 0 else trade["entry"]
+                price = market["price"] if market and market["price"] > 0 else trade.get("_last_price", trade["entry"])
         else:
             market = get_market_data(mint)
-            price = market["price"] if market and market["price"] > 0 else trade["entry"]
+            price = market["price"] if market and market["price"] > 0 else trade.get("_last_price", trade["entry"])
 
         with trades_lock:
             if mint not in open_trades or open_trades[mint].get("_exiting"):
@@ -2458,6 +2476,8 @@ def _check_one_position(mint):
                 open_trades[mint]["bond_last_moved"] = time.time()
             if price > open_trades[mint]["price_high"]:
                 open_trades[mint]["price_high"] = price
+            if price > 0:
+                open_trades[mint]["_last_price"] = price
             bond_high       = open_trades[mint]["bond_high"]
             bond_prev       = open_trades[mint]["bond_prev"]
             bond_last_moved = open_trades[mint].get("bond_last_moved", time.time())
@@ -2553,7 +2573,7 @@ def _check_one_position(mint):
                 exit_trade(mint, price, "BOND_TIME", bond); return
 
         elif strategy == "spike":
-            move = ((price - trade["entry"]) / trade["entry"]) * 100
+            move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
             if move >= SPIKE_TP_PCT:
                 exit_trade(mint, price, "SPIKE_TP", bond); return
             if price <= tsl_price:
@@ -2576,7 +2596,7 @@ def _check_one_position(mint):
                 exit_trade(mint, price, "COPY_TIME", bond); return
 
         elif strategy == "fast":
-            move = ((price - trade["entry"]) / trade["entry"]) * 100
+            move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
             if move >= FAST_TP_PCT:
                 exit_trade(mint, price, "FAST_TP", bond); return
             if price <= trade["entry"] * (1 - FAST_SL_PCT / 100):
@@ -2585,7 +2605,7 @@ def _check_one_position(mint):
                 exit_trade(mint, price, "FAST_TIME", bond); return
 
         elif strategy == "trench":
-            move = ((price - trade["entry"]) / trade["entry"]) * 100
+            move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
             if bond >= 99:
                 exit_trade(mint, price, "TRENCH_GRAD", bond); return
             if move >= TRENCH_TP_PCT:
@@ -2597,7 +2617,7 @@ def _check_one_position(mint):
 
         elif strategy == "migrate":
             migrate_elapsed = time.time() - trade.get("grad_opened_at", trade["opened_at"])
-            move = ((price - trade["entry"]) / trade["entry"]) * 100
+            move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
             if move >= MIGRATE_TP_PCT:
                 exit_trade(mint, price, "MIGRATE_TP", bond); return
             if price <= tsl_price:
@@ -5866,8 +5886,10 @@ def admin_pause():
 
 @app.route("/admin/resume", methods=["POST"])
 def admin_resume():
+    global BOT_PAUSED
     denied = _auth_required()
     if denied: return denied
+    BOT_PAUSED = False   # clear env-var halt so scanner gates pass immediately
     _persist_pause(0.0)
     log("ok", "Scanner RESUMED via admin endpoint")
     return jsonify({"ok": True, "msg": "Scanner resumed"})
