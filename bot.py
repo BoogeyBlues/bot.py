@@ -103,13 +103,13 @@ ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # kept for ref
 # Bond Runner strategy
 BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "50"))  # 50%+ = confirmed momentum, less stall risk
 BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "75"))
-BOND_TP_PCT     = float(os.environ.get("BOND_TP_PCT",    "20"))  # 20% TP — catches fast movers before rug
+BOND_TP_PCT     = float(os.environ.get("BOND_TP_PCT",    "30"))  # 30% TP — lets partial scale-out run (TP1@20%, TP2@25%, full@30%)
 BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "8"))
 BOND_GRAD_BOND  = float(os.environ.get("BOND_GRAD_BOND", "90"))  # graduation imminent — tighten TSL
 BOND_GRAD_TSL   = float(os.environ.get("BOND_GRAD_TSL",  "3"))   # tight TSL % near graduation
 BOND_MAX_SECS       = int(os.environ.get("BOND_MAX_SECS",       "600"))  # 10 min — early runners need time
 BOND_STALE_SECS     = int(os.environ.get("BOND_STALE_SECS",     "180"))  # 3 min — allow brief consolidations
-DEAD_PAIR_SECS      = int(os.environ.get("DEAD_PAIR_SECS",       "20"))  # exit if zero bond movement in 20s
+DEAD_PAIR_SECS      = int(os.environ.get("DEAD_PAIR_SECS",       "45"))  # exit if zero bond movement in 45s (buffer for transient API failures)
 VOL_STALE_SECS      = int(os.environ.get("VOL_STALE_SECS",       "60"))  # exit if had volume but stalled 60s
 
 # Dormant Spike strategy
@@ -2439,8 +2439,13 @@ def _check_one_position(mint):
             if mint not in open_trades or open_trades[mint].get("_exiting"):
                 return
             if bond > open_trades[mint]["bond_high"]:
-                open_trades[mint]["bond_high"]       = bond
-                open_trades[mint]["bond_last_moved"]  = time.time()
+                open_trades[mint]["bond_high"]      = bond
+                open_trades[mint]["bond_last_moved"] = time.time()
+            elif details is None:
+                # Transient pump.fun API failure — preserve existing bond state so
+                # DEAD/STALE timers don't expire on a network blip; use cached high
+                bond = open_trades[mint]["bond_high"]
+                open_trades[mint]["bond_last_moved"] = time.time()
             if price > open_trades[mint]["price_high"]:
                 open_trades[mint]["price_high"] = price
             bond_high       = open_trades[mint]["bond_high"]
