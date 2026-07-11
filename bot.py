@@ -92,7 +92,7 @@ _RISK_TIERS = {
 }
 _CAP_TIERS = _RISK_TIERS.get(RISK_LEVEL, _RISK_TIERS["standard"])
 
-MAX_DAILY_LOSS_PCT  = float(os.environ.get("MAX_DAILY_LOSS_PCT",  "20"))  # stop day if down >20% of start capital
+MAX_DAILY_LOSS_PCT  = float(os.environ.get("MAX_DAILY_LOSS_PCT",  "40"))  # stop day if down >40% of start capital
 SOLD_COOLDOWN_SECS = int(os.environ.get("SOLD_COOLDOWN_SECS", "1800"))  # 30 min cooldown before re-buying a sold coin
 
 # Risk limits
@@ -532,6 +532,14 @@ def _load_daily_state():
             _week_day_logs   = s.get("week_logs",  [])
             if s.get("day_start_cap", 0) > 0:
                 _day_start_cap = float(s["day_start_cap"])
+                # If saved baseline is >2x current capital the account was synced / partially
+                # funded after last restart — reset baseline so the daily loss guard doesn't
+                # permanently block trading.
+                with capital_lock:
+                    _cur = capital
+                if _cur > 0 and _day_start_cap > _cur * 2:
+                    _day_start_cap = _cur
+                    log("warn", f"day_start_cap reset to ${_cur:.2f} (was {_day_start_cap:.2f}) — capital changed since last run")
             TUNE_PAUSED_UNTIL = float(s.get("tune_paused_until", _next_monday_7am()))
             # Restore tuner parameters — env vars are initial defaults only; Redis wins
             if "bond_entry_min"  in s: BOND_ENTRY_MIN  = float(s["bond_entry_min"])
