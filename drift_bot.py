@@ -6,48 +6,60 @@ app = Flask(__name__)
 
 # ── CONFIG ────────────────────────────────────────────────────────
 DRIFT_PAPER_MODE   = os.environ.get("DRIFT_PAPER_MODE", "true").lower() != "false"
-DRIFT_EXCHANGE     = os.environ.get("DRIFT_EXCHANGE", "jupiter")
-DRIFT_LEVERAGE     = float(os.environ.get("DRIFT_LEVERAGE", "42"))     # midpoint; used as fallback
-DRIFT_LEV_MIN      = float(os.environ.get("DRIFT_LEV_MIN",  "30"))     # minimum leverage
-DRIFT_LEV_MAX      = float(os.environ.get("DRIFT_LEV_MAX",  "55"))     # maximum leverage
-DRIFT_MARGIN_USD   = float(os.environ.get("DRIFT_MARGIN_USD", "20"))   # fixed margin per trade ($)
+# IBKR connection — only used in live mode (DRIFT_PAPER_MODE=false)
+IB_HOST            = os.environ.get("IB_HOST", "127.0.0.1")
+IB_PORT            = int(os.environ.get("IB_PORT", "7497"))       # 7497=paper TWS; 4001=paper Gateway
+IB_CLIENT_ID       = int(os.environ.get("IB_CLIENT_ID", "1"))
+IB_CONTRACTS       = int(os.environ.get("IB_CONTRACTS", "1"))     # contracts per trade (whole numbers only)
+DRIFT_LEVERAGE     = float(os.environ.get("DRIFT_LEVERAGE", "15"))    # effective leverage midpoint (MES ≈15x)
+DRIFT_LEV_MIN      = float(os.environ.get("DRIFT_LEV_MIN",  "10"))    # minimum effective leverage
+DRIFT_LEV_MAX      = float(os.environ.get("DRIFT_LEV_MAX",  "25"))    # maximum effective leverage
+DRIFT_MARGIN_USD   = float(os.environ.get("DRIFT_MARGIN_USD", "20"))  # paper: margin budget per trade ($)
 DRIFT_MAX_OPEN     = int(os.environ.get("DRIFT_MAX_OPEN", "5"))
-DRIFT_TP_PCT       = float(os.environ.get("DRIFT_TP_PCT", "0.20"))
-DRIFT_SL_PCT       = float(os.environ.get("DRIFT_SL_PCT", "0.05"))
-DRIFT_TRAIL_PCT    = float(os.environ.get("DRIFT_TRAIL_PCT", "0.05"))
-DRIFT_DAILY_LOSS_CAP = float(os.environ.get("DRIFT_DAILY_LOSS_CAP", "200"))  # stop day if down $200
-DRIFT_BOT_NAME     = os.environ.get("DRIFT_BOT_NAME", "Drift Sniper")
+DRIFT_TP_PCT       = float(os.environ.get("DRIFT_TP_PCT", "0.005"))   # 0.5% default TP
+DRIFT_SL_PCT       = float(os.environ.get("DRIFT_SL_PCT", "0.003"))   # 0.3% default SL
+DRIFT_TRAIL_PCT    = float(os.environ.get("DRIFT_TRAIL_PCT", "0.003"))
+DRIFT_DAILY_LOSS_CAP = float(os.environ.get("DRIFT_DAILY_LOSS_CAP", "200"))
+DRIFT_BOT_NAME     = os.environ.get("DRIFT_BOT_NAME", "Index Futures Bot")
 DRIFT_PORT         = int(os.environ.get("DRIFT_PORT", "5001"))
-WALLET             = os.environ.get("WALLET", "")
-WALLET_PRIVATE_KEY = os.environ.get("WALLET_PRIVATE_KEY", "")
-SOL_RPC            = os.environ.get("SOL_RPC", "https://api.mainnet-beta.solana.com")
 TELEGRAM_TOKEN     = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
-# NOTE: GMGN is used exclusively by bot.py (PumpFun sniper). This bot
-# (drift_bot.py) does NOT call GMGN. Keep these completely separate.
+# NOTE: GMGN is used exclusively by bot.py (PumpFun sniper). This bot does NOT call GMGN.
 STARTING_CAPITAL   = float(os.environ.get("DRIFT_STARTING_CAPITAL", "100"))
 PROFIT_GOAL        = float(os.environ.get("DRIFT_PROFIT_GOAL", "10000"))
-DRIFT_TP_USD       = float(os.environ.get("DRIFT_TP_USD",    str(DRIFT_MARGIN_USD * 2)))  # default: 2× margin
-DRIFT_SL_MARGIN_PCT = float(os.environ.get("DRIFT_SL_MARGIN_PCT", "0.75"))  # close when loss = 75% of margin
-DRIFT_TUNE_EVERY   = int(os.environ.get("DRIFT_TUNE_EVERY",   "3")) # retune after every N closed trades
-DRIFT_COMPOUND_PCT = float(os.environ.get("DRIFT_COMPOUND_PCT", "0.10"))  # % of profit reinvested
-DRIFT_MAX_HOLD_MINUTES = int(os.environ.get("DRIFT_MAX_HOLD_MINUTES", "30"))  # force-exit after N minutes
+DRIFT_TP_USD       = float(os.environ.get("DRIFT_TP_USD",    str(DRIFT_MARGIN_USD * 2)))
+DRIFT_SL_MARGIN_PCT = float(os.environ.get("DRIFT_SL_MARGIN_PCT", "0.75"))
+DRIFT_TUNE_EVERY   = int(os.environ.get("DRIFT_TUNE_EVERY",   "3"))
+DRIFT_COMPOUND_PCT = float(os.environ.get("DRIFT_COMPOUND_PCT", "0.10"))
+DRIFT_MAX_HOLD_MINUTES = int(os.environ.get("DRIFT_MAX_HOLD_MINUTES", "30"))
 REDIS_URL          = os.environ.get("UPSTASH_REDIS_REST_URL", "")
 REDIS_TOKEN        = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
 
+# ── INDEX FUTURES METADATA ─────────────────────────────────────────
+# Micro contracts keep margin requirements low enough for small accounts.
+# multiplier: USD per point move per contract
+# tick: minimum price increment (points)
+# margin_est: approximate IBKR intraday margin per contract (USD)
+_IB_CONTRACT_META = {
+    "MES": {"exchange": "CME", "currency": "USD", "multiplier": 5,  "tick": 0.25, "margin_est": 1760,  "yf_sym": "ES=F",  "label": "Micro S&P 500"},
+    "MNQ": {"exchange": "CME", "currency": "USD", "multiplier": 2,  "tick": 0.25, "margin_est": 800,   "yf_sym": "NQ=F",  "label": "Micro Nasdaq-100"},
+    "ES":  {"exchange": "CME", "currency": "USD", "multiplier": 50, "tick": 0.25, "margin_est": 15000, "yf_sym": "ES=F",  "label": "E-mini S&P 500"},
+    "NQ":  {"exchange": "CME", "currency": "USD", "multiplier": 20, "tick": 0.25, "margin_est": 15000, "yf_sym": "NQ=F",  "label": "E-mini Nasdaq-100"},
+}
+_IB_MARKETS = set(_IB_CONTRACT_META.keys())
+
+# yfinance continuous front-month symbols
+_YF_SYMBOLS = {m: meta["yf_sym"] for m, meta in _IB_CONTRACT_META.items()}
+
 # ── MARKETS — sanitize at startup ─────────────────────────────────
-# Deduplicate whatever is in the env var, then restrict to Jupiter-supported
-# markets when DRIFT_EXCHANGE=jupiter (only SOL/ETH/BTC are in the JLP pool).
-_JUPITER_MARKETS = {"SOL", "ETH", "BTC"}
-_raw_markets = os.environ.get("DRIFT_MARKETS", "SOL,ETH,BTC")
+_raw_markets = os.environ.get("DRIFT_MARKETS", "MES,MNQ")
 _seen, _clean = set(), []
 for _m in _raw_markets.split(","):
     _m = _m.strip().upper()
     if _m and _m not in _seen:
         _seen.add(_m)
         _clean.append(_m)
-if DRIFT_EXCHANGE == "jupiter":
-    _clean = [m for m in _clean if m in _JUPITER_MARKETS] or ["SOL", "ETH", "BTC"]
+_clean = [m for m in _clean if m in _IB_MARKETS] or ["MES", "MNQ"]
 DRIFT_MARKETS = ",".join(_clean)
 
 MILESTONES = [100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000]
@@ -74,7 +86,7 @@ _market_stats      = {}   # market -> {wins, losses, long_wins, short_wins, long
 _market_params     = {}   # tuned per-market: {leverage, bias, paused_until, last_result}
 _5m_trend_cache    = {}   # market -> {trend, ts} — 5-min candle bias, 60s TTL
 _signal_skip_ts    = {}   # market+reason -> last_log_ts, throttles signal-skip spam
-_liquidity_cache   = {}   # market -> {factor, ts} — OKX spread+volume factor, 30s TTL
+_liquidity_cache   = {}   # market -> {factor, ts} — liquidity factor cache (always 1.0 for index futures)
 _ph_last_min       = {}   # market -> last minute bucket appended (int(ts/60)); keeps 1 candle/min
 
 _session = requests.Session()
@@ -206,223 +218,116 @@ def _notify_worker():
         else:
             time.sleep(0.2)
 
-# ── PRICE FEEDS (Pyth primary → OKX fallback → Binance last resort) ──────────
-# Pyth Network feed IDs — the same oracle Drift Protocol uses for settlement.
-# Verified via https://hermes.pyth.network/v2/price_feeds
-_PYTH_FEEDS = {
-    "SOL":    "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
-    "BTC":    "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
-    "ETH":    "ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace",
-    "XRP":    "ec5d399846a9209f3fe5881d70aae9268c94339ff9817e8d18ff19fa05eea1c8",
-    "DOGE":   "dcef50dd0a4cd2dcc17e45df1676dcb336a11a61c69df7a0299b0150c672d25c",
-    "AVAX":   "93da3352f9f1d105fdfe4971cfa80e9dd777bfc5d0f683ebb6e1294b92137bb7",
-    "BNB":    "2f95862b045670cd22bee3114c39763a4a08beeb663b145d283c31d7d1101c4f",
-    "SUI":    "23d7315113f5b1d3ba7a83604c44b94d79f4fd69af77f804fc7f920a6dc65744",
-    "BONK":   "72b021217ca3fe68922a19aaf990109cb9d84e9ad004b4d2025ad6f529314419",
-    "WIF":    "4ca4beeca86f0d164160323817a4e42b10010a724c2217c6ee41b54cd4cc61fc",
-    "PEPE":   "d69731a2e74ac1ce884fc3890f7ee324b6deb66147055249568869ed700882e4",
-    "POPCAT": "b9312a7ee50e189ef045aa3c7842e099b061bd9bdc99ac645956c3b660dc8cce",
-    "TRUMP":  "879551021853eec7a7dc827578e8e69da7e4fa8148339aa0d3d5296405be4b1a",
-    "JTO":    "b43660a5f790c69354b0729a5ef9d50d68f1df92107540210b9cccba1f947cc2",
-    "JUP":    "0a0408d619e9380abad35060f9192039ed5042fa6f82301d0e48bb52be830996",
-    "HYPE":   "4279e31cc369bbcc2faf022b382b080e32a8e689ff20fbc530d2a603eb6cd98b",
-    "TIA":    "09f7c1d7dfbb7df2b8fe3d3d87ee94a2259d212da4f30c1f0540d066dfa44723",
-    "ARB":    "3fa4252848f9f0a1480be62745a4629d9eb1322aebab8a791e344b3b9c1adcf5",
-    "RNDR":   "3d4a2bd9535be6ce8059d75eadeba507b043257321aa544717c56fa19b49e35d",
-    "SEI":    "53614f1cb0c031d4af66c04cb9c756234adad0e1cee85303795091499a4084eb",
-    "ONDO":   "d40472610abe56d36d065a0cf889fc8f1dd9f3b7f2a478231a5fc6df07ea5ce3",
-    # PYTH token falls through to OKX
-}
-
-_PYTH_HERMES  = "https://hermes.pyth.network/v2/updates/price/latest"
-
-# OKX perpetuals mark price — fallback for markets not on Pyth.
-# Uses perp mark prices (not spot) so they align with how Drift prices positions.
-_OKX_SYM = {
-    "SOL":    "SOL-USDT-SWAP",  "BTC":    "BTC-USDT-SWAP",  "ETH":    "ETH-USDT-SWAP",
-    "XRP":    "XRP-USDT-SWAP",  "DOGE":   "DOGE-USDT-SWAP", "AVAX":   "AVAX-USDT-SWAP",
-    "SUI":    "SUI-USDT-SWAP",  "BNB":    "BNB-USDT-SWAP",  "BONK":   "BONK-USDT-SWAP",
-    "WIF":    "WIF-USDT-SWAP",  "PEPE":   "PEPE-USDT-SWAP", "POPCAT": "POPCAT-USDT-SWAP",
-    "TRUMP":  "TRUMP-USDT-SWAP","JTO":    "JTO-USDT-SWAP",  "JUP":    "JUP-USDT-SWAP",
-    "HYPE":   "HYPE-USDT-SWAP", "TIA":    "TIA-USDT-SWAP",  "ARB":    "ARB-USDT-SWAP",
-    "RNDR":   "RENDER-USDT-SWAP","SEI":   "SEI-USDT-SWAP",  "ONDO":   "ONDO-USDT-SWAP",
-    "PYTH":   "PYTH-USDT-SWAP", "SHIB":   "SHIB-USDT-SWAP",
-}
-
-# Binance last-resort fallback (spot, no API key needed)
-_BINANCE_SYM = {k: v.replace("-USDT-SWAP", "USDT") for k, v in _OKX_SYM.items()}
-_BINANCE_SYM["RNDR"] = "RNDRUSDT"
+# ── PRICE FEEDS (yfinance — index futures via continuous front-month) ──────────
+# yfinance "ES=F" and "NQ=F" are continuous front-month futures contracts.
+# These match CME Globex settlement prices and work 24/5 during Globex hours.
+# No API key required. Data refreshes from Yahoo Finance every ~15-30 seconds.
 
 # Per-market price cache: {market: (price, fetched_at)}
 _price_cache      = {}
 _price_cache_lock = threading.Lock()
-_PRICE_TTL        = 8   # seconds — reuse cached price within same loop tick
-
-def _fetch_all_prices_pyth(markets):
-    """
-    Batch-fetch prices from Pyth Hermes in one HTTP request.
-    Returns {market: price} for all markets with a known Pyth feed ID.
-    Pyth is the oracle Drift uses — these prices match Drift's mark price exactly.
-    """
-    wanted = {m: _PYTH_FEEDS[m] for m in markets if m in _PYTH_FEEDS}
-    if not wanted:
-        return {}
-    try:
-        params = [("ids[]", fid) for fid in wanted.values()]
-        r = _session.get(_PYTH_HERMES, params=params, timeout=8)
-        if r.status_code != 200:
-            return {}
-        id_to_price = {}
-        for item in r.json().get("parsed", []):
-            raw   = item.get("price", {})
-            price = int(raw["price"]) * (10 ** int(raw["expo"]))
-            if price > 0:
-                id_to_price[item["id"]] = price
-        out = {}
-        for market, fid in wanted.items():
-            if fid in id_to_price:
-                out[market] = id_to_price[fid]
-        return out
-    except Exception:
-        return {}
-
-def _fetch_all_prices_okx(markets):
-    """
-    Batch-fetch perpetuals mark prices from OKX in one request (all SWAP tickers).
-    Returns {market: price} for markets found. Uses perp mark price, not spot.
-    """
-    if not any(m in _OKX_SYM for m in markets):
-        return {}
-    try:
-        r = _session.get(
-            "https://www.okx.com/api/v5/public/mark-price",
-            params={"instType": "SWAP"},
-            timeout=10
-        )
-        if r.status_code != 200:
-            return {}
-        sym_to_price = {
-            item["instId"]: float(item["markPx"])
-            for item in r.json().get("data", [])
-            if float(item.get("markPx", 0)) > 0
-        }
-        return {
-            m: sym_to_price[_OKX_SYM[m]]
-            for m in markets
-            if _OKX_SYM.get(m) in sym_to_price
-        }
-    except Exception:
-        return {}
-
-def _fetch_price_binance(market):
-    """Last-resort single-market Binance spot fetch (no API key required)."""
-    sym = _BINANCE_SYM.get(market.upper())
-    if not sym:
-        return None
-    try:
-        r = _session.get(
-            "https://api.binance.com/api/v3/ticker/price",
-            params={"symbol": sym},
-            timeout=8
-        )
-        if r.status_code == 200:
-            price = float(r.json().get("price", 0))
-            if price > 0:
-                return price
-    except Exception:
-        pass
-    return None
+_PRICE_TTL        = 20   # seconds — yfinance calls are slower than direct exchange APIs
 
 def refresh_price_cache(markets):
-    """
-    Called once per trading loop tick.
-    1. Pyth batch    — one request, all markets with known feed IDs
-    2. OKX batch     — one request for remaining markets (perp mark prices)
-    3. Binance spot  — last resort for anything still missing
-    """
-    now    = time.time()
-    prices = _fetch_all_prices_pyth(markets)
-
-    # OKX fills in markets not on Pyth
-    missing = [m for m in markets if m not in prices]
-    if missing:
-        prices.update(_fetch_all_prices_okx(missing))
-
-    # Binance for anything still missing
-    still_missing = [m for m in markets if m not in prices]
-    for market in still_missing:
-        p = _fetch_price_binance(market)
-        if p:
-            prices[market] = p
-            log("info", f"Binance fallback: ${p:.4f}", market)
-
-    with _price_cache_lock:
-        for market, price in prices.items():
-            _price_cache[market] = (price, now)
+    """Batch-fetch latest prices from yfinance for all active markets."""
+    try:
+        import yfinance as yf
+        now = time.time()
+        # De-duplicate yfinance symbols (MES and ES both map to ES=F)
+        sym_to_markets = {}
+        for m in markets:
+            sym = _YF_SYMBOLS.get(m.upper())
+            if sym:
+                sym_to_markets.setdefault(sym, []).append(m.upper())
+        if not sym_to_markets:
+            return
+        tickers = yf.Tickers(" ".join(sym_to_markets.keys()))
+        for sym, mlist in sym_to_markets.items():
+            try:
+                price = tickers.tickers[sym].fast_info.last_price
+                if price and float(price) > 0:
+                    price = float(price)
+                    with _price_cache_lock:
+                        for m in mlist:
+                            _price_cache[m] = (price, now)
+            except Exception:
+                pass
+    except ImportError:
+        log("warn", "yfinance not installed — run: pip install yfinance")
+    except Exception as e:
+        log("warn", f"yfinance batch fetch error: {e}")
 
 def _prefetch_price_history(markets):
-    """Seed _price_history with 60 1-min OKX candles so EMA-50 is ready on first loop tick."""
+    """Seed _price_history with ~200 1-minute candles from yfinance so EMA-50 is ready at start."""
+    try:
+        import yfinance as yf
+    except ImportError:
+        log("warn", "yfinance not installed — price history unavailable")
+        return
+    fetched_syms = set()
     for market in markets:
-        sym = _OKX_SYM.get(market.upper())
-        if not sym:
+        sym = _YF_SYMBOLS.get(market.upper())
+        if not sym or sym in fetched_syms:
             continue
+        fetched_syms.add(sym)
         try:
-            r = _session.get(
-                "https://www.okx.com/api/v5/market/candles",
-                params={"instId": sym, "bar": "1m", "limit": "60"},
-                timeout=10,
-            )
-            candles = r.json().get("data", [])
-            entries = [(int(c[0]) / 1000, float(c[4])) for c in reversed(candles)]
+            df = yf.download(sym, period="3d", interval="1m", progress=False, auto_adjust=True)
+            if df is None or df.empty:
+                log("warn", f"No 1m history from yfinance for {sym}", market)
+                continue
+            # Handle MultiIndex columns (yfinance returns (metric, ticker) MultiIndex for single ticker)
+            if hasattr(df.columns, 'levels'):
+                df.columns = df.columns.get_level_values(0)
+            entries = []
+            for ts, row in df.iterrows():
+                try:
+                    px = float(row["Close"])
+                    if px > 0:
+                        entries.append((ts.timestamp(), px))
+                except Exception:
+                    pass
             if entries:
-                with _state_lock:
-                    if market not in _price_history:
-                        _price_history[market] = deque(maxlen=300)
-                    existing = {ts for ts, _ in _price_history[market]}
-                    for ts, px in entries:
-                        if ts not in existing:
-                            _price_history[market].append((ts, px))
-                log("ok", f"Pre-fetched {len(entries)} candles — signal engine warm", market)
+                # Apply to all markets that share this yfinance symbol
+                for m in markets:
+                    if _YF_SYMBOLS.get(m.upper()) == sym:
+                        with _state_lock:
+                            if m not in _price_history:
+                                _price_history[m] = deque(maxlen=300)
+                            existing = {t for t, _ in _price_history[m]}
+                            added = 0
+                            for t, p in entries:
+                                if t not in existing:
+                                    _price_history[m].append((t, p))
+                                    added += 1
+                        log("ok", f"Pre-fetched {added} candles from yfinance ({sym}) — signal engine warm", m)
         except Exception as e:
-            log("warn", f"Candle pre-fetch failed: {e}", market)
+            log("warn", f"Candle pre-fetch failed for {market} ({sym}): {e}", market)
 
 def get_market_price(market):
-    """Return cached price if fresh, otherwise fetch individually via Pyth → OKX → Binance."""
+    """Return cached price if fresh, else fetch from yfinance."""
     market = market.upper()
     with _price_cache_lock:
         cached = _price_cache.get(market)
     if cached and (time.time() - cached[1]) < _PRICE_TTL:
         return cached[0]
-    # Cache miss — single fetch
-    fid = _PYTH_FEEDS.get(market)
-    if fid:
-        try:
-            r = _session.get(_PYTH_HERMES, params=[("ids[]", fid)], timeout=8)
-            if r.status_code == 200:
-                item = r.json().get("parsed", [{}])[0]
-                raw  = item.get("price", {})
-                price = int(raw["price"]) * (10 ** int(raw["expo"]))
-                if price > 0:
-                    with _price_cache_lock:
-                        _price_cache[market] = (price, time.time())
-                    return price
-        except Exception:
-            pass
-    # OKX single-market fallback via the batch endpoint
-    okx_prices = _fetch_all_prices_okx([market])
-    if market in okx_prices:
-        price = okx_prices[market]
-        with _price_cache_lock:
-            _price_cache[market] = (price, time.time())
-        return price
-    price = _fetch_price_binance(market)
-    if price:
-        with _price_cache_lock:
-            _price_cache[market] = (price, time.time())
-    return price
-
-def get_sol_price():
-    return get_market_price("SOL")
+    try:
+        import yfinance as yf
+        sym = _YF_SYMBOLS.get(market)
+        if not sym:
+            return None
+        ticker = yf.Ticker(sym)
+        price = ticker.fast_info.last_price
+        if price and float(price) > 0:
+            price = float(price)
+            with _price_cache_lock:
+                _price_cache[market] = (price, time.time())
+            return price
+    except Exception as e:
+        log("warn", f"yfinance single fetch {market}: {e}")
+    # Fall back to cached value even if stale rather than returning None
+    with _price_cache_lock:
+        stale = _price_cache.get(market)
+    return stale[0] if stale else None
 
 # ── INDICATOR HELPERS ─────────────────────────────────────────────
 def _calc_atr(vals, period=14):
@@ -481,34 +386,31 @@ def _supertrend(vals, period=10, mult=3.0):
 # ── SIGNAL ENGINE ─────────────────────────────────────────────────
 def _get_5m_trend(market):
     """
-    Fetch the 5-minute trend bias from OKX candles. Returns 'long', 'short', or None.
-    Cached for 60 seconds so it's checked once per loop cycle, not per tick.
-    Used as a higher-timeframe filter: if 5m disagrees with 1m signal, skip the trade.
+    Fetch the 5-minute trend bias from yfinance candles. Returns 'long', 'short', or None.
+    Cached for 60 seconds. Used as higher-timeframe filter for 1m signals.
     """
     now = time.time()
     cached = _5m_trend_cache.get(market)
     if cached and now - cached["ts"] < 60:
         return cached["trend"]
 
-    sym = _OKX_SYM.get(market.upper())
+    sym = _YF_SYMBOLS.get(market.upper())
     if not sym:
         _5m_trend_cache[market] = {"trend": None, "ts": now}
         return None
     try:
-        r = _session.get(
-            "https://www.okx.com/api/v5/market/candles",
-            params={"instId": sym, "bar": "5m", "limit": "22"},
-            timeout=8,
-        )
-        if r.status_code != 200:
+        import yfinance as yf
+        df = yf.download(sym, period="2d", interval="5m", progress=False, auto_adjust=True)
+        if df is None or len(df) < 15:
             _5m_trend_cache[market] = {"trend": None, "ts": now}
             return None
-        candles = r.json().get("data", [])
-        if len(candles) < 15:
+        if hasattr(df.columns, 'levels'):
+            df.columns = df.columns.get_level_values(0)
+        closes = [float(v) for v in df["Close"].iloc[-22:].values if float(v) > 0]
+        if len(closes) < 15:
             _5m_trend_cache[market] = {"trend": None, "ts": now}
             return None
-        closes = [float(c[4]) for c in reversed(candles)]
-        # EMA-20 on 5m candles ≈ 1h40m of trend
+        # EMA-20 on 5m candles ≈ 1h40m trend context
         k = 2 / (20 + 1)
         ema = closes[0]
         for p in closes[1:]:
@@ -523,64 +425,10 @@ def _get_5m_trend(market):
 
 def _get_liquidity_factor(market):
     """
-    Returns a leverage multiplier in [0.70, 1.00] based on two live signals from
-    the OKX perpetual ticker: bid-ask spread and 24-hour USDT volume.
-
-    Tight spread + high volume  → 1.00  (no penalty, full leverage)
-    Wide spread or thin volume  → down to 0.70 (cut leverage up to 30%)
-
-    Result is cached 30 s so one OKX call covers many 5-second loop ticks.
-    Falls back to 1.0 on any network / parse error so it never blocks a trade.
+    Index futures (MES/MNQ) trade on CME Globex with extremely tight spreads and
+    billions of dollars in daily volume — always return 1.0 (no haircut needed).
     """
-    now = time.time()
-    cached = _liquidity_cache.get(market)
-    if cached and now - cached["ts"] < 30:
-        return cached["factor"]
-
-    sym = _OKX_SYM.get(market.upper())
-    if not sym:
-        return 1.0
-    try:
-        r = _session.get(
-            "https://www.okx.com/api/v5/market/ticker",
-            params={"instId": sym},
-            timeout=5,
-        )
-        if r.status_code != 200:
-            return 1.0
-        data = r.json().get("data", [{}])[0]
-        bid      = float(data.get("bidPx",    0))
-        ask      = float(data.get("askPx",    0))
-        vol_usd  = float(data.get("volCcy24h", 0))   # 24 h notional in USDT
-
-        # ── Spread factor ───────────────────────────────────────────
-        # 0.01 % spread → ~0.975  |  0.05 % → ~0.875  |  ≥ 0.12 % → 0.70
-        spread_factor = 1.0
-        if bid > 0 and ask > 0:
-            spread_pct    = (ask - bid) / ((ask + bid) / 2)
-            spread_factor = max(0.70, 1.0 - spread_pct * 250)
-
-        # ── Volume factor ───────────────────────────────────────────
-        # Calibrated to typical OKX-SWAP daily volumes.
-        # Below minimum → 0.70; at or above baseline → 1.00; linear between.
-        _VOL_BASELINE = {"SOL": 1_000_000_000, "ETH": 5_000_000_000, "BTC": 10_000_000_000}
-        _VOL_MIN      = {"SOL":   100_000_000, "ETH":   500_000_000, "BTC":  1_000_000_000}
-        baseline = _VOL_BASELINE.get(market.upper(), 1_000_000_000)
-        minimum  = _VOL_MIN.get(market.upper(),       100_000_000)
-        if vol_usd <= 0:
-            vol_factor = 1.0   # no data — don't penalise
-        elif vol_usd < minimum:
-            vol_factor = 0.70
-        elif vol_usd >= baseline:
-            vol_factor = 1.0
-        else:
-            vol_factor = 0.70 + 0.30 * (vol_usd - minimum) / (baseline - minimum)
-
-        factor = min(spread_factor, vol_factor)
-        _liquidity_cache[market] = {"factor": factor, "ts": now}
-        return factor
-    except Exception:
-        return 1.0
+    return 1.0
 
 
 def _calc_ema(vals, period):
@@ -688,325 +536,85 @@ def get_signal(market):
 
     return trend, confidence, atr
 
-# ── LIVE EXECUTION STUBS ──────────────────────────────────────────
-def _execute_drift_order(market, side, size_usd, leverage) -> bool:
+# ── IBKR EXECUTION (ib_insync) ────────────────────────────────────
+# Live trading requires IB Gateway or TWS running locally (or on IB_HOST).
+# Paper mode (default): all execution is simulated — no IB connection needed.
+# ib_insync connects to TWS/Gateway synchronously within a background thread.
+
+def _execute_ib_order(market, side, contracts) -> bool:
+    """Open a futures position via Interactive Brokers TWS/Gateway."""
     try:
-        from driftpy.drift_client import DriftClient
-        from driftpy.types import OrderType, PositionDirection, OrderParams
-        from solders.keypair import Keypair
-        from solana.rpc.async_api import AsyncClient
-        import asyncio, base58
-
-        kp = Keypair.from_bytes(base58.b58decode(WALLET_PRIVATE_KEY))
-
-        async def _place():
-            conn = AsyncClient(SOL_RPC)
-            try:
-                client = DriftClient(conn, kp)
-                await client.subscribe()
-                direction = PositionDirection.Long() if side == "long" else PositionDirection.Short()
-                market_index_map = {
-                    "SOL": 0, "BTC": 1, "ETH": 2, "APT": 3,
-                    "BONK": 4, "ARB": 5, "DOGE": 6, "BNB": 7,
-                    "SUI": 8, "PEPE": 9, "OP": 10, "MATIC": 11,
-                    "XRP": 12, "WIF": 13, "JTO": 14, "PYTH": 15,
-                    "TIA": 16, "JUP": 17, "RNDR": 18, "W": 19,
-                    "DRIFT": 21, "POPCAT": 24, "HYPE": 26,
-                    "TRUMP": 27, "AVAX": 28, "SEI": 29,
-                }
-                idx = market_index_map.get(market.upper())
-                if idx is None:
-                    raise ValueError(f"Market {market} not in Drift market_index_map — refusing to place order")
-                price = get_market_price(market)
-                if not price:
-                    raise ValueError(f"Cannot get price for {market}")
-                base_amount = int((size_usd / price) * 1e9)  # USD → base asset atomic units
-                await client.place_perp_order(OrderParams(
-                    order_type=OrderType.Market(),
-                    market_index=idx,
-                    direction=direction,
-                    base_asset_amount=base_amount,
-                ))
-            finally:
-                await conn.close()
-
-        asyncio.run(_place())
+        import ib_insync
+        ib = ib_insync.IB()
+        ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID, timeout=20)
+        meta = _IB_CONTRACT_META[market.upper()]
+        contract = ib_insync.Future(
+            symbol=market.upper(),
+            exchange=meta["exchange"],
+            currency=meta["currency"],
+        )
+        ib.qualifyContracts(contract)
+        action = "BUY" if side == "long" else "SELL"
+        order  = ib_insync.MarketOrder(action, contracts)
+        trade  = ib.placeOrder(contract, order)
+        # Wait up to 30s for fill confirmation
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            ib.sleep(0.5)
+            if trade.orderStatus.status in ("Filled", "Submitted", "PreSubmitted"):
+                break
+        filled = trade.orderStatus.status == "Filled"
+        avg_px = trade.orderStatus.avgFillPrice or 0
+        ib.disconnect()
+        if filled:
+            log("ok", f"IB filled: {action} {contracts} {market} @ {avg_px:.2f}", market)
+        else:
+            log("warn", f"IB order status={trade.orderStatus.status} — treating as pending", market)
         return True
     except ImportError:
-        log("err", "driftpy not installed — run: pip install driftpy")
+        log("err", "ib_insync not installed — run: pip install ib_insync")
     except Exception as e:
-        log("err", f"Drift order failed: {e}")
+        log("err", f"IB open order failed for {market}: {e}", market)
     return False
 
-# ── JUPITER PERPS EXECUTION ────────────────────────────────────────
-# Markets: SOL, ETH, BTC only (JLP pool composition)
-_JPERP_PROGRAM   = "PERPHjGBqRHArX4DySjwM6UJHiR3sWAatqfdBS2qQJu"
-_JPERP_POOL      = "5BUwFW4nRbftYTDMbgxykoFWqWHPzahFSNAaaaJtVKsq"
-_JPERP_EVT_AUTH  = "37hJBDnntwqhGbK7L6M1bLyvccj4u55CCUiLPdYkiqBN"
-_JPERP_CUSTODIES = {   # on-chain custody PDAs
-    "SOL": "7xS2gz2bTp3fwCC7knJvUWTEU9Tycczu6VhJYKgi1wdz",
-    "ETH": "AQCGyheWPLeo6Qp9WpYS9m3Qj479t7R636N9ey1rEjEn",
-    "BTC": "5Pv3gM9JrFFH883SWAhvJC9RPYmo8UNxuFtv5bMMALkm",
-}
-_JPERP_MINTS     = {   # token mint addresses on Solana
-    "SOL": "So11111111111111111111111111111111111111112",
-    "ETH": "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",  # Wormhole ETH
-    "BTC": "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh",  # Wormhole wBTC
-}
-_JPERP_DECIMALS  = {"SOL": 9, "ETH": 8, "BTC": 8}
-_JPERP_USDC_CUST = "G18jKKXQwBbrHeiK3C9MRXhkHsLHf7XgCSisykV46EZa"
-_JPERP_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-_JPERP_MARKETS   = {"SOL", "ETH", "BTC"}
-_JPERP_IDL       = None   # cached at startup — never fetched per-trade
 
-# System programs
-_SYS_PROG  = "11111111111111111111111111111111"
-_TOK_PROG  = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-_ATOK_PROG = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJe1bsT"
-
-
-def _jperp_ata(owner_pk, mint_pk):
-    """Derive the Associated Token Account address (no spl-token dependency)."""
-    from solders.pubkey import Pubkey
-    ata, _ = Pubkey.find_program_address(
-        [bytes(owner_pk), bytes(Pubkey.from_string(_TOK_PROG)), bytes(mint_pk)],
-        Pubkey.from_string(_ATOK_PROG)
-    )
-    return ata
-
-
-def _cache_jupiter_idl():
-    """Fetch the Jupiter Perps IDL once at startup and store it globally.
-    Called only in live mode after anchorpy is confirmed importable."""
-    global _JPERP_IDL
+def _close_ib_position(market, side, contracts) -> bool:
+    """Close an existing IBKR futures position."""
     try:
-        from anchorpy import Program, Provider, Wallet
-        from solders.keypair import Keypair
-        from solders.pubkey import Pubkey
-        from solana.rpc.async_api import AsyncClient
-        import asyncio
-
-        async def _fetch():
-            conn = AsyncClient(SOL_RPC)
-            try:
-                kp       = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
-                prog_id  = Pubkey.from_string(_JPERP_PROGRAM)
-                provider = Provider(conn, Wallet(kp))
-                return await Program.fetch_idl(prog_id, provider)
-            finally:
-                await conn.close()
-
-        idl = asyncio.run(_fetch())
-        if idl:
-            _JPERP_IDL = idl
-            log("ok", "Jupiter Perps IDL cached at startup")
-        else:
-            log("warn", "Jupiter Perps IDL fetch returned None — will retry per-trade")
-    except Exception as e:
-        log("warn", f"Jupiter Perps IDL cache failed: {e} — will retry per-trade")
-
-
-def _execute_jupiter_perp_order(market, side, size_usd, leverage) -> bool:
-    mkt = market.upper()
-    if mkt not in _JPERP_MARKETS:
-        log("err", f"Jupiter Perps: {market} not supported — only SOL/ETH/BTC")
-        return False
-    try:
-        from anchorpy import Program, Provider, Wallet, Context
-        from solders.keypair import Keypair
-        from solders.pubkey import Pubkey
-        from solana.rpc.async_api import AsyncClient
-        import asyncio
-
-        kp = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
-
-        async def _place():
-            conn = AsyncClient(SOL_RPC)
-            try:
-                prog_id    = Pubkey.from_string(_JPERP_PROGRAM)
-                pool       = Pubkey.from_string(_JPERP_POOL)
-                evt_auth   = Pubkey.from_string(_JPERP_EVT_AUTH)
-                custody    = Pubkey.from_string(_JPERP_CUSTODIES[mkt])
-                usdc_cust  = Pubkey.from_string(_JPERP_USDC_CUST)
-                usdc_mint  = Pubkey.from_string(_JPERP_USDC_MINT)
-                owner      = kp.pubkey()
-
-                # Longs: collateral stored in the token itself; shorts: USDC
-                col_cust = custody if side == "long" else usdc_cust
-
-                # PDA derivations
-                [perps_pda, _] = Pubkey.find_program_address([b"perpetuals"], prog_id)
-                [pos_pda,   _] = Pubkey.find_program_address(
-                    [b"position", bytes(owner), bytes(pool), bytes(custody), bytes(col_cust)],
-                    prog_id
-                )
-                # time-based counter → unique request PDA per call
-                counter = int(time.time() * 1000) % (2 ** 63)
-                [req_pda, _] = Pubkey.find_program_address(
-                    [b"position_request", bytes(owner), counter.to_bytes(8, "little")],
-                    prog_id
-                )
-
-                # Token accounts (we always fund from owner's USDC ATA)
-                funding_ata = _jperp_ata(owner, usdc_mint)
-                req_ata     = _jperp_ata(req_pda, usdc_mint)
-
-                # Parameters scaled to 6 decimal places
-                margin_u6 = int(DRIFT_MARGIN_USD * 1_000_000)
-                size_u6   = int(size_usd * 1_000_000)
-                slippage  = 10_000  # 1% in units of 10^-6
-
-                # For longs: USDC is swapped → token internally; provide min-out
-                price = get_market_price(mkt)
-                if not price:
-                    raise ValueError(f"No price for {mkt}")
-                if side == "long":
-                    tok_units = (DRIFT_MARGIN_USD / price) * (10 ** _JPERP_DECIMALS[mkt])
-                    jup_min   = int(tok_units * 0.99)   # 1% slippage buffer
-                else:
-                    jup_min = 0  # shorts collateralise in USDC directly — no swap, no min-out
-
-                side_enum = {"long": {}} if side == "long" else {"short": {}}
-
-                provider = Provider(conn, Wallet(kp))
-                idl      = _JPERP_IDL or await Program.fetch_idl(prog_id, provider)
-                if not idl:
-                    raise RuntimeError("Jupiter Perps IDL not available on-chain")
-                program  = Program(idl, prog_id, provider)
-
-                await program.rpc["create_increase_position_market_request"](
-                    counter,
-                    margin_u6,   # collateralTokenDelta
-                    jup_min,     # jupiterMinimumOut  (None = no swap for shorts)
-                    slippage,    # priceSlippage
-                    side_enum,   # side
-                    size_u6,     # sizeUsdDelta
-                    ctx=Context(accounts={
-                        "custody":                   custody,
-                        "collateral_custody":         col_cust,
-                        "funding_account":            funding_ata,
-                        "input_mint":                 usdc_mint,
-                        "owner":                      owner,
-                        "perpetuals":                 perps_pda,
-                        "pool":                       pool,
-                        "position":                   pos_pda,
-                        "position_request":           req_pda,
-                        "position_request_ata":       req_ata,
-                        "referral":                   None,
-                        "system_program":             Pubkey.from_string(_SYS_PROG),
-                        "token_program":              Pubkey.from_string(_TOK_PROG),
-                        "associated_token_program":   Pubkey.from_string(_ATOK_PROG),
-                        "event_authority":            evt_auth,
-                        "program":                    prog_id,
-                    }, signers=[kp])
-                )
-                log("ok", f"Jupiter Perps {side} {mkt} size=${size_usd:.0f} lev={leverage}x — keeper request submitted", mkt)
-                return True
-            finally:
-                await conn.close()
-
-        return asyncio.run(_place())
+        import ib_insync
+        ib = ib_insync.IB()
+        ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID, timeout=20)
+        meta = _IB_CONTRACT_META[market.upper()]
+        contract = ib_insync.Future(
+            symbol=market.upper(),
+            exchange=meta["exchange"],
+            currency=meta["currency"],
+        )
+        ib.qualifyContracts(contract)
+        close_action = "SELL" if side == "long" else "BUY"
+        order = ib_insync.MarketOrder(close_action, contracts)
+        trade = ib.placeOrder(contract, order)
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            ib.sleep(0.5)
+            if trade.orderStatus.status in ("Filled", "Submitted", "PreSubmitted"):
+                break
+        ib.disconnect()
+        log("ok", f"IB close submitted: {close_action} {contracts} {market}", market)
+        return True
     except ImportError:
-        log("err", "anchorpy not installed — run: pip install anchorpy")
-        return False
+        log("err", "ib_insync not installed — run: pip install ib_insync")
     except Exception as e:
-        log("err", f"Jupiter Perps open error: {e}", market)
-        return False
-
-
-def _close_jupiter_perp_position(market, side, size_usd) -> bool:
-    mkt = market.upper()
-    if mkt not in _JPERP_MARKETS:
-        return False
-    try:
-        from anchorpy import Program, Provider, Wallet, Context
-        from solders.keypair import Keypair
-        from solders.pubkey import Pubkey
-        from solana.rpc.async_api import AsyncClient
-        import asyncio
-
-        kp = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
-
-        async def _close():
-            conn = AsyncClient(SOL_RPC)
-            try:
-                prog_id   = Pubkey.from_string(_JPERP_PROGRAM)
-                pool      = Pubkey.from_string(_JPERP_POOL)
-                evt_auth  = Pubkey.from_string(_JPERP_EVT_AUTH)
-                custody   = Pubkey.from_string(_JPERP_CUSTODIES[mkt])
-                usdc_cust = Pubkey.from_string(_JPERP_USDC_CUST)
-                usdc_mint = Pubkey.from_string(_JPERP_USDC_MINT)
-                owner     = kp.pubkey()
-
-                col_cust = custody if side == "long" else usdc_cust
-
-                [perps_pda, _] = Pubkey.find_program_address([b"perpetuals"], prog_id)
-                [pos_pda,   _] = Pubkey.find_program_address(
-                    [b"position", bytes(owner), bytes(pool), bytes(custody), bytes(col_cust)],
-                    prog_id
-                )
-                counter = int(time.time() * 1000) % (2 ** 63)
-                [req_pda, _] = Pubkey.find_program_address(
-                    [b"position_request", bytes(owner), counter.to_bytes(8, "little")],
-                    prog_id
-                )
-
-                recv_ata = _jperp_ata(owner, usdc_mint)   # receive USDC on close
-                req_ata  = _jperp_ata(req_pda, usdc_mint)
-
-                size_u6   = int(size_usd * 1_000_000)
-                slippage  = 10_000
-                side_enum = {"long": {}} if side == "long" else {"short": {}}
-
-                provider = Provider(conn, Wallet(kp))
-                idl      = _JPERP_IDL or await Program.fetch_idl(prog_id, provider)
-                if not idl:
-                    raise RuntimeError("Jupiter Perps IDL not available on-chain")
-                program  = Program(idl, prog_id, provider)
-
-                await program.rpc["create_decrease_position_market_request"](
-                    counter,
-                    0,           # collateralTokenDelta: 0 = release all collateral
-                    size_u6,     # sizeUsdDelta: full position size
-                    side_enum,
-                    slippage,
-                    usdc_mint,   # desiredMint: receive USDC back
-                    ctx=Context(accounts={
-                        "custody":                   custody,
-                        "collateral_custody":         col_cust,
-                        "owner":                      owner,
-                        "pool":                       pool,
-                        "perpetuals":                 perps_pda,
-                        "position":                   pos_pda,
-                        "position_request":           req_pda,
-                        "position_request_ata":       req_ata,
-                        "receiving_account":          recv_ata,
-                        "referral":                   None,
-                        "system_program":             Pubkey.from_string(_SYS_PROG),
-                        "token_program":              Pubkey.from_string(_TOK_PROG),
-                        "associated_token_program":   Pubkey.from_string(_ATOK_PROG),
-                        "event_authority":            evt_auth,
-                        "program":                    prog_id,
-                    }, signers=[kp])
-                )
-                log("ok", f"Jupiter Perps close {side} {mkt} — keeper request submitted", mkt)
-                return True
-            finally:
-                await conn.close()
-
-        return asyncio.run(_close())
-    except Exception as e:
-        log("err", f"Jupiter Perps close error: {e}", market)
-        return False
+        log("err", f"IB close order failed for {market}: {e}", market)
+    return False
 
 # ── POSITION MANAGEMENT ───────────────────────────────────────────
-def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=None, atr_pct=None):
+def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=None, atr_pct=None, contracts=None):
     global _capital
-    # Use ATR-based levels when provided, otherwise fall back to fixed config
-    _sl = sl_pct if sl_pct is not None else DRIFT_SL_PCT
-    _tp = tp_pct if tp_pct is not None else DRIFT_TP_PCT
-    # Trail distance = 1× ATR (same unit as SL so it scales with volatility)
-    _trail = atr_pct if atr_pct is not None else DRIFT_TRAIL_PCT
+    _sl    = sl_pct    if sl_pct    is not None else DRIFT_SL_PCT
+    _tp    = tp_pct    if tp_pct    is not None else DRIFT_TP_PCT
+    _trail = atr_pct   if atr_pct   is not None else DRIFT_TRAIL_PCT
+    _cts   = contracts if contracts  is not None else IB_CONTRACTS
     if side == "long":
         tp = price * (1 + _tp)
         sl = price * (1 - _sl)
@@ -1014,12 +622,15 @@ def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=N
         tp = price * (1 - _tp)
         sl = price * (1 + _sl)
 
-    # Liquidation when margin is fully consumed (~99% for safety math)
-    liq_price = price * (1 - 0.99 / leverage) if side == "long" else price * (1 + 0.99 / leverage)
+    # For index futures, liquidation isn't auto-triggered by the exchange the same way
+    # as crypto perps — IBKR will margin-call instead. We still track a soft liq level.
+    liq_price = price * (1 - 0.99 / max(leverage, 1)) if side == "long" \
+                else price * (1 + 0.99 / max(leverage, 1))
 
     pos = {
         "market": market, "side": side, "entry": price,
         "size": size_usd, "leverage": leverage,
+        "contracts": _cts,
         "peak_price": price, "tp": tp, "sl": sl,
         "liq_price": liq_price,
         "trail_pct": _trail,
@@ -1037,12 +648,10 @@ def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=N
             return
 
     if not DRIFT_PAPER_MODE:
-        if DRIFT_EXCHANGE == "jupiter":
-            ok = _execute_jupiter_perp_order(market, side, size_usd, leverage)
-        else:
-            ok = _execute_drift_order(market, side, size_usd, leverage)
+        contracts = pos.get("contracts", IB_CONTRACTS)
+        ok = _execute_ib_order(market, side, contracts)
         if not ok:
-            log("err", f"Exchange order failed for {market} — position NOT opened")
+            log("err", f"IB order failed for {market} — position NOT opened")
             return
 
     with _state_lock:
@@ -1055,14 +664,14 @@ def open_position(market, side, price, size_usd, leverage, sl_pct=None, tp_pct=N
         _positions[market] = pos
         _capital -= margin
 
-    log("ok", f"OPEN {side.upper()} {market} @ ${price:.4f} size=${size_usd:.2f} {leverage}x TP={tp:.4f} SL={sl:.4f}")
+    log("ok", f"OPEN {side.upper()} {market} @ ${price:.2f} size=${size_usd:.2f} {leverage}x TP={tp:.2f} SL={sl:.2f}")
     notify(
         f"{'[PAPER] ' if DRIFT_PAPER_MODE else ''}"
         f"*{DRIFT_BOT_NAME}*\n"
         f"OPEN {side.upper()} {market}\n"
-        f"Entry: ${price:.4f}\n"
-        f"Size: ${size_usd:.2f} @ {leverage}x\n"
-        f"TP: ${tp:.4f} | SL: ${sl:.4f}"
+        f"Entry: ${price:.2f} | {_cts}ct\n"
+        f"Notional: ${size_usd:.0f}\n"
+        f"TP: ${tp:.2f} | SL: ${sl:.2f}"
     )
     _save_state()
 
@@ -1074,14 +683,14 @@ def close_position(market, exit_price, reason=""):
         return
 
     # Execute exchange close BEFORE removing from local state.
-    # If the RPC fails we keep the position in state so the next monitor
-    # cycle retries rather than losing track of an open on-chain position.
+    # If the IB call fails we keep the position in state so the next monitor
+    # cycle retries rather than losing track of an open on-exchange position.
     if not DRIFT_PAPER_MODE:
-        if DRIFT_EXCHANGE == "jupiter":
-            ok = _close_jupiter_perp_position(market, pos["side"], pos["size"])
-            if not ok:
-                log("err", f"Exchange close FAILED — position kept open locally, will retry", market)
-                return
+        contracts = pos.get("contracts", IB_CONTRACTS)
+        ok = _close_ib_position(market, pos["side"], contracts)
+        if not ok:
+            log("err", f"IB close FAILED — position kept open locally, will retry", market)
+            return
 
     with _state_lock:
         _positions.pop(market, None)
@@ -1304,7 +913,7 @@ def run_trading_loop():
 
     while True:
         try:
-            # Single batch call to Binance for all markets — one request instead of N
+            # Batch fetch prices from yfinance (one call covers all markets)
             refresh_price_cache(markets)
 
             # Update price history — one candle per minute so EMA-50/RSI/Supertrend
@@ -1338,10 +947,6 @@ def run_trading_loop():
 
             if n_open < DRIFT_MAX_OPEN:
                 for market in markets:
-                    # Jupiter Perps only supports SOL/ETH/BTC — skip others silently
-                    if DRIFT_EXCHANGE == "jupiter" and market.upper() not in _JPERP_MARKETS:
-                        continue
-
                     with _state_lock:
                         already_open = market in _positions
                         mparams = dict(_market_params.get(market, {}))
@@ -1368,58 +973,50 @@ def run_trading_loop():
                     if not price:
                         continue
 
-                    # ── Daily loss cap — stop trading if down DRIFT_DAILY_LOSS_CAP ──
+                    # ── Daily loss cap ────────────────────────────────────
                     with _state_lock:
                         dpnl = _daily_pnl
                     if dpnl <= -DRIFT_DAILY_LOSS_CAP:
                         log("warn", f"Daily loss cap hit (${dpnl:.2f}) — no new positions today")
                         break
 
-                    # ── ATR-based SL/TP (dynamic, volatility-adjusted) ────
-                    atr_pct   = sig_atr / price
-                    sl_pct    = atr_pct * 1.5   # SL = 1.5× ATR
-                    tp_pct    = atr_pct * 3.0   # TP = 3× ATR (2:1 R:R)
+                    # ── ATR-based SL/TP ───────────────────────────────────
+                    atr_pct = sig_atr / price
+                    sl_pct  = atr_pct * 1.5   # SL = 1.5× ATR
+                    tp_pct  = atr_pct * 3.0   # TP = 3× ATR (2:1 R:R)
 
-                    # ── Liquidation safety cap ────────────────────────────
-                    max_safe_lev = 0.85 / sl_pct if sl_pct > 0 else DRIFT_LEV_MAX
-                    if max_safe_lev < DRIFT_LEV_MIN:
-                        log("info",
-                            f"ATR too high for safe {int(DRIFT_LEV_MIN)}x entry "
-                            f"(sl={sl_pct*100:.2f}% > liq buffer) — skip", market)
-                        continue
+                    # ── Contract-based position sizing ────────────────────
+                    # Futures PnL = contracts × multiplier × price_change (per point).
+                    # Notional = contracts × multiplier × price.
+                    # Effective leverage = notional / margin_estimate.
+                    meta        = _IB_CONTRACT_META.get(market.upper(), {})
+                    multiplier  = meta.get("multiplier", 5)
+                    margin_est  = meta.get("margin_est", DRIFT_MARGIN_USD)
+                    # Paper mode: scale virtual contracts by confidence & available capital
+                    conf_scale  = {1: 0.50, 2: 0.75, 3: 1.00}.get(confidence, 1.00)
+                    if DRIFT_PAPER_MODE:
+                        # Virtual fractional contracts so PnL is realistic regardless of account size
+                        v_contracts = round((DRIFT_MARGIN_USD * conf_scale / margin_est), 4)
+                        v_contracts = max(v_contracts, 0.001)
+                    else:
+                        v_contracts = IB_CONTRACTS   # whole contracts only for live
 
-                    # ── Dynamic leverage: volatility + liquidity, clamped to safe range ──
-                    # Volatility (ATR): calm markets get higher leverage; volatile gets lower.
-                    # Liquidity (spread + 24h volume): thin markets get up to 30% haircut.
-                    # Confidence boost: fresh Supertrend flip (conf=3) adds 15%.
-                    LEV_K      = 0.10
-                    raw_lev    = LEV_K / atr_pct if atr_pct > 0 else DRIFT_LEV_MIN
-                    tuned_lev  = mparams.get("leverage", DRIFT_LEVERAGE)
-                    raw_lev    = (raw_lev + tuned_lev) / 2
-                    if confidence >= 3:
-                        raw_lev *= 1.15   # fresh flip = highest conviction, push lev up
-                    liq_mult   = _get_liquidity_factor(market)
-                    raw_lev   *= liq_mult
-                    if liq_mult < 0.95:
-                        log("info", f"Liquidity factor {liq_mult:.2f} — leverage trimmed", market)
-                    market_lev = int(max(DRIFT_LEV_MIN, min(DRIFT_LEV_MAX, raw_lev, max_safe_lev)))
-
-                    # ── Confidence-scaled position sizing ─────────────────
-                    # conf=1 (base): 50% of margin — weakest setups lose less
-                    # conf=2 (RSI neutral): 75% of margin
-                    # conf=3 (fresh flip): 100% of margin — highest conviction
-                    conf_scale = {1: 0.50, 2: 0.75, 3: 1.00}.get(confidence, 1.00)
-                    margin     = round(DRIFT_MARGIN_USD * conf_scale, 2)
-                    size_usd   = margin * market_lev
+                    size_usd   = v_contracts * multiplier * price       # futures notional
+                    market_lev = round(size_usd / max(margin_est * v_contracts, 1), 1)
+                    market_lev = max(DRIFT_LEV_MIN, min(DRIFT_LEV_MAX, market_lev))
+                    # Use margin_est × v_contracts as the capital reserved for this trade
+                    margin     = round(margin_est * v_contracts * conf_scale, 2)
 
                     log("ok",
-                        f"SIGNAL {signal.upper()} conf={confidence}/3 lev={market_lev}x "
-                        f"margin=${margin:.0f} notional=${size_usd:.0f} "
+                        f"SIGNAL {signal.upper()} conf={confidence}/3 "
+                        f"{'virtual ' if DRIFT_PAPER_MODE else ''}{v_contracts}ct "
+                        f"notional=${size_usd:.0f} lev≈{market_lev:.1f}x "
                         f"SL={sl_pct*100:.2f}% TP={tp_pct*100:.2f}%", market)
 
-                    # Open with ATR-based SL/TP and ATR-based trailing stop
+                    # Open with ATR-based SL/TP and trailing stop; store contracts count
                     open_position(market, signal, price, size_usd, market_lev,
-                                  sl_pct=sl_pct, tp_pct=tp_pct, atr_pct=atr_pct)
+                                  sl_pct=sl_pct, tp_pct=tp_pct, atr_pct=atr_pct,
+                                  contracts=v_contracts)
 
         except Exception as e:
             log("err", f"Loop error: {e}")
@@ -1432,7 +1029,6 @@ def run_trading_loop():
 def home():
     mode         = "PAPER" if DRIFT_PAPER_MODE else "LIVE"
     mode_color   = "#ffee00" if DRIFT_PAPER_MODE else "#39ff14"
-    exch         = DRIFT_EXCHANGE.upper()
     markets_list = [m.strip().upper() for m in DRIFT_MARKETS.split(",")]
     cap_str      = f"${_capital:,.2f}"
     cap_pct      = round(max(0, min(100, (_capital - STARTING_CAPITAL) / max(PROFIT_GOAL - STARTING_CAPITAL, 1) * 100)), 1)
@@ -1442,11 +1038,11 @@ def home():
     )
     market_rows = "".join(
         f'<div class="market-row">'
-        f'<div class="market-label">{mk}</div>'
+        f'<div class="market-label">{mk}<span class="market-sub">{_IB_CONTRACT_META.get(mk, {{}}).get("label", "")}</span></div>'
         f'<button class="trade-btn btn-long" onclick="manualTrade(\'{mk}\',\'long\')">LONG</button>'
         f'<button class="trade-btn btn-short" onclick="manualTrade(\'{mk}\',\'short\')">SHORT</button>'
         f'</div>'
-        for mk in ["SOL", "ETH", "BTC"]
+        for mk in markets_list
     )
 
     return f"""<!DOCTYPE html>
@@ -1592,7 +1188,8 @@ canvas.dchart{{width:100%;height:130px;display:block;border-radius:11px;backgrou
 .market-row:nth-child(2){{animation:slideLeft .5s ease forwards .35s}}
 .market-row:nth-child(3){{animation:slideLeft .5s ease forwards .5s}}
 @keyframes slideLeft{{to{{opacity:1;transform:translateX(0)}}}}
-.market-label{{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;color:var(--text);width:36px;flex-shrink:0}}
+.market-label{{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;color:var(--text);width:80px;flex-shrink:0;display:flex;flex-direction:column;gap:1px}}
+.market-sub{{font-size:9px;font-weight:400;color:var(--muted);letter-spacing:.3px;white-space:nowrap}}
 .trade-btn{{flex:1;padding:9px 0;border:none;border-radius:8px;font-family:'Bebas Neue',sans-serif;font-size:15px;letter-spacing:2px;cursor:pointer;position:relative;overflow:hidden;transition:transform .15s}}
 .trade-btn:active{{transform:scale(.96)}}
 .btn-long{{background:rgba(0,255,136,.12);border:1px solid rgba(0,255,136,.35);color:var(--green);animation:longPulse 2.5s ease-in-out infinite}}
@@ -1647,7 +1244,7 @@ footer a{{color:var(--cyan);text-decoration:none}}
     <a class="nav-link active" href="/">HOME</a>
     <a class="nav-link" href="/trades">TRADES</a>
     <a class="nav-link" href="/monitor">MONITOR</a>
-    <a class="nav-link" href="https://jup.ag" target="_blank">JUPITER ↗</a>
+    <a class="nav-link" href="https://www.interactivebrokers.com" target="_blank">IBKR ↗</a>
   </nav>
 
   <div class="mode-strip">
@@ -1724,7 +1321,7 @@ footer a{{color:var(--cyan);text-decoration:none}}
 
   </div>
 
-  <footer>{DRIFT_BOT_NAME} · {exch} · <a href="/monitor">Monitor</a> · <a href="/trades">All Trades</a></footer>
+  <footer>{DRIFT_BOT_NAME} · IBKR · <a href="/monitor">Monitor</a> · <a href="/trades">All Trades</a></footer>
 </div>
 
 <script>
@@ -2317,7 +1914,7 @@ footer a{{color:var(--cyan);text-decoration:none}}
     <a href="/" class="nav-link">HOME</a>
     <a href="/trades" class="nav-link active">TRADES</a>
     <a href="/monitor" class="nav-link">MONITOR</a>
-    <a href="https://jup.ag" class="nav-link" target="_blank">JUPITER ↗</a>
+    <a href="https://www.interactivebrokers.com" class="nav-link" target="_blank">IBKR ↗</a>
   </div>
 </nav>
 <div class="scroll-area">
@@ -2407,7 +2004,7 @@ footer a{{color:var(--cyan);text-decoration:none}}
   </div>
 </div>
 </div>
-<footer>{DRIFT_BOT_NAME} &nbsp;&#x00B7;&nbsp; <a href="https://jup.ag" target="_blank">JUPITER ↗</a> &nbsp;&#x00B7;&nbsp; {'PAPER' if DRIFT_PAPER_MODE else 'LIVE'}</footer>
+<footer>{DRIFT_BOT_NAME} &nbsp;&#x00B7;&nbsp; IBKR &nbsp;&#x00B7;&nbsp; {'PAPER' if DRIFT_PAPER_MODE else 'LIVE'}</footer>
 </div>
 <script>
 const canvas=document.getElementById('particles');
@@ -2445,10 +2042,9 @@ def status_api():
     wins_n    = sum(1 for t in trades_snap if t["pnl"] >= 0)
     total_pnl = sum(t["pnl"] for t in trades_snap)
 
-    sol_price = get_sol_price()
     return jsonify({
         "bot": DRIFT_BOT_NAME,
-        "exchange": DRIFT_EXCHANGE,
+        "broker": "IBKR",
         "paper_mode": DRIFT_PAPER_MODE,
         "capital": round(cap, 2),
         "starting_capital": STARTING_CAPITAL,
@@ -2462,8 +2058,7 @@ def status_api():
         "open_positions": len(pos_snap),
         "positions": pos_snap,
         "leverage_range": f"{int(DRIFT_LEV_MIN)}-{int(DRIFT_LEV_MAX)}x",
-        "margin_per_trade": DRIFT_MARGIN_USD,
-        "sol_price": round(sol_price, 2) if sol_price else None,
+        "contracts_per_trade": IB_CONTRACTS,
         "profit_secured": round(psec, 2),
         "tp_usd": DRIFT_TP_USD,
         "compound_pct": DRIFT_COMPOUND_PCT * 100,
@@ -3278,27 +2873,21 @@ setInterval(pollMPriceHistory, 4000);
 
 # ── ENTRY POINT ───────────────────────────────────────────────────
 if __name__ == "__main__":
+    # Validate dependencies at startup
+    try:
+        import yfinance  # noqa: F401
+    except ImportError:
+        print("[ERR] yfinance not installed — run: pip install yfinance")
+        raise SystemExit(1)
+
     if not DRIFT_PAPER_MODE:
-        if DRIFT_EXCHANGE == "jupiter":
-            if not WALLET_PRIVATE_KEY:
-                log("err", "DRIFT_EXCHANGE=jupiter requires WALLET_PRIVATE_KEY env var.")
-                raise SystemExit(1)
-            try:
-                import anchorpy  # noqa: F401
-            except ImportError:
-                log("err", "DRIFT_EXCHANGE=jupiter requires anchorpy — run: pip install anchorpy.")
-                raise SystemExit(1)
-            active_mkts = [m.strip().upper() for m in DRIFT_MARKETS.split(",") if m.strip().upper() in _JPERP_MARKETS]
-            if not active_mkts:
-                log("err", "DRIFT_MARKETS has no Jupiter-supported markets (SOL/ETH/BTC).")
-                raise SystemExit(1)
-            skipped = [m.strip().upper() for m in DRIFT_MARKETS.split(",") if m.strip().upper() not in _JPERP_MARKETS]
-            if skipped:
-                log("warn", f"Jupiter Perps does not support {skipped} — those markets will be skipped")
-            _cache_jupiter_idl()
-        elif not WALLET or not WALLET_PRIVATE_KEY:
-            log("err", "DRIFT_PAPER_MODE=false requires WALLET and WALLET_PRIVATE_KEY env vars.")
+        try:
+            import ib_insync  # noqa: F401
+        except ImportError:
+            log("err", "Live mode requires ib_insync — run: pip install ib_insync")
             raise SystemExit(1)
+        log("ok", f"Live mode: will connect to IB Gateway/TWS at {IB_HOST}:{IB_PORT} (clientId={IB_CLIENT_ID})")
+        log("ok", f"Contracts per trade: {IB_CONTRACTS}")
 
     if REDIS_URL and REDIS_TOKEN:
         ping = _redis_cmd("PING")
@@ -3311,7 +2900,7 @@ if __name__ == "__main__":
 
     _load_state()
     log("ok", f"{'[PAPER] ' if DRIFT_PAPER_MODE else '[LIVE] '}{DRIFT_BOT_NAME} starting")
-    log("ok", f"Exchange: {DRIFT_EXCHANGE.upper()} | Markets: {DRIFT_MARKETS} | Leverage: {int(DRIFT_LEV_MIN)}-{int(DRIFT_LEV_MAX)}x dynamic | Margin: ${DRIFT_MARGIN_USD:.0f}/trade")
+    log("ok", f"Broker: IBKR | Markets: {DRIFT_MARKETS} | Eff. leverage: {int(DRIFT_LEV_MIN)}-{int(DRIFT_LEV_MAX)}x")
     log("ok", f"Capital: ${_capital:.2f} | Goal: ${PROFIT_GOAL:,.0f} | Port: {DRIFT_PORT}")
 
     t_notify = threading.Thread(target=_notify_worker, daemon=True)
@@ -3326,9 +2915,8 @@ if __name__ == "__main__":
     notify(
         f"*{DRIFT_BOT_NAME}* started\n"
         f"Mode: {'PAPER' if DRIFT_PAPER_MODE else 'LIVE'}\n"
-        f"Exchange: {DRIFT_EXCHANGE.upper()}\n"
+        f"Broker: IBKR\n"
         f"Markets: {DRIFT_MARKETS}\n"
-        f"Leverage: {int(DRIFT_LEV_MIN)}-{int(DRIFT_LEV_MAX)}x dynamic | Margin: ${DRIFT_MARGIN_USD:.0f}/trade\n"
         f"Capital: ${_capital:.2f}"
     )
 
