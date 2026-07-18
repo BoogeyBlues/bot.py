@@ -165,7 +165,7 @@ JUP_IMPACT_MAX_PCT     = float(os.environ.get("JUP_IMPACT_MAX_PCT",     "3.0"))
 JUP_SIGNAL_REFRESH_SECS= int(os.environ.get("JUP_SIGNAL_REFRESH_SECS", "120"))
 
 # Copy trading via GMGN smart wallets
-COPY_TRADE        = os.environ.get("COPY_TRADE", "true").lower() == "true"
+COPY_TRADE        = os.environ.get("COPY_TRADE", "false").lower() == "true"
 COPY_WINRATE_MIN  = float(os.environ.get("COPY_WINRATE_MIN",  "65"))  # was 60 — only elite wallets
 COPY_WINRATE_MAX  = float(os.environ.get("COPY_WINRATE_MAX",  "99"))
 COPY_MAX_WALLETS  = int(os.environ.get("COPY_MAX_WALLETS",    "5"))
