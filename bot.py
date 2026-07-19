@@ -3747,7 +3747,7 @@ def _home_inner():
     --surface2:#16162a;--border:#ffffff0d;--text:#e8e8f0;--muted:#5a5a7a;
   }}
   body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;
-    min-height:100vh;overflow-x:hidden;max-width:900px;margin:0 auto}}
+    min-height:100vh;overflow-x:hidden;max-width:1600px;margin:0 auto}}
 
   /* animated starfield */
   body::before{{content:'';position:fixed;inset:0;
@@ -3787,9 +3787,8 @@ def _home_inner():
   nav a:hover{{color:var(--gold);border-color:#f5c54244;background:#f5c54210}}
 
   /* STAT CARDS */
-  .cards{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:20px}}
-  @media(max-width:540px){{.cards{{grid-template-columns:1fr 1fr}}}}
-  @media(max-width:360px){{.cards{{grid-template-columns:1fr}}}}
+  .cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:20px}}
+  @media(max-width:360px){{.cards{{grid-template-columns:1fr 1fr}}}}
   .card{{background:var(--surface);border:1px solid var(--border);border-radius:16px;
     padding:16px 14px;position:relative;overflow:hidden;transition:transform .2s}}
   .card:hover{{transform:translateY(-2px)}}
@@ -4308,7 +4307,7 @@ def _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
   :root{{--pink:#ff006e;--cyan:#00f5ff;--yellow:#ffee00;--green:#39ff14;
     --bg:#0a0008;--card:#110010;--border:#ffffff15}}
   body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;
-    max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
+    max-width:1600px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
   .vid-wrap{{width:100%;line-height:0;position:relative}}
   .vid-wrap video{{width:100%;display:block;mix-blend-mode:screen}}
   .vid-wrap a{{display:block;cursor:pointer}}
@@ -4333,7 +4332,7 @@ def _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
   .hero-pnl{{font-family:'JetBrains Mono',monospace;font-size:1rem;font-weight:600;
     margin-top:8px;color:{pnl_color}}}
   .hero-sub{{font-size:.7rem;color:#888;margin-top:6px}}
-  .grid{{display:grid;grid-template-columns:1fr 1fr;gap:2px;background:var(--pink);border:2px solid var(--pink)}}
+  .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:2px;background:var(--pink);border:2px solid var(--pink)}}
   .stat{{background:var(--card);padding:14px 16px}}
   .stat .lbl{{font-size:.58rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em}}
   .stat .val{{font-family:'Bebas Neue',sans-serif;font-size:2rem;margin-top:2px;line-height:1}}
@@ -4631,7 +4630,7 @@ def status():
   @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
   *{{box-sizing:border-box;margin:0;padding:0}}
   :root{{--acc:#ffee00;--bg:#0a0008;--card:#110010;--border:#ffffff15}}
-  body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
+  body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:1600px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
   .bg-art{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}}
   .wrap{{position:relative}}
   nav{{display:flex;gap:0;border-bottom:2px solid var(--acc);overflow-x:auto;scrollbar-width:none}}
@@ -4646,7 +4645,7 @@ def status():
   .health-sub{{font-size:.68rem;color:#aaa;margin-top:2px}}
   .health-dot{{width:10px;height:10px;border-radius:50%;background:{health[0]};box-shadow:0 0 10px {health[0]};margin-left:auto;animation:pulse 1.5s infinite;flex-shrink:0}}
   @keyframes pulse{{0%,100%{{opacity:1;transform:scale(1)}}50%{{opacity:.5;transform:scale(.8)}}}}
-  .grid{{display:grid;grid-template-columns:1fr 1fr;gap:2px;background:var(--acc);border:2px solid var(--acc);margin:0 12px 12px}}
+  .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:2px;background:var(--acc);border:2px solid var(--acc);margin:0 12px 12px}}
   .stat{{background:var(--card);padding:14px 16px}}
   .stat .lbl{{font-size:.58rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em}}
   .stat .val{{font-family:'Bebas Neue',sans-serif;font-size:2rem;margin-top:2px;line-height:1;color:var(--acc)}}
@@ -4929,7 +4928,7 @@ def _trades_inner():
   @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
   *{{box-sizing:border-box;margin:0;padding:0}}
   :root{{--acc:#39ff14;--bg:#0a0008;--card:#110010;--border:#ffffff15}}
-  body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
+  body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:1600px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
   .bg-art{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}}
   .wrap{{position:relative}}
   nav{{display:flex;gap:0;border-bottom:2px solid var(--acc);overflow-x:auto;scrollbar-width:none}}
@@ -4938,7 +4937,7 @@ def _trades_inner():
   nav a:hover{{background:var(--acc);color:#000}}
   nav a.active{{background:var(--acc);color:#000}}
   .page-title{{font-family:'Bebas Neue',sans-serif;font-size:3rem;color:var(--acc);text-shadow:0 0 24px #39ff1488;padding:18px 16px 8px;line-height:1;letter-spacing:.04em}}
-  .stat-strip{{display:grid;grid-template-columns:1fr 1fr 1fr;gap:2px;background:var(--acc);border:2px solid var(--acc);margin:0 12px 12px}}
+  .stat-strip{{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:2px;background:var(--acc);border:2px solid var(--acc);margin:0 12px 12px}}
   .stat{{background:var(--card);padding:12px 14px}}
   .stat .lbl{{font-size:.58rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.1em}}
   .stat .val{{font-family:'Bebas Neue',sans-serif;font-size:1.8rem;margin-top:2px;line-height:1;color:var(--acc)}}
@@ -5248,7 +5247,7 @@ def watchlist_page():
 *{{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}}
 :root{{--bg:#050a14;--bg2:#080f1e;--bg3:#0d1628;--cyan:#00e5ff;--green:#00ff88;--red:#ff3355;--yellow:#ffee00;--text:#c8d8f0;--muted:#4a6080}}
 html,body{{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-height:100vh;overflow-x:hidden}}
-body{{max-width:430px;margin:0 auto}}
+body{{max-width:1600px;margin:0 auto}}
 nav{{background:rgba(5,10,20,.97);border-bottom:1px solid rgba(0,229,255,.1);display:flex;overflow-x:auto;position:sticky;top:0;z-index:100}}
 nav::-webkit-scrollbar{{display:none}}
 .nav-tab{{font-family:'Bebas Neue',sans-serif;font-size:13px;letter-spacing:2px;padding:14px 18px;color:var(--muted);white-space:nowrap;border-bottom:2px solid transparent;flex-shrink:0;text-decoration:none}}
@@ -6175,7 +6174,7 @@ def live():
 *{margin:0;padding:0;box-sizing:border-box}
 :root{--bg:#050a14;--bg2:#080f1e;--bg3:#0d1628;--cyan:#00e5ff;--green:#00ff88;--red:#ff3355;--yellow:#ffee00;--text:#c8d8f0;--muted:#4a6080}
 html,body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-height:100vh;-webkit-user-select:none;user-select:none;overflow-x:hidden}
-body{max-width:430px;margin:0 auto}
+body{max-width:1600px;margin:0 auto}
 nav{background:rgba(5,10,20,.97);border-bottom:1px solid rgba(0,229,255,.1);display:flex;overflow-x:auto;position:sticky;top:0;z-index:100}
 nav::-webkit-scrollbar{display:none}
 .nav-tab{font-family:'Bebas Neue',sans-serif;font-size:13px;letter-spacing:2px;padding:14px 18px;color:var(--muted);white-space:nowrap;border-bottom:2px solid transparent;flex-shrink:0;text-decoration:none}
@@ -6978,7 +6977,7 @@ def learn():
   @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
   *{box-sizing:border-box;margin:0;padding:0}
   :root{--acc:#b44fff;--bg:#080010;--card:#0e0018;--border:#ffffff15}
-  body{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}
+  body{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:1600px;margin:0 auto;min-height:100vh;overflow-x:hidden}
   .bg-art{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}
   .wrap{position:relative}
   nav{display:flex;gap:0;border-bottom:2px solid var(--acc);overflow-x:auto;scrollbar-width:none}
@@ -7340,7 +7339,7 @@ def setup():
   @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700;900&family=JetBrains+Mono:wght@600&display=swap');
   *{{box-sizing:border-box;margin:0;padding:0}}
   :root{{--acc:#ff6b00;--bg:#0a0500;--card:#120900;--border:#ffffff15}}
-  body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:430px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
+  body{{background:var(--bg);color:#fff;font-family:'Inter',sans-serif;max-width:1600px;margin:0 auto;min-height:100vh;overflow-x:hidden}}
   .bg-art{{position:fixed;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;opacity:.35;pointer-events:none;z-index:0}}
   .wrap{{position:relative}}
   nav{{display:flex;gap:0;border-bottom:2px solid var(--acc);overflow-x:auto;scrollbar-width:none}}
@@ -8204,7 +8203,7 @@ def positions_page():
 }}
 html{{height:100%}}
 body{{background:var(--bg);color:var(--text);font-family:'Inter',system-ui,sans-serif;
-  height:100%;overflow:hidden;max-width:430px;margin:0 auto;
+  height:100%;overflow:hidden;max-width:1600px;margin:0 auto;
   display:flex;flex-direction:column;position:relative}}
 body::before{{content:'';position:fixed;inset:0;
   background:radial-gradient(ellipse at 20% 50%,#1a0a3a22 0%,transparent 60%),
@@ -8227,8 +8226,9 @@ nav.topnav{{height:56px;background:var(--surface);border-bottom:1px solid var(--
 .dot{{width:6px;height:6px;border-radius:50%;background:{dot_col};
   box-shadow:0 0 6px {dot_col};animation:pulse 2s infinite}}
 @keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.4}}}}
-.scroll{{flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;
-  gap:10px;position:relative;z-index:1}}
+.scroll{{flex:1;overflow-y:auto;padding:14px 16px;position:relative;z-index:1}}
+#positions-list{{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:10px;margin-bottom:10px}}
+#exits-list{{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:8px}}
 .scroll::-webkit-scrollbar{{display:none}}
 .sec-lbl{{font-size:.68rem;font-weight:700;color:var(--muted);text-transform:uppercase;
   letter-spacing:.1em;padding:2px 0 8px;display:flex;align-items:center;gap:8px}}
@@ -8283,7 +8283,7 @@ nav.topnav{{height:56px;background:var(--surface);border-bottom:1px solid var(--
   opacity:0;pointer-events:none;transition:opacity .28s;backdrop-filter:blur(3px)}}
 .backdrop.on{{opacity:1;pointer-events:all}}
 .drawer{{position:fixed;bottom:0;left:50%;transform:translateX(-50%) translateY(104%);
-  width:100%;max-width:430px;height:90vh;background:var(--surface2);
+  width:100%;max-width:600px;height:90vh;background:var(--surface2);
   border-radius:22px 22px 0 0;z-index:41;border-top:1px solid var(--border);
   display:flex;flex-direction:column;transition:transform .35s cubic-bezier(.25,.72,0,1)}}
 .drawer.on{{transform:translateX(-50%) translateY(0)}}
