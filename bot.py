@@ -6194,10 +6194,11 @@ nav::-webkit-scrollbar{display:none}
 .cbadge{font-family:'JetBrains Mono',monospace;font-size:8px;padding:2px 7px;border-radius:10px;font-weight:700;background:rgba(255,238,0,.12);color:var(--yellow);border:1px solid rgba(255,238,0,.25);transition:all .3s}
 .sec-btn{font-family:'JetBrains Mono',monospace;font-size:8px;padding:3px 9px;border:1px solid rgba(0,229,255,.25);border-radius:6px;color:var(--cyan);background:rgba(0,229,255,.07);letter-spacing:1px;cursor:pointer;-webkit-tap-highlight-color:transparent}
 .pos-stack-wrap{position:relative;transition:height .45s cubic-bezier(.22,.8,.36,1);overflow:hidden;background:var(--bg2)}
-.pos-card{position:absolute;left:14px;right:14px;height:100px;border-radius:12px;overflow:hidden;transition:top .45s cubic-bezier(.22,.8,.36,1),transform .45s cubic-bezier(.22,.8,.36,1),opacity .45s,box-shadow .3s;will-change:transform,top,opacity}
+.pos-card{position:absolute;left:14px;right:14px;height:100px;border-radius:12px;overflow:hidden;transition:top .45s cubic-bezier(.22,.8,.36,1),transform .45s cubic-bezier(.22,.8,.36,1),opacity .45s,box-shadow .3s;will-change:transform,top,opacity;cursor:pointer;user-select:none}
 .pos-card.neutral-card{border:1px solid rgba(0,229,255,.2);box-shadow:0 2px 14px rgba(0,229,255,.04)}
+@media(hover:hover){.pos-card:hover .pc-inner{background:rgba(13,22,40,.95)}}
 .pc-hide-bg{position:absolute;inset:0;background:linear-gradient(90deg,transparent 25%,rgba(0,80,100,.88));display:flex;align-items:center;justify-content:flex-end;padding-right:18px;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;letter-spacing:1px;color:#fff;opacity:0;pointer-events:none}
-.pc-inner{position:absolute;inset:0;background:var(--bg3);padding:11px 13px;display:flex;flex-direction:column;justify-content:space-between;will-change:transform}
+.pc-inner{position:absolute;inset:0;background:var(--bg3);padding:11px 13px;display:flex;flex-direction:column;justify-content:space-between;will-change:transform;transition:background .15s}
 .lv-drop{overflow:hidden;max-height:0;transition:max-height .32s ease;background:var(--bg3);margin:0 14px;border-radius:0 0 12px 12px;border:1px solid rgba(0,229,255,.18);border-top:none}
 .lv-drop-inner{padding:10px 13px 12px;display:flex;flex-direction:column;gap:8px}
 .lvd-row{display:flex;justify-content:space-between;align-items:center}
@@ -6434,7 +6435,14 @@ function initSwipe(card,mint){
   var inner=card.querySelector('.pc-inner');
   var bg=card.querySelector('.pc-hide-bg');
   var sx,sy,isH=null,moved=false;
-  function snap(){inner.style.transition='transform .35s cubic-bezier(.22,.8,.36,1)';inner.style.transform='translateX(0)';bg.style.opacity='0';}
+  function snap(){inner.style.transition='transform .35s cubic-bezier(.22,.8,.36,1)';inner.style.transform='translateX(0)';bg.style.opacity='0';bg.style.transition='';}
+  function commit(dx){
+    if(dx<-80){
+      inner.style.transition='transform .28s ease';inner.style.transform='translateX(-110%)';bg.style.opacity='1';
+      setTimeout(function(){dismissCard(mint);},290);
+    }else snap();
+  }
+  // ── touch (mobile) ──
   card.addEventListener('touchstart',function(e){sx=e.touches[0].clientX;sy=e.touches[0].clientY;isH=null;moved=false;inner.style.transition='none';bg.style.transition='none';},{passive:true});
   card.addEventListener('touchmove',function(e){
     var dx=e.touches[0].clientX-sx,dy=e.touches[0].clientY-sy;
@@ -6448,11 +6456,24 @@ function initSwipe(card,mint){
     var dx=e.changedTouches[0].clientX-sx;
     if(!moved||isH===null){snap();toggleCardDrop(mint);return;}
     if(!isH){snap();return;}
-    if(dx<-80){
-      inner.style.transition='transform .28s ease';inner.style.transform='translateX(-110%)';bg.style.opacity='1';
-      setTimeout(function(){dismissCard(mint);},290);
-    }else snap();
+    commit(dx);
   },{passive:true});
+  // ── mouse (desktop) ──
+  var mx0=0,mMoved=false;
+  card.addEventListener('mousedown',function(e){if(e.button!==0)return;mx0=e.clientX;mMoved=false;inner.style.transition='none';bg.style.transition='none';e.preventDefault();});
+  card.addEventListener('mousemove',function(e){
+    if(!(e.buttons&1))return;
+    var dx=e.clientX-mx0;
+    mMoved=true;if(dx>8)return;
+    inner.style.transform='translateX('+Math.min(0,dx)+'px)';
+    bg.style.opacity=Math.min(1,Math.abs(Math.min(0,dx))/88);
+  });
+  card.addEventListener('mouseup',function(e){
+    var dx=e.clientX-mx0;
+    if(!mMoved){snap();toggleCardDrop(mint);return;}
+    commit(dx);
+  });
+  card.addEventListener('mouseleave',function(e){if(e.buttons&1)snap();});
 }
 function dismissCard(mint){
   if(_exMint===mint)_closeDrop();
@@ -9012,6 +9033,7 @@ function toast(msg,type='tok-info'){{
 let dragY0=0,dragging=false;
 const hw=document.getElementById('handle-wrap');
 const dr=document.getElementById('drawer');
+// ── touch drag to close
 hw.addEventListener('touchstart',e=>{{dragY0=e.touches[0].clientY;dragging=true;}},{{passive:true}});
 document.addEventListener('touchmove',e=>{{
   if(!dragging)return;
@@ -9022,6 +9044,20 @@ document.addEventListener('touchend',e=>{{
   if(!dragging)return;
   dragging=false;
   const dy=e.changedTouches[0].clientY-dragY0;
+  dr.style.transform='';
+  if(dy>80)closeDrawer();
+}});
+// ── mouse drag to close (desktop mirror)
+hw.addEventListener('mousedown',e=>{{dragY0=e.clientY;dragging=true;e.preventDefault();}});
+document.addEventListener('mousemove',e=>{{
+  if(!dragging)return;
+  const dy=e.clientY-dragY0;
+  if(dy>0)dr.style.transform=`translateX(-50%) translateY(${{dy}}px)`;
+}});
+document.addEventListener('mouseup',e=>{{
+  if(!dragging)return;
+  dragging=false;
+  const dy=e.clientY-dragY0;
   dr.style.transform='';
   if(dy>80)closeDrawer();
 }});
