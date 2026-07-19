@@ -3968,14 +3968,13 @@ def _home_inner():
     <div class="chart-wrap"><canvas id="capChart"></canvas></div>
   </div>
 
-  {"" if not open_list else f'''
-  <div class="section">
-    <div class="section-hdr"><h2>⚡ Open Trades ({len(open_list)})</h2></div>
+  <div class="section" id="open-sec" style="{'display:none' if not open_list else ''}">
+    <div class="section-hdr"><h2>⚡ Open Trades (<span id="open-count-lbl">{len(open_list)}</span>)</h2></div>
     <div class="tbl-wrap"><table>
       <thead><tr><th>Symbol</th><th>Strategy</th><th>Size</th><th>Bond In</th><th>Held</th></tr></thead>
-      <tbody>{open_rows}</tbody>
+      <tbody id="open-tbody">{open_rows}</tbody>
     </table></div>
-  </div>'''}
+  </div>
 
   <div class="section">
     <div class="section-hdr">
@@ -3984,7 +3983,7 @@ def _home_inner():
     </div>
     <div class="tbl-wrap"><table>
       <thead><tr><th>Strategy</th><th>Symbol</th><th>PnL</th><th>Exit</th><th>Hold</th><th>Time</th></tr></thead>
-      <tbody>{rows if rows else '<tr><td colspan="6" class="empty">No trades yet — bot is scanning...</td></tr>'}</tbody>
+      <tbody id="trades-tbody">{rows if rows else '<tr><td colspan="6" class="empty">No trades yet — bot is scanning...</td></tr>'}</tbody>
     </table></div>
   </div>
 
@@ -4170,6 +4169,7 @@ async function miniAction(action){{
 }}
 
 // ── Live stat polling ────────────────────────────────────
+function _fmtHeldHome(s){{s=Math.round(s||0);return s<60?s+'s':s<3600?Math.floor(s/60)+'m':(Math.floor(s/3600)+'h '+Math.round((s%3600)/60)+'m');}}
 async function pollStats(){{
   try{{
     const d=await(await fetch('/status/api')).json();
@@ -4200,6 +4200,49 @@ async function pollStats(){{
     if(openSub) openSub.textContent=d.scanning?(d.open_trades?'🟢 Active':'🔍 Scanning...'):'⏸ Paused';
     const lockedEl=document.getElementById('h-locked');
     if(lockedEl) lockedEl.textContent='$'+d.usdc_locked.toFixed(2);
+  }}catch(e){{}}
+  // Also update open positions + recent trades tables live
+  try{{
+    const ld=await(await fetch('/live/api')).json();
+    const openSec=document.getElementById('open-sec');
+    const openTbody=document.getElementById('open-tbody');
+    const openLbl=document.getElementById('open-count-lbl');
+    if(openTbody){{
+      const ops=ld.open||[];
+      if(openSec) openSec.style.display=ops.length?'':'none';
+      if(openLbl) openLbl.textContent=ops.length;
+      openTbody.innerHTML=ops.map(t=>
+        `<tr class="open-trade-row" data-mint="${{t.mint}}" onclick="openPosMini(this)" style="cursor:pointer">
+          <td class="sym">${{t.symbol}}</td>
+          <td><span class="badge badge-strategy">${{(t.strategy||'?').toUpperCase()}}</span></td>
+          <td class="gold">$${{t.amount.toFixed(2)}}</td>
+          <td class="muted">${{t.bond_entry.toFixed(1)}}%</td>
+          <td class="muted pulse-text">${{_fmtHeldHome(t.elapsed_s)}}</td>
+        </tr>`
+      ).join('');
+    }}
+    const tradesTbody=document.getElementById('trades-tbody');
+    if(tradesTbody){{
+      const cls=ld.closed||[];
+      if(cls.length===0){{
+        tradesTbody.innerHTML='<tr><td colspan="6" class="empty">No trades yet — bot is scanning...</td></tr>';
+      }}else{{
+        tradesTbody.innerHTML=cls.slice(0,20).map(t=>{{
+          const win=(t.pnl||0)>=0;
+          const col=win?'#4ade80':'#f87171';
+          const icon=win?'▲':'▼';
+          const sign=win?'+':'';
+          return `<tr>
+            <td><span class="badge badge-strategy">${{(t.strategy||'?').toUpperCase()}}</span></td>
+            <td class="sym">${{t.symbol||'?'}}</td>
+            <td style="color:${{col}};font-weight:700">${{icon}} ${{sign}}$${{Math.abs(t.pnl||0).toFixed(4)}}</td>
+            <td><span class="badge">${{t.result||'?'}}</span></td>
+            <td class="muted">${{(t.hold_m||0).toFixed(1)}}m</td>
+            <td class="muted">${{t.time||''}}</td>
+          </tr>`;
+        }}).join('');
+      }}
+    }}
   }}catch(e){{}}
 }}
 pollStats();
