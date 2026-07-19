@@ -711,18 +711,24 @@ def daily_limit_reached():
                     f"Done for today. Auto-resumes at midnight."
                 )
             return True
-        # Max daily loss guard — stop if down >MAX_DAILY_LOSS_PCT% from today's open
+        # Max daily loss guard — stop if down >MAX_DAILY_LOSS_PCT% from today's open.
+        # Use total equity (available capital + amounts reserved in open trades) so that
+        # open positions don't falsely trigger the guard while they're still running.
         if _day_start_cap > 0:
             with capital_lock:
                 cap_now = capital
-            loss_pct = (_day_start_cap - cap_now) / _day_start_cap * 100
+            with trades_lock:
+                open_reserved = sum(t.get("amount", 0) for t in open_trades.values()
+                                    if not t.get("_unverified"))
+            equity_now = cap_now + open_reserved
+            loss_pct = (_day_start_cap - equity_now) / _day_start_cap * 100
             if loss_pct >= MAX_DAILY_LOSS_PCT:
                 if not _daily_cap_notified:
                     _daily_cap_notified = True
-                    log("warn", f"Daily loss guard: down {loss_pct:.1f}% today (${_day_start_cap - cap_now:.2f}) — stopping until tomorrow")
+                    log("warn", f"Daily loss guard: down {loss_pct:.1f}% today (${_day_start_cap - equity_now:.2f}) — stopping until tomorrow")
                     notify(
                         "🛑 Loss Guard",
-                        f"Down {loss_pct:.1f}% today (${_day_start_cap - cap_now:.2f})\n"
+                        f"Down {loss_pct:.1f}% today (${_day_start_cap - equity_now:.2f})\n"
                         f"Stopping to protect capital. Auto-resumes at midnight."
                     )
                 return True
@@ -6107,6 +6113,7 @@ def live_api():
         "closed":   recent_closed,
         "scanning": scan_active,
         "paused":   _pause_until > time.time(),
+        "loss_guard": daily_limit_reached(),
         "today":    {"trades": _daily_trades, "wins": _daily_wins, "losses": _daily_losses},
         "scan_log": sl,
         "errors":   recent_errors,
