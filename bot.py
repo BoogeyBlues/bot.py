@@ -166,7 +166,7 @@ JUP_IMPACT_MAX_PCT     = float(os.environ.get("JUP_IMPACT_MAX_PCT",     "3.0"))
 JUP_SIGNAL_REFRESH_SECS= int(os.environ.get("JUP_SIGNAL_REFRESH_SECS", "120"))
 
 # Copy trading via GMGN smart wallets
-COPY_TRADE        = os.environ.get("COPY_TRADE", "true").lower() == "true"
+COPY_TRADE        = os.environ.get("COPY_TRADE", "false").lower() == "true"
 COPY_WINRATE_MIN  = float(os.environ.get("COPY_WINRATE_MIN",  "65"))  # was 60 — only elite wallets
 COPY_WINRATE_MAX  = float(os.environ.get("COPY_WINRATE_MAX",  "99"))
 COPY_MAX_WALLETS  = int(os.environ.get("COPY_MAX_WALLETS",    "5"))
@@ -215,7 +215,7 @@ NTFY_TOPIC       = os.environ.get("NTFY_TOPIC", "")
 MIN_REPLIES      = int(os.environ.get("MIN_REPLIES",      "8"))
 MIN_SOCIALS      = int(os.environ.get("MIN_SOCIALS",       "0"))
 MIN_LIQ          = float(os.environ.get("MIN_LIQ",        "500"))
-MIN_VOL_5M       = float(os.environ.get("MIN_VOL_5M",     "2000"))  # $2k 5-min volume — catches coins before viral ($10k was post-move)
+MIN_VOL_5M       = float(os.environ.get("MIN_VOL_5M",      "500"))  # 5-min volume gate; bonding-curve coins (liq=0) use $100 floor, Raydium coins use full threshold
 MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "2"))     # ≥2 signal points — 1 confirmation + organic is enough at early bonding stage
 MAX_RUG_SCORE    = int(os.environ.get("MAX_RUG_SCORE",    "400"))   # rugcheck score ceiling (higher = riskier)
 
@@ -705,24 +705,30 @@ def daily_limit_reached():
                 with capital_lock:
                     cap_now = capital
                 notify(
-                    f"🔒 *Boogeys Sniper* — Daily Cap\n"
+                    "🔒 Daily Cap",
                     f"{_daily_trades} trades | {_daily_wins}W {_daily_losses}L\n"
                     f"Cap: ${cap_now:,.2f}\n"
                     f"Done for today. Auto-resumes at midnight."
                 )
             return True
-        # Max daily loss guard — stop if down >MAX_DAILY_LOSS_PCT% from today's open
+        # Max daily loss guard — stop if down >MAX_DAILY_LOSS_PCT% from today's open.
+        # Use total equity (available capital + amounts reserved in open trades) so that
+        # open positions don't falsely trigger the guard while they're still running.
         if _day_start_cap > 0:
             with capital_lock:
                 cap_now = capital
-            loss_pct = (_day_start_cap - cap_now) / _day_start_cap * 100
+            with trades_lock:
+                open_reserved = sum(t.get("amount", 0) for t in open_trades.values()
+                                    if not t.get("_unverified"))
+            equity_now = cap_now + open_reserved
+            loss_pct = (_day_start_cap - equity_now) / _day_start_cap * 100
             if loss_pct >= MAX_DAILY_LOSS_PCT:
                 if not _daily_cap_notified:
                     _daily_cap_notified = True
-                    log("warn", f"Daily loss guard: down {loss_pct:.1f}% today (${_day_start_cap - cap_now:.2f}) — stopping until tomorrow")
+                    log("warn", f"Daily loss guard: down {loss_pct:.1f}% today (${_day_start_cap - equity_now:.2f}) — stopping until tomorrow")
                     notify(
-                        f"🛑 *Boogeys Sniper* — Loss Guard\n"
-                        f"Down {loss_pct:.1f}% today (${_day_start_cap - cap_now:.2f})\n"
+                        "🛑 Loss Guard",
+                        f"Down {loss_pct:.1f}% today (${_day_start_cap - equity_now:.2f})\n"
                         f"Stopping to protect capital. Auto-resumes at midnight."
                     )
                 return True
@@ -3034,10 +3040,13 @@ def _eval_coin(coin):
                     "price": _curve_price, "bond": bond, "sig_score": sig_score,
                     "pump_swap": coin.get("pump_swap", False),
                     "market": {"price": _curve_price, "liq": 0, "vol_m5": 0}}
-        if market.get("vol_m5", 0) < MIN_VOL_5M:
-            _log_scan(symbol, mint, bond, _sig_pre, "vol", 8, f"VOL ${market['vol_m5']:.0f}<{MIN_VOL_5M:.0f}")
+        # Bonding-curve coins (liq=0, still pre-Raydium) have low DSC vol by design;
+        # use a lower floor for them. Raydium-graduated coins (liq>0) use the full MIN_VOL_5M.
+        _vol_floor = MIN_VOL_5M if market.get("liq", 0) > 0 else min(MIN_VOL_5M, 100)
+        if market.get("vol_m5", 0) < _vol_floor:
+            _log_scan(symbol, mint, bond, _sig_pre, "vol", 8, f"VOL ${market['vol_m5']:.0f}<{_vol_floor:.0f}")
             return None
-        if market.get("change5m", 0) < -3:
+        if market.get("change5m", 0) < -8:
             _log_scan(symbol, mint, bond, _sig_pre, "mom", 8, f"5M DOWN {market['change5m']:.1f}%")
             return None
         impact = jup_price_impact(mint, trade_size())
@@ -3252,6 +3261,7 @@ def scanner_loop():
 
             # Scan summary counters for diagnostics
             n_social = n_active = n_bond_range = n_spike_range = 0
+            n_complete = n_blacklisted = 0
 
             # ── Phase 1: cheap pre-filter (no I/O) ────────────────────
             with trades_lock:
@@ -3267,6 +3277,7 @@ def scanner_loop():
                 symbol = coin["symbol"]
                 bond   = coin.get("bond_pct", 0)
                 if mint in _black_snap or mint in _open_snap:
+                    n_blacklisted += 1
                     continue
                 _soc = coin.get("socials") or {}
                 social_count = sum([
@@ -3386,9 +3397,10 @@ def scanner_loop():
                                 res["bond"], 0, pump_swap=res.get("pump_swap", False))
 
             log("info",
-                f"Filter summary: {len(coins)} coins | "
-                f"{n_social} have-social | {n_active} active<5m | "
-                f"{n_bond_range} in bond range | {n_spike_range} dormant")
+                f"Filter summary: {len(coins)} raw | {n_blacklisted} bl/open | "
+                f"{n_social} social | {n_active} active<8m | "
+                f"{n_bond_range} bond({BOND_ENTRY_MIN:.0f}-{BOND_ENTRY_MAX:.0f}%) | "
+                f"{n_spike_range} dormant | {len(candidates)} to eval")
             if n_social == 0:
                 log("warn", "0 coins have Twitter or Telegram — market may be slow")
             elif n_active == 0:
@@ -3956,14 +3968,13 @@ def _home_inner():
     <div class="chart-wrap"><canvas id="capChart"></canvas></div>
   </div>
 
-  {"" if not open_list else f'''
-  <div class="section">
-    <div class="section-hdr"><h2>⚡ Open Trades ({len(open_list)})</h2></div>
+  <div class="section" id="open-sec" style="{'display:none' if not open_list else ''}">
+    <div class="section-hdr"><h2>⚡ Open Trades (<span id="open-count-lbl">{len(open_list)}</span>)</h2></div>
     <div class="tbl-wrap"><table>
       <thead><tr><th>Symbol</th><th>Strategy</th><th>Size</th><th>Bond In</th><th>Held</th></tr></thead>
-      <tbody>{open_rows}</tbody>
+      <tbody id="open-tbody">{open_rows}</tbody>
     </table></div>
-  </div>'''}
+  </div>
 
   <div class="section">
     <div class="section-hdr">
@@ -3972,7 +3983,7 @@ def _home_inner():
     </div>
     <div class="tbl-wrap"><table>
       <thead><tr><th>Strategy</th><th>Symbol</th><th>PnL</th><th>Exit</th><th>Hold</th><th>Time</th></tr></thead>
-      <tbody>{rows if rows else '<tr><td colspan="6" class="empty">No trades yet — bot is scanning...</td></tr>'}</tbody>
+      <tbody id="trades-tbody">{rows if rows else '<tr><td colspan="6" class="empty">No trades yet — bot is scanning...</td></tr>'}</tbody>
     </table></div>
   </div>
 
@@ -4158,6 +4169,7 @@ async function miniAction(action){{
 }}
 
 // ── Live stat polling ────────────────────────────────────
+function _fmtHeldHome(s){{s=Math.round(s||0);return s<60?s+'s':s<3600?Math.floor(s/60)+'m':(Math.floor(s/3600)+'h '+Math.round((s%3600)/60)+'m');}}
 async function pollStats(){{
   try{{
     const d=await(await fetch('/status/api')).json();
@@ -4188,6 +4200,49 @@ async function pollStats(){{
     if(openSub) openSub.textContent=d.scanning?(d.open_trades?'🟢 Active':'🔍 Scanning...'):'⏸ Paused';
     const lockedEl=document.getElementById('h-locked');
     if(lockedEl) lockedEl.textContent='$'+d.usdc_locked.toFixed(2);
+  }}catch(e){{}}
+  // Also update open positions + recent trades tables live
+  try{{
+    const ld=await(await fetch('/live/api')).json();
+    const openSec=document.getElementById('open-sec');
+    const openTbody=document.getElementById('open-tbody');
+    const openLbl=document.getElementById('open-count-lbl');
+    if(openTbody){{
+      const ops=ld.open||[];
+      if(openSec) openSec.style.display=ops.length?'':'none';
+      if(openLbl) openLbl.textContent=ops.length;
+      openTbody.innerHTML=ops.map(t=>
+        `<tr class="open-trade-row" data-mint="${{t.mint}}" onclick="openPosMini(this)" style="cursor:pointer">
+          <td class="sym">${{t.symbol}}</td>
+          <td><span class="badge badge-strategy">${{(t.strategy||'?').toUpperCase()}}</span></td>
+          <td class="gold">$${{t.amount.toFixed(2)}}</td>
+          <td class="muted">${{t.bond_entry.toFixed(1)}}%</td>
+          <td class="muted pulse-text">${{_fmtHeldHome(t.elapsed_s)}}</td>
+        </tr>`
+      ).join('');
+    }}
+    const tradesTbody=document.getElementById('trades-tbody');
+    if(tradesTbody){{
+      const cls=ld.closed||[];
+      if(cls.length===0){{
+        tradesTbody.innerHTML='<tr><td colspan="6" class="empty">No trades yet — bot is scanning...</td></tr>';
+      }}else{{
+        tradesTbody.innerHTML=cls.slice(0,20).map(t=>{{
+          const win=(t.pnl||0)>=0;
+          const col=win?'#4ade80':'#f87171';
+          const icon=win?'▲':'▼';
+          const sign=win?'+':'';
+          return `<tr>
+            <td><span class="badge badge-strategy">${{(t.strategy||'?').toUpperCase()}}</span></td>
+            <td class="sym">${{t.symbol||'?'}}</td>
+            <td style="color:${{col}};font-weight:700">${{icon}} ${{sign}}$${{Math.abs(t.pnl||0).toFixed(4)}}</td>
+            <td><span class="badge">${{t.result||'?'}}</span></td>
+            <td class="muted">${{(t.hold_m||0).toFixed(1)}}m</td>
+            <td class="muted">${{t.time||''}}</td>
+          </tr>`;
+        }}).join('');
+      }}
+    }}
   }}catch(e){{}}
 }}
 pollStats();
@@ -6101,6 +6156,7 @@ def live_api():
         "closed":   recent_closed,
         "scanning": scan_active,
         "paused":   _pause_until > time.time(),
+        "loss_guard": daily_limit_reached(),
         "today":    {"trades": _daily_trades, "wins": _daily_wins, "losses": _daily_losses},
         "scan_log": sl,
         "errors":   recent_errors,
