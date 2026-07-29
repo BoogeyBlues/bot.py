@@ -600,6 +600,14 @@ def _load_daily_state():
         TUNE_PAUSED_UNTIL = _next_monday_7am()
         log("ok", f"Tune schedule initialised: next retune {time.strftime('%a %b %d 07:00 UTC', time.gmtime(TUNE_PAUSED_UNTIL))}", "TUNE")
 
+    # Migration: widen any over-narrowed bond range stored by old auto-tuner (<20% window)
+    if BOND_ENTRY_MAX - BOND_ENTRY_MIN < 20:
+        old_min, old_max = BOND_ENTRY_MIN, BOND_ENTRY_MAX
+        mid = (BOND_ENTRY_MIN + BOND_ENTRY_MAX) / 2
+        BOND_ENTRY_MIN = round(max(mid - 12, 45), 1)
+        BOND_ENTRY_MAX = round(min(mid + 12, 78), 1)
+        log("warn", f"Bond range was too narrow ({old_min}-{old_max}%) — reset to {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%", "TUNE")
+
     # Restore open positions so bot doesn't re-buy after crash/redeploy
     saved_open = redis_load("bot_open_trades")
     if saved_open:
@@ -998,25 +1006,29 @@ def auto_tune(history):
         bond_wr  = len(bond_wins)  / max(len(bond_all),  1)
         spike_wr = len(spike_wins) / max(len(spike_all), 1)
 
-        # Tune bond entry range toward what's winning
+        # Tune bond entry range toward what's winning — keep a ≥20% window so the
+        # scanner always sees enough candidates in the top-50 recently-traded list.
         if bond_wins:
             avg_win_entry = sum(t.get("bond_entry", BOND_ENTRY_MIN) for t in bond_wins) / len(bond_wins)
-            BOND_ENTRY_MIN = round(min(max(avg_win_entry - 2, 38), 65), 1)
-            BOND_ENTRY_MAX = round(min(BOND_ENTRY_MIN + 6, 70), 1)
+            BOND_ENTRY_MIN = round(min(max(avg_win_entry - 8, 45), 60), 1)
+            BOND_ENTRY_MAX = round(min(BOND_ENTRY_MIN + 20, 78), 1)
         elif bond_wr < 0.35 and len(bond_all) >= 5:
-            # Poor win rate — tighten entry, look for higher momentum
-            BOND_ENTRY_MIN = round(min(BOND_ENTRY_MIN + 1.5, 68), 1)
-            BOND_ENTRY_MAX = round(min(BOND_ENTRY_MAX + 1.5, 74), 1)
+            # Poor win rate — shift range up slightly toward higher momentum
+            BOND_ENTRY_MIN = round(min(BOND_ENTRY_MIN + 1.0, 62), 1)
+            BOND_ENTRY_MAX = round(min(BOND_ENTRY_MAX + 1.0, 78), 1)
+        # Always enforce minimum ≥20% window
+        if BOND_ENTRY_MAX - BOND_ENTRY_MIN < 20:
+            BOND_ENTRY_MAX = round(min(BOND_ENTRY_MIN + 20, 78), 1)
 
         # Tune stale exit based on how long winners actually held
         if bond_wins:
             avg_win_hold_secs = (sum(t.get("hold_m", 2) for t in bond_wins) / len(bond_wins)) * 60
-            BOND_STALE_SECS = max(90, min(300, int(avg_win_hold_secs * 0.7)))
+            BOND_STALE_SECS = max(120, min(300, int(avg_win_hold_secs * 0.7)))
 
         # Tune hard timeout — give it at least as long as average winner
         if bond_wins:
             avg_win_hold_secs = (sum(t.get("hold_m", 2) for t in bond_wins) / len(bond_wins)) * 60
-            BOND_MAX_SECS = max(180, min(480, int(avg_win_hold_secs * 1.5)))
+            BOND_MAX_SECS = max(300, min(600, int(avg_win_hold_secs * 2)))
 
         # Loosen SL if losses are all from price drop (not stale/timeout)
         sl_losses = [t for t in bond_losses if t.get("result") == "BOND_SL"]
