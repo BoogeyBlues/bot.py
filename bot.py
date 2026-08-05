@@ -100,15 +100,15 @@ DAILY_LOSS_MAX    = int(os.environ.get("DAILY_LOSS_MAX",  "6"))   # retune after
 LOSS_COOLDOWN_HRS = float(os.environ.get("LOSS_COOLDOWN_HRS", "0.083")) # 5-min pause then resume
 ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # kept for reference only — retune is weekly (Monday 07:00 UTC)
 
-# Bond Runner strategy
-BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "50"))  # 50%+ = confirmed momentum, less stall risk
-BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "75"))
-BOND_TP_PCT     = float(os.environ.get("BOND_TP_PCT",    "30"))  # 30% TP — lets partial scale-out run (TP1@20%, TP2@25%, full@30%)
-BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "8"))
+# Bond Runner strategy — slow & steady profile: fewer trades, quicker exits, tighter risk
+BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "57"))  # 57%+ = confirmed momentum zone
+BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "73"))
+BOND_TP_PCT     = float(os.environ.get("BOND_TP_PCT",    "12"))  # 12% TP — hits more often; partials at +7%/+10%
+BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "6"))
 BOND_GRAD_BOND  = float(os.environ.get("BOND_GRAD_BOND", "90"))  # graduation imminent — tighten TSL
 BOND_GRAD_TSL   = float(os.environ.get("BOND_GRAD_TSL",  "3"))   # tight TSL % near graduation
-BOND_MAX_SECS       = int(os.environ.get("BOND_MAX_SECS",       "600"))  # 10 min — early runners need time
-BOND_STALE_SECS     = int(os.environ.get("BOND_STALE_SECS",     "180"))  # 3 min — allow brief consolidations
+BOND_MAX_SECS       = int(os.environ.get("BOND_MAX_SECS",       "240"))  # 4 min max — don't babysit slow coins
+BOND_STALE_SECS     = int(os.environ.get("BOND_STALE_SECS",     "75"))   # 75s stale — redeploy capital fast
 DEAD_PAIR_SECS      = int(os.environ.get("DEAD_PAIR_SECS",       "90"))  # exit if zero bond movement in 90s
 VOL_STALE_SECS      = int(os.environ.get("VOL_STALE_SECS",       "120")) # exit if had volume but stalled 120s
 
@@ -139,16 +139,17 @@ SLIP_DROP_TO   = float(os.environ.get("SLIP_DROP_TO",  "85"))
 SLIP_WAIT_SECS = int(os.environ.get("SLIP_WAIT_SECS",  "6"))
 
 # Trailing stop loss — activates once trade is up TSL_ACTIVATE_PCT, then trails BOND_SL_PCT below peak
-TSL_ACTIVATE_PCT = float(os.environ.get("TSL_ACTIVATE_PCT", "12"))  # trailing SL kicks in at +12% — locks gains before rug
+TSL_ACTIVATE_PCT = float(os.environ.get("TSL_ACTIVATE_PCT", "7"))   # TSL kicks in at +7% — protects against rug pumps
 SHARP_DROP_PCT = float(os.environ.get("SHARP_DROP_PCT", "4"))
 
 # Partial take-profit — scale out to lock gains without killing the run
-# TP1: +20% → sell 30%; TP2: +25% → sell 30% of remaining; final ~49% rides to BOND_TP at +30%
-PARTIAL_TP1_PCT  = float(os.environ.get("PARTIAL_TP1_PCT",  "20"))
-PARTIAL_TP2_PCT  = float(os.environ.get("PARTIAL_TP2_PCT",  "25"))
+# TP1: +7% → sell 30%; TP2: +10% → sell 30% of remaining; final ~49% rides to BOND_TP at +12%
+PARTIAL_TP1_PCT  = float(os.environ.get("PARTIAL_TP1_PCT",  "7"))
+PARTIAL_TP2_PCT  = float(os.environ.get("PARTIAL_TP2_PCT",  "10"))
 
 # Bundle mode: "avoid" or "ride"
-BUNDLE_MODE    = os.environ.get("BUNDLE_MODE", "avoid").lower()
+BUNDLE_MODE       = os.environ.get("BUNDLE_MODE", "avoid").lower()
+RUGCHECK_REQUIRED = os.environ.get("RUGCHECK_REQUIRED", "true").lower() == "true"  # skip coin if rugcheck times out
 BUNDLE_RIDE_TP = float(os.environ.get("BUNDLE_RIDE_TP", "88"))
 
 # USDC profit lock
@@ -162,7 +163,7 @@ JUPITER_API_KEY        = os.environ.get("JUPITER_API_KEY", "")
 JUPITER_QUOTE_URL      = "https://api.jup.ag/swap/v1/quote"
 JUP_TOKENS_URL         = "https://api.jup.ag/tokens/v2"
 JUP_PRICE_V3_URL       = "https://api.jup.ag/price/v3/price"
-JUP_IMPACT_MAX_PCT     = float(os.environ.get("JUP_IMPACT_MAX_PCT",     "3.0"))
+JUP_IMPACT_MAX_PCT     = float(os.environ.get("JUP_IMPACT_MAX_PCT",     "2.0"))  # tighter — only liquid entries
 JUP_SIGNAL_REFRESH_SECS= int(os.environ.get("JUP_SIGNAL_REFRESH_SECS", "120"))
 
 # Copy trading via GMGN smart wallets
@@ -212,15 +213,15 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 NTFY_TOPIC       = os.environ.get("NTFY_TOPIC", "")
 
 # Social / quality gates
-MIN_REPLIES      = int(os.environ.get("MIN_REPLIES",      "8"))
-MIN_SOCIALS      = int(os.environ.get("MIN_SOCIALS",       "0"))
+MIN_REPLIES      = int(os.environ.get("MIN_REPLIES",      "5"))   # 5+ replies = real community, not ghost coin
+MIN_SOCIALS      = int(os.environ.get("MIN_SOCIALS",       "2"))   # need Twitter + Telegram minimum
 MIN_LIQ          = float(os.environ.get("MIN_LIQ",        "500"))
 MIN_VOL_5M       = float(os.environ.get("MIN_VOL_5M",      "500"))  # 5-min volume gate; bonding-curve coins (liq=0) use $100 floor, Raydium coins use full threshold
 MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "2"))     # ≥2 signal points — 1 confirmation + organic is enough at early bonding stage
 MAX_RUG_SCORE    = int(os.environ.get("MAX_RUG_SCORE",    "400"))   # rugcheck score ceiling (higher = riskier)
 
 # General
-MAX_OPEN      = int(os.environ.get("MAX_OPEN",      "10"))
+MAX_OPEN      = int(os.environ.get("MAX_OPEN",      "3"))   # max 3 concurrent — quality over quantity
 SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "2"))
 
 SOL_RPC         = os.environ.get("SOL_RPC", "https://api.mainnet-beta.solana.com")
@@ -479,6 +480,7 @@ def _save_daily_state():
         "sold_mints":     sold_snapshot,
         "watchlist":      wl_snapshot,
         "usdc_locked":    usdc_snap,
+        "strategy_version": "steady_v1",
     }
     try:
         with open(STATE_FILE, "w") as f:
@@ -604,9 +606,23 @@ def _load_daily_state():
     if BOND_ENTRY_MAX - BOND_ENTRY_MIN < 20:
         old_min, old_max = BOND_ENTRY_MIN, BOND_ENTRY_MAX
         mid = (BOND_ENTRY_MIN + BOND_ENTRY_MAX) / 2
-        BOND_ENTRY_MIN = round(max(mid - 12, 45), 1)
-        BOND_ENTRY_MAX = round(min(mid + 12, 78), 1)
+        BOND_ENTRY_MIN = round(max(mid - 8, 52), 1)
+        BOND_ENTRY_MAX = round(min(mid + 16, 78), 1)
         log("warn", f"Bond range was too narrow ({old_min}-{old_max}%) — reset to {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%", "TUNE")
+
+    # One-time migration: reset aggressive auto-tuned params to slow-and-steady profile
+    if s.get("strategy_version", "") != "steady_v1":
+        global TSL_ACTIVATE_PCT, PARTIAL_TP1_PCT, PARTIAL_TP2_PCT
+        BOND_TP_PCT      = float(os.environ.get("BOND_TP_PCT",     "12"))
+        BOND_SL_PCT      = float(os.environ.get("BOND_SL_PCT",     "6"))
+        BOND_STALE_SECS  = int(os.environ.get("BOND_STALE_SECS",   "75"))
+        BOND_MAX_SECS    = int(os.environ.get("BOND_MAX_SECS",      "240"))
+        TSL_ACTIVATE_PCT = float(os.environ.get("TSL_ACTIVATE_PCT", "7"))
+        PARTIAL_TP1_PCT  = float(os.environ.get("PARTIAL_TP1_PCT",  "7"))
+        PARTIAL_TP2_PCT  = float(os.environ.get("PARTIAL_TP2_PCT",  "10"))
+        log("ok", f"Slow-and-steady profile applied: TP={BOND_TP_PCT}% SL={BOND_SL_PCT}% "
+                  f"stale={BOND_STALE_SECS}s max={BOND_MAX_SECS}s TSL@+{TSL_ACTIVATE_PCT}%", "TUNE")
+
 
     # Restore open positions so bot doesn't re-buy after crash/redeploy
     saved_open = redis_load("bot_open_trades")
@@ -1023,12 +1039,12 @@ def auto_tune(history):
         # Tune stale exit based on how long winners actually held
         if bond_wins:
             avg_win_hold_secs = (sum(t.get("hold_m", 2) for t in bond_wins) / len(bond_wins)) * 60
-            BOND_STALE_SECS = max(120, min(300, int(avg_win_hold_secs * 0.7)))
+            BOND_STALE_SECS = max(75, min(300, int(avg_win_hold_secs * 0.7)))
 
         # Tune hard timeout — give it at least as long as average winner
         if bond_wins:
             avg_win_hold_secs = (sum(t.get("hold_m", 2) for t in bond_wins) / len(bond_wins)) * 60
-            BOND_MAX_SECS = max(300, min(600, int(avg_win_hold_secs * 2)))
+            BOND_MAX_SECS = max(180, min(600, int(avg_win_hold_secs * 2)))
 
         # Loosen SL if losses are all from price drop (not stale/timeout)
         sl_losses = [t for t in bond_losses if t.get("result") == "BOND_SL"]
@@ -1289,7 +1305,8 @@ def is_1m_trending_up(pair_address, market=None) -> bool:
         return True
 
 
-_sol_price_cache = (None, 0.0)  # (price, fetched_at) — tuple assignment is atomic in CPython
+_sol_price_cache  = (None, 0.0)  # (price, fetched_at) — tuple assignment is atomic in CPython
+_sol_change5m_cache = (None, 0.0)  # (change5m_pct, fetched_at)
 _SOL_PRICE_TTL   = 30  # seconds — SOL price doesn't move >0.1% in 30s at normal volatility
 
 _BIRDEYE_TTL    = 15  # seconds — shorter TTL than SOL cache; used for token prices too
@@ -1322,7 +1339,7 @@ def get_birdeye_price(mint):
     return None
 
 def get_sol_price():
-    global _sol_price_cache
+    global _sol_price_cache, _sol_change5m_cache
     cached_price, cached_ts = _sol_price_cache
     if cached_price and time.time() - cached_ts < _SOL_PRICE_TTL:
         return cached_price
@@ -1336,6 +1353,9 @@ def get_sol_price():
             price = float(pairs[0].get("priceUsd", 0))
             if price > 0:
                 _sol_price_cache = (price, time.time())
+                chg5m = pairs[0].get("priceChange", {}).get("m5")
+                if chg5m is not None:
+                    _sol_change5m_cache = (float(chg5m), time.time())
                 return price
     except Exception:
         pass
@@ -1357,6 +1377,12 @@ def get_sol_price():
         pass
     # Return stale cache rather than None — stale SOL price beats a failed bond price calc
     return cached_price
+
+def get_sol_5m_change():
+    change, ts = _sol_change5m_cache
+    if change is not None and time.time() - ts < 120:
+        return change
+    return None
 
 # ── JUPITER PRICE IMPACT ────────────────────────────────────────
 _jup_impact_cache = {}   # mint -> (timestamp, impact_pct)
@@ -3008,6 +3034,9 @@ def _eval_coin(coin):
             _log_scan(symbol, mint, bond, _sig_pre, "dev", 2, "SERIAL BUNDLER")
             return None
         rug = run_rugcheck(mint)
+        if rug is None and RUGCHECK_REQUIRED:
+            _log_scan(symbol, mint, bond, _sig_pre, "rug", 2, "RUGCHECK TIMEOUT")
+            return None
         if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
             return {"action": "blacklist", "mint": mint}
         if rug and rug.get("is_bundled"):
@@ -3231,6 +3260,13 @@ def scanner_loop():
                 time.sleep(5)
                 continue
 
+            # SOL momentum gate — meme coins dump 3× harder than SOL in freefall
+            _sol_chg = get_sol_5m_change()
+            if _sol_chg is not None and _sol_chg < -4:
+                log("warn", f"SOL 5m drop {_sol_chg:.1f}% — pausing scan (meme dump risk)", "SCAN")
+                time.sleep(30)
+                continue
+
             # Weekly Monday 7am retune — run in background thread, never block scanner
             if TUNE_PAUSED_UNTIL > 0 and time.time() >= TUNE_PAUSED_UNTIL:
                 TUNE_PAUSED_UNTIL = _next_monday_7am()  # reset first so loop can't re-fire
@@ -3299,6 +3335,9 @@ def scanner_loop():
                 ])
                 if social_count < MIN_SOCIALS:
                     _log_scan(symbol, mint, bond, social_count, "social", 0, f"ONLY {social_count}/{MIN_SOCIALS} SOCIALS")
+                    continue
+                if coin.get("replies", 0) < MIN_REPLIES:
+                    _log_scan(symbol, mint, bond, social_count, "rep", 0, f"ONLY {coin.get('replies', 0)} REPLIES")
                     continue
                 n_social += 1
                 last_trade = coin.get("last_trade", 0)
