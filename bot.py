@@ -150,6 +150,7 @@ PARTIAL_TP2_PCT  = float(os.environ.get("PARTIAL_TP2_PCT",  "10"))
 # Bundle mode: "avoid" or "ride"
 BUNDLE_MODE       = os.environ.get("BUNDLE_MODE", "avoid").lower()
 RUGCHECK_REQUIRED = os.environ.get("RUGCHECK_REQUIRED", "true").lower() == "true"  # skip coin if rugcheck times out
+RUGCHECK_API_KEY  = os.environ.get("RUGCHECK_API_KEY", "")  # rugcheck.xyz JWT — higher rate limits
 BUNDLE_RIDE_TP = float(os.environ.get("BUNDLE_RIDE_TP", "88"))
 
 # USDC profit lock
@@ -1444,7 +1445,8 @@ def run_rugcheck(mint):
     if hit and now - hit[0] < _CACHE_TTL:
         return hit[1]
     try:
-        res   = _session.get(f"https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary", timeout=10)
+        hdrs  = {"Authorization": f"Bearer {RUGCHECK_API_KEY}"} if RUGCHECK_API_KEY else {}
+        res   = _session.get(f"https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary", headers=hdrs, timeout=10)
         data  = res.json()
         risks = [r.get("name", "").lower() for r in data.get("risks", [])]
         result = {
