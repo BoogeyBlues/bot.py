@@ -180,10 +180,8 @@ PINNED_WALLETS = [
     # add verified wallets here — mirror exact USD size, use bot's own TP/SL/exits
 ]
 # Fast wallets — skip ALL safety filters, exit before the wallet does (tight TP/SL)
-FAST_WALLETS = [
-    "CyaE1VxvBrahnPWkqm5VsdCvyS2QmNht2UFrKJHga54o",
-    "5t9xBNuDdGTGpjaPTx6hKd7sdRJbvtKS8Mhq6qVbo8Qz",
-]
+# Add wallets via TRACKED_WALLETS env var in Railway; hardcoded list intentionally empty
+FAST_WALLETS = []
 FAST_TP_PCT       = float(os.environ.get("FAST_TP_PCT",       "8"))
 FAST_SL_PCT       = float(os.environ.get("FAST_SL_PCT",       "10"))
 FAST_MAX_SECS     = int(os.environ.get("FAST_MAX_SECS",       "90"))
