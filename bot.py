@@ -167,31 +167,19 @@ JUP_PRICE_V3_URL       = "https://api.jup.ag/price/v3/price"
 JUP_IMPACT_MAX_PCT     = float(os.environ.get("JUP_IMPACT_MAX_PCT",     "2.0"))  # tighter — only liquid entries
 JUP_SIGNAL_REFRESH_SECS= int(os.environ.get("JUP_SIGNAL_REFRESH_SECS", "120"))
 
-# Copy trading via GMGN smart wallets
-COPY_TRADE        = os.environ.get("COPY_TRADE", "false").lower() == "true"
-COPY_WINRATE_MIN  = float(os.environ.get("COPY_WINRATE_MIN",  "65"))  # was 60 — only elite wallets
-COPY_WINRATE_MAX  = float(os.environ.get("COPY_WINRATE_MAX",  "99"))
-COPY_MAX_WALLETS  = int(os.environ.get("COPY_MAX_WALLETS",    "5"))
+# Copy trading — manually tracked wallets via TRACKED_WALLETS env var (set in Railway)
+COPY_TRADE        = os.environ.get("COPY_TRADE", "true").lower() == "true"
 COPY_MAX_AGE_SECS    = int(os.environ.get("COPY_MAX_AGE_SECS",    "120"))   # ignore trades older than 2 min
 COPY_MIN_WHALE_USD   = float(os.environ.get("COPY_MIN_WHALE_USD",  "100"))  # skip if whale spent <$100 (test nibbles)
-# Manually tracked wallets — comma-separated Solana addresses; merged with GMGN auto-discovered wallets
+# Manually tracked wallets — comma-separated Solana addresses in Railway TRACKED_WALLETS env var
 TRACKED_WALLETS   = [w.strip() for w in os.environ.get("TRACKED_WALLETS", "").split(",") if w.strip()]
 # Pinned wallets — always monitored, mirror their exact USD trade size, use bot's own TP/SL/exits
 PINNED_WALLETS = [
-    # add verified wallets here — mirror exact USD size, use bot's own TP/SL/exits
+    # add verified wallets here
 ]
-# Fast wallets — skip ALL safety filters, exit before the wallet does (tight TP/SL)
-# Add wallets via TRACKED_WALLETS env var in Railway; hardcoded list intentionally empty
-FAST_WALLETS = []
-FAST_TP_PCT       = float(os.environ.get("FAST_TP_PCT",       "8"))
-FAST_SL_PCT       = float(os.environ.get("FAST_SL_PCT",       "10"))
-FAST_MAX_SECS     = int(os.environ.get("FAST_MAX_SECS",       "90"))
-COPY_REFRESH_MINS = int(os.environ.get("COPY_REFRESH_MINS",  "60"))   # refresh wallet list hourly
-COPY_TP_PCT       = float(os.environ.get("COPY_TP_PCT",       "30"))  # matched to bond — 15% SL was negative EV at <43% WR
-COPY_SL_PCT       = float(os.environ.get("COPY_SL_PCT",        "8"))  # matched to bond — break-even WR now 21% not 43%
-COPY_MAX_SECS     = int(os.environ.get("COPY_MAX_SECS",       "180"))
-GMGN_RANK         = "https://gmgn.ai/defi/quotation/v1/rank/sol/wallets/7d"
-GMGN_ACTIVITY     = "https://gmgn.ai/defi/quotation/v1/wallet_activity/sol"
+COPY_TP_PCT       = float(os.environ.get("COPY_TP_PCT",  "12"))  # slow-and-steady: 12% TP
+COPY_SL_PCT       = float(os.environ.get("COPY_SL_PCT",   "6"))  # 6% SL — matches bond runner
+COPY_MAX_SECS     = int(os.environ.get("COPY_MAX_SECS",  "240"))
 GMGN_API_KEY       = os.environ.get("GMGN_API_KEY", "")
 GMGN_TOP_HOLDERS   = "https://gmgn.ai/defi/quotation/v1/tokens/top_holders/sol"
 GMGN_CREATED_TOKENS= "https://gmgn.ai/defi/quotation/v1/portfolio/sol"
@@ -310,11 +298,8 @@ _daily_lock       = threading.Lock()
 # Weekly tracking
 _week_start_date  = ""
 _week_day_logs    = []     # one entry per day: {date, trades, wins, losses, pnl, start_cap, end_cap}
-_copy_wallets     = []   # [{address, winrate}]
-_copy_wallet_time = 0.0
 _copied_mints     = {}   # mint -> timestamp, to avoid double-copy
 _copy_lock        = threading.Lock()
-_gmgn_backoff     = 0    # seconds to wait before retrying GMGN rank
 _sold_mints       = {}   # mint -> timestamp, cooldown after selling to prevent re-buy
 _webhook_queue    = deque(maxlen=500)  # Helius push events: (wallet_info_dict, act_dict)
 _helius_wh_id     = ""                 # registered Helius webhook ID (persisted to Redis)
@@ -2695,53 +2680,6 @@ def monitor_loop():
             log("warn", f"Monitor loop: {e}")
 
 # ── COPY TRADING ─────────────────────────────────────────────────
-def fetch_smart_wallets():
-    global _copy_wallets, _copy_wallet_time, _gmgn_backoff
-    if _gmgn_backoff > 0:
-        if time.time() < _gmgn_backoff:
-            return
-        _gmgn_backoff = 0
-    headers = {
-        "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-        "Accept":          "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer":         "https://gmgn.ai/",
-        "Origin":          "https://gmgn.ai",
-    }
-    try:
-        res = _session.get(
-            GMGN_RANK,
-            params={"orderby": "winrate", "direction": "desc", "limit": 100},
-            headers=headers,
-            timeout=12
-        )
-        if res.status_code == 403:
-            _gmgn_backoff = time.time() + 600   # back off 10 min on 403 (Railway IPs rotate)
-            log("warn", "GMGN rank blocked (403) — will retry in 10min", "COPY")
-            return
-        if res.status_code != 200:
-            log("warn", f"GMGN rank {res.status_code}", "COPY")
-            return
-        rank_list = res.json().get("data", {}).get("rank", [])
-        qualified = []
-        for w in rank_list:
-            wr_raw = float(w.get("winrate", 0) or 0)
-            wr     = wr_raw * 100 if wr_raw <= 1 else wr_raw  # handle 0-1 or 0-100 format
-            addr   = w.get("address", "")
-            if addr and COPY_WINRATE_MIN <= wr < COPY_WINRATE_MAX:
-                qualified.append({"address": addr, "winrate": round(wr, 1)})
-        qualified = sorted(qualified, key=lambda x: x["winrate"], reverse=True)[:COPY_MAX_WALLETS]
-        with _copy_lock:
-            _copy_wallets     = qualified
-            _copy_wallet_time = time.time()
-        log("ok", f"Tracking {len(qualified)} wallets | WR {COPY_WINRATE_MIN}-{COPY_WINRATE_MAX}%", "COPY")
-        for w in qualified:
-            log("info", f"  {w['address'][:8]}... WR:{w['winrate']}%", "COPY")
-        # Re-register webhook so new wallet addresses are included
-        threading.Thread(target=_register_helius_webhook, daemon=True).start()
-    except Exception as e:
-        log("warn", f"fetch_smart_wallets: {e}", "COPY")
-
 def _parse_helius_enhanced_tx(tx, wallet_addr):
     """Parse one Helius enhanced tx object into a buy-event dict.
     Returns None if the tx is not a pump.fun buy into wallet_addr."""
@@ -2790,11 +2728,8 @@ def _helius_wallet_buys(addr):
 
 def _all_tracked_addrs():
     """Return set of all wallet addresses currently being tracked for copy trading."""
-    with _copy_lock:
-        addrs = {w["address"] for w in _copy_wallets}
-    addrs.update(TRACKED_WALLETS)
+    addrs = set(TRACKED_WALLETS)
     addrs.update(PINNED_WALLETS)
-    addrs.update(FAST_WALLETS)
     return addrs
 
 def _register_helius_webhook():
@@ -2943,17 +2878,11 @@ def _process_copy_act(w, act, source="POLL"):
 
 def copy_trade_loop():
     time.sleep(15)
-    fetch_smart_wallets()
     while scan_active:
         try:
             if BOT_PAUSED or _pause_until > time.time():
                 time.sleep(5)
                 continue
-            # Refresh wallet list every hour (or retry after backoff expires)
-            with _copy_lock:
-                stale = time.time() - _copy_wallet_time > COPY_REFRESH_MINS * 60
-            if stale or (_gmgn_backoff > 0 and time.time() >= _gmgn_backoff):
-                fetch_smart_wallets()
 
             with _copy_lock:
                 now = time.time()
@@ -2976,22 +2905,12 @@ def copy_trade_loop():
             if drained:
                 log("info", f"Drained {drained} webhook event(s)", "PUSH")
 
-            # ── Polling fallback — catches anything missed by webhook ──
-            with _copy_lock:
-                wallets = list(_copy_wallets)
-            tracked_addrs = {w["address"] for w in wallets}
+            # ── Poll TRACKED_WALLETS and PINNED_WALLETS ──
+            wallets = []
             for addr in TRACKED_WALLETS:
-                if addr not in tracked_addrs:
-                    tracked_addrs.add(addr)
-                    wallets.append({"address": addr, "winrate": 100.0})
+                wallets.append({"address": addr, "winrate": 100.0})
             for addr in PINNED_WALLETS:
-                if addr not in tracked_addrs:
-                    tracked_addrs.add(addr)
-                    wallets.append({"address": addr, "winrate": 100.0, "pinned": True})
-            for addr in FAST_WALLETS:
-                if addr not in tracked_addrs:
-                    tracked_addrs.add(addr)
-                    wallets.append({"address": addr, "winrate": 100.0, "fast": True})
+                wallets.append({"address": addr, "winrate": 100.0, "pinned": True})
 
             if not wallets:
                 time.sleep(60)
@@ -5686,14 +5605,11 @@ def helius_webhook():
             payload = [payload]
 
         # Build addr→wallet_info lookup from all tracked sources
-        with _copy_lock:
-            addr_map = {w["address"].lower(): w for w in _copy_wallets}
+        addr_map = {}
         for addr in TRACKED_WALLETS:
             addr_map.setdefault(addr.lower(), {"address": addr, "winrate": 100.0})
         for addr in PINNED_WALLETS:
             addr_map.setdefault(addr.lower(), {"address": addr, "winrate": 100.0, "pinned": True})
-        for addr in FAST_WALLETS:
-            addr_map.setdefault(addr.lower(), {"address": addr, "winrate": 100.0, "fast": True})
 
         enqueued = 0
         for tx in payload:
@@ -7647,20 +7563,18 @@ async function testTelegram() {{
 @app.route("/wallets", methods=["GET"])
 def wallets_status():
     """Shows which wallets are being tracked — use this to confirm TRACKED_WALLETS is set correctly."""
-    with _copy_lock:
-        discovered = list(_copy_wallets)
+    discovered = []
     return jsonify({
         "tracked_wallets": {
             "count":     len(TRACKED_WALLETS),
             "addresses": TRACKED_WALLETS,
             "hint":      "Set TRACKED_WALLETS=addr1,addr2,addr3 in Railway env vars for THIS service (sniper bot)",
         },
-        "gmgn_discovered": {
-            "count":     len(discovered),
-            "wallets":   [{"address": w["address"], "winrate": w["winrate"]} for w in discovered],
-            "status":    "OK" if discovered else "No wallets fetched yet — GMGN rank may be rate-limited",
+        "pinned_wallets": {
+            "count":     len(PINNED_WALLETS),
+            "addresses": PINNED_WALLETS,
         },
-        "total_watching": len(TRACKED_WALLETS) + len(discovered),
+        "total_watching": len(TRACKED_WALLETS) + len(PINNED_WALLETS),
         "copy_trade_on":  COPY_TRADE,
     })
 
@@ -9201,7 +9115,7 @@ if __name__ == "__main__":
         _cap = capital
     _pct, _limit = _cap_tier(_cap)
     log("ok", f"Capital: ${_cap:.2f} | Trade size: {_pct*100:.0f}% (${trade_size():.2f}) | Daily cap: {_limit} trades | Max daily loss: {MAX_DAILY_LOSS_PCT:.0f}%")
-    log("ok", f"Copy trade: {'ON' if COPY_TRADE else 'OFF'} | WR {COPY_WINRATE_MIN}-{COPY_WINRATE_MAX}% | top {COPY_MAX_WALLETS} wallets")
+    log("ok", f"Copy trade: {'ON' if COPY_TRADE else 'OFF'} | tracking {len(TRACKED_WALLETS)} wallet(s) | TP {COPY_TP_PCT}% SL {COPY_SL_PCT}%")
     if TRACKED_WALLETS:
         log("ok", f"Tracked wallets ({len(TRACKED_WALLETS)}): {', '.join(w[:8]+'...' for w in TRACKED_WALLETS)}")
     else:
