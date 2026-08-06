@@ -1,15 +1,21 @@
-# Project Memory — Leverage Bot (drift_bot.py)
+# Project Memory
 
-## Repo
-- **boogeyblues/bot.py** — branch `claude/pumpfun-sniper-bot-dVuGg`
-- **NEVER** touch `main` branch — it runs `bot.py` (PumpFun sniper), separate service
-- All drift_bot.py changes push to `claude/pumpfun-sniper-bot-dVuGg` only
+## Repo — TWO BOTS, STRICT BRANCH SEPARATION
+- **boogeyblues/bot.py** repo contains two completely separate bots
+- **NEVER** commit `bot.py` changes to `claude/pumpfun-sniper-bot-dVuGg`
+- **NEVER** commit `drift_bot.py` changes to `main`
 
 ## Two Bots in One Repo
-| File | What it is | Branch |
-|---|---|---|
-| `bot.py` | PumpFun sniper | `main` |
-| `drift_bot.py` | Leverage/perps bot (Jupiter) | `claude/pumpfun-sniper-bot-dVuGg` |
+| File | What it is | Branch | Deployed on |
+|---|---|---|---|
+| `bot.py` | PumpFun sniper (memecoin) | `main` | Railway (production) |
+| `drift_bot.py` | Leverage/perps bot (Jupiter) | `claude/pumpfun-sniper-bot-dVuGg` | separate Railway service |
+
+## Rules
+- Any task touching `bot.py` → checkout `main`, commit, push `main`
+- Any task touching `drift_bot.py` → checkout `claude/pumpfun-sniper-bot-dVuGg`, commit, push that branch
+- Never mix files from both bots in the same commit
+- Check `git branch --show-current` before every commit
 
 ## Completed This Session
 - `DRIFT_EXCHANGE` default → `"jupiter"` (Drift Protocol is shut down)
