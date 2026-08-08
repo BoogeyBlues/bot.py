@@ -203,7 +203,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 NTFY_TOPIC       = os.environ.get("NTFY_TOPIC", "")
 
 # Social / quality gates
-MIN_REPLIES      = int(os.environ.get("MIN_REPLIES",      "5"))   # 5+ replies = real community, not ghost coin
+MIN_REPLIES      = int(os.environ.get("MIN_REPLIES",      "2"))   # 2+ replies = some engagement; bond % (57%+) is the real momentum proof
 MIN_SOCIALS      = int(os.environ.get("MIN_SOCIALS",       "2"))   # need Twitter + Telegram minimum
 MIN_LIQ          = float(os.environ.get("MIN_LIQ",        "500"))
 MIN_VOL_5M       = float(os.environ.get("MIN_VOL_5M",      "500"))  # 5-min volume gate; bonding-curve coins (liq=0) use $100 floor, Raydium coins use full threshold
@@ -2956,7 +2956,8 @@ def _eval_coin(coin):
             _log_scan(symbol, mint, bond, _sig_pre, "dev", 2, "SERIAL BUNDLER")
             return None
         rug = run_rugcheck(mint)
-        if rug is None and RUGCHECK_REQUIRED:
+        if rug is None and RUGCHECK_REQUIRED and RUGCHECK_API_KEY:
+            # Only hard-skip on timeout when authenticated (paid tier is reliable; free tier times out often)
             _log_scan(symbol, mint, bond, _sig_pre, "rug", 2, "RUGCHECK TIMEOUT")
             return None
         if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
