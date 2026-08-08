@@ -704,10 +704,6 @@ def daily_limit_reached():
             log("info", f"Outside trading window (UTC {TRADE_START_HOUR:02d}–{TRADE_END_HOUR:02d}) — resumes {next_open}")
             return True
     with _daily_lock:
-        if _pause_until > time.time():
-            resume = time.strftime("%H:%M", time.localtime(_pause_until))
-            log("info", f"Cooling down after {_daily_losses} losses — resumes {resume}")
-            return True
         # Capital-tiered daily trade cap
         limit = daily_trade_limit()
         if _daily_trades >= limit:
@@ -723,31 +719,10 @@ def daily_limit_reached():
                     f"Done for today. Auto-resumes at midnight."
                 )
             return True
-        # Max daily loss guard — stop if down >MAX_DAILY_LOSS_PCT% from today's open.
-        # Use total equity (available capital + amounts reserved in open trades) so that
-        # open positions don't falsely trigger the guard while they're still running.
-        if _day_start_cap > 0:
-            with capital_lock:
-                cap_now = capital
-            with trades_lock:
-                open_reserved = sum(t.get("amount", 0) for t in open_trades.values()
-                                    if not t.get("_unverified"))
-            equity_now = cap_now + open_reserved
-            loss_pct = (_day_start_cap - equity_now) / _day_start_cap * 100
-            if loss_pct >= MAX_DAILY_LOSS_PCT:
-                if not _daily_cap_notified:
-                    _daily_cap_notified = True
-                    log("warn", f"Daily loss guard: down {loss_pct:.1f}% today (${_day_start_cap - equity_now:.2f}) — stopping until tomorrow")
-                    notify(
-                        "🛑 Loss Guard",
-                        f"Down {loss_pct:.1f}% today (${_day_start_cap - equity_now:.2f})\n"
-                        f"Stopping to protect capital. Auto-resumes at midnight."
-                    )
-                return True
         return False
 
 def record_daily_trade(won):
-    global _daily_wins, _daily_losses, _pause_until, _consecutive_losses
+    global _daily_wins, _daily_losses, _consecutive_losses
     trigger_retune = False
     with _daily_lock:
         if won:
@@ -756,18 +731,15 @@ def record_daily_trade(won):
         else:
             _daily_losses      += 1
             _consecutive_losses += 1
-            # Loss-streak guard: DAILY_LOSS_MAX *consecutive* losses → short cooldown + retune
-            if _consecutive_losses >= DAILY_LOSS_MAX and _pause_until <= time.time():
-                _pause_until   = time.time() + LOSS_COOLDOWN_HRS * 3600
+            if _consecutive_losses >= DAILY_LOSS_MAX:
                 trigger_retune = True
                 log("warn",
-                    f"Loss streak {_consecutive_losses} consecutive — pausing {LOSS_COOLDOWN_HRS*60:.0f}min, retuning",
+                    f"Loss streak {_consecutive_losses} consecutive — retuning strategies",
                     "RISK")
         log("ok" if won else "info",
             f"Daily: {_daily_trades} trades | {_daily_wins}W {_daily_losses}L | streak:{_consecutive_losses}L")
     if trigger_retune:
-        notify(f"⚠️ Loss Streak {_consecutive_losses}",
-               f"Pausing {LOSS_COOLDOWN_HRS*60:.0f} min and retuning strategies.")
+        notify(f"⚠️ Loss Streak {_consecutive_losses}", "Retuning strategies — continuing to trade.")
         threading.Thread(target=_retune_strategies, daemon=True).start()
     _save_daily_state()
 
@@ -815,12 +787,10 @@ def _retune_strategies():
                 history = json.load(f)
         if len(history) >= 5:
             auto_tune(history)
-            resume_str = time.strftime("%H:%M", time.localtime(_pause_until))
             notify("✅ Strategy Retuned",
                    f"New bond entry: {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%\n"
                    f"Stale exit: {BOND_STALE_SECS}s\n"
-                   f"Spike TP: {SPIKE_TP_PCT}%\n"
-                   f"Trading resumes at {resume_str}.")
+                   f"Spike TP: {SPIKE_TP_PCT}%")
         else:
             log("info", "Not enough history yet to retune — will use defaults", "TUNE")
     except Exception as e:
@@ -1276,19 +1246,68 @@ def get_market_data(mint):
     except Exception:
         return None
 
+_1m_candle_cache = {}  # pair_address -> (fetched_at, candles_list)
+_1M_CANDLE_TTL   = 30  # seconds
+
+def _fetch_1m_candles(pair_address: str, n: int = 8):
+    """Fetch last n 1m candles from DexScreener. Returns list of {open, close} or []."""
+    now = int(time.time())
+    cached = _1m_candle_cache.get(pair_address)
+    if cached and now - cached[0] < _1M_CANDLE_TTL:
+        return cached[1]
+    try:
+        from_ms = (now - n * 2 * 60) * 1000  # 2× window for safety
+        r = _session.get(
+            f"https://api.dexscreener.com/latest/dex/candles/solana/{pair_address}",
+            params={"from": from_ms, "to": now * 1000, "resolution": 1},
+            timeout=5,
+        )
+        if r.status_code != 200:
+            _1m_candle_cache[pair_address] = (now, [])
+            return []
+        raw = r.json()
+        raw_list = raw.get("candles", raw) if isinstance(raw, dict) else raw
+        candles = []
+        for c in (raw_list or []):
+            ts = c.get("time") or c.get("timestamp") or c.get("t") or 0
+            if ts > 1e12:
+                ts = int(ts / 1000)
+            cl = float(c.get("close", c.get("c", 0)) or 0)
+            op = float(c.get("open",  c.get("o", 0)) or 0)
+            if cl > 0:
+                candles.append({"time": int(ts), "open": op, "close": cl})
+        candles.sort(key=lambda c: c["time"])
+        result = candles[-n:] if candles else []
+        _1m_candle_cache[pair_address] = (now, result)
+        return result
+    except Exception:
+        _1m_candle_cache[pair_address] = (now, [])
+        return []
+
 def is_1m_trending_up(pair_address, market=None) -> bool:
     """
-    Returns True if price momentum is up or neutral.
-    Uses change5m from already-fetched market data — DexScreener has no candles endpoint.
-    Fails open (True) when no data so API downtime doesn't block all entries.
-    Pass market dict from get_market_data to avoid a redundant fetch.
+    Returns True if 1m momentum is up or neutral.
+    For pre-grad coins (no pair_address): uses change5m as proxy.
+    For graduated coins: checks last 5 real 1m candles from DexScreener.
+    Fails open (True) when data is missing so API downtime doesn't block entries.
     """
     try:
-        if market is None:
-            return True  # caller should pass market — don't do a free fetch here
-        change5m = float(market.get("change5m", 0) or 0)
-        # Allow slight dips (-2%) to avoid filtering out brief consolidations
-        return change5m >= -2.0
+        if not pair_address:
+            change5m = float((market or {}).get("change5m", 0) or 0)
+            return change5m >= -2.0
+        candles = _fetch_1m_candles(pair_address, n=6)
+        if len(candles) < 3:
+            return True  # insufficient data — fail open
+        # At least 2 of the last 3 candles must be green (close >= open)
+        last3 = candles[-3:]
+        if sum(1 for c in last3 if c["close"] >= c["open"]) < 2:
+            return False
+        # Price must not have dumped >3% from the 6-candle high
+        peak = max(c["close"] for c in candles)
+        current = candles[-1]["close"]
+        if peak > 0 and (peak - current) / peak * 100 > 3:
+            return False
+        return True
     except Exception:
         return True
 
@@ -3018,6 +3037,9 @@ def _eval_coin(coin):
             return None
         if market.get("change5m", 0) < -8:
             _log_scan(symbol, mint, bond, _sig_pre, "mom", 8, f"5M DOWN {market['change5m']:.1f}%")
+            return None
+        if not is_1m_trending_up(market.get("pair_address", ""), market):
+            _log_scan(symbol, mint, bond, _sig_pre, "1m", 9, "1M BEARISH")
             return None
         impact = jup_price_impact(mint, trade_size())
         if impact > JUP_IMPACT_MAX_PCT:
