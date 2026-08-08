@@ -4,6 +4,23 @@ from flask import Flask, jsonify, request as flask_request
 
 app = Flask(__name__)
 
+@app.errorhandler(500)
+def _handle_500(e):
+    import traceback
+    return f"<pre style='color:#aaa;font-size:12px'>{traceback.format_exc()[:1000]}</pre>", 500
+
+def _auth_required():
+    secret = os.environ.get("API_SECRET", "")
+    if not secret:
+        return None
+    provided = (
+        flask_request.headers.get("X-API-Key", "") or
+        flask_request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    )
+    if provided != secret:
+        return jsonify({"error": "Unauthorized"}), 401
+    return None
+
 # ── CONFIG ────────────────────────────────────────────────────────
 DRIFT_PAPER_MODE   = os.environ.get("DRIFT_PAPER_MODE", "true").lower() != "false"
 # IBKR connection — only used in live mode (DRIFT_PAPER_MODE=false)
@@ -27,7 +44,7 @@ TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
 # NOTE: GMGN is used exclusively by bot.py (PumpFun sniper). This bot does NOT call GMGN.
 STARTING_CAPITAL   = float(os.environ.get("DRIFT_STARTING_CAPITAL", "100"))
 PROFIT_GOAL        = float(os.environ.get("DRIFT_PROFIT_GOAL", "10000"))
-DRIFT_TP_USD       = float(os.environ.get("DRIFT_TP_USD",    str(DRIFT_MARGIN_USD * 2)))
+DRIFT_TP_USD       = float(os.environ.get("DRIFT_TP_USD",    str(round(DRIFT_MARGIN_USD * 0.08, 2))))  # ~8% of margin; set 0 to disable dollar TP
 DRIFT_SL_MARGIN_PCT = float(os.environ.get("DRIFT_SL_MARGIN_PCT", "0.75"))
 DRIFT_TUNE_EVERY   = int(os.environ.get("DRIFT_TUNE_EVERY",   "3"))
 DRIFT_COMPOUND_PCT = float(os.environ.get("DRIFT_COMPOUND_PCT", "0.10"))
@@ -378,7 +395,7 @@ def _supertrend(vals, period=10, mult=3.0):
         else:
             up[i] = b_up if b_up < up[i-1] or prices[i] > up[i-1] else up[i-1]
             dn[i] = b_dn if b_dn > dn[i-1] or prices[i] < dn[i-1] else dn[i-1]
-            bull[i] = (prices[i+1] >= dn[i-1]) if bull[i-1] else (prices[i+1] > up[i-1])
+            bull[i] = (prices[i+1] >= dn[i]) if bull[i-1] else (prices[i+1] > up[i])
 
     lvl = dn[-1] if bull[-1] else up[-1]
     return bull[-1], lvl
@@ -421,6 +438,16 @@ def _get_5m_trend(market):
     except Exception:
         _5m_trend_cache[market] = {"trend": None, "ts": now}
         return None
+
+def _refresh_5m_trends_loop():
+    """Background thread: refresh 5m trend cache for all active markets every 55s."""
+    while True:
+        for market in list(DRIFT_MARKETS):
+            try:
+                _get_5m_trend(market)
+            except Exception:
+                pass
+        time.sleep(55)
 
 
 def _get_liquidity_factor(market):
@@ -1392,7 +1419,7 @@ function renderDeck() {{
     const pc=t.pnl>=0?'var(--green)':'var(--red)';
     const badge=t.pnl>=0?'win':'loss';
     const card=document.createElement('div'); card.className='trade-card'; card.id='tc'+i;
-    card.innerHTML=`<div><div class="tc-pair">${{t.market}}-PERP</div><div style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--muted);letter-spacing:1px">${{t.ts.slice(-5)}}</div></div>
+    card.innerHTML=`<div><div class="tc-pair">${{t.market}}</div><div style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--muted);letter-spacing:1px">${{t.ts.slice(-5)}}</div></div>
       <div style="display:flex;align-items:center"><span class="tc-pnl" style="color:${{pc}}">${{t.pnl>=0?'+':''}}$${{t.pnl.toFixed(2)}}</span><span class="tc-badge ${{badge}}">${{badge.toUpperCase()}}</span></div>`;
     wrap.appendChild(card);
     const pos=STACK[i];
@@ -1532,7 +1559,7 @@ function buildCard(market,pos) {{
   const side=pos.side||'long';
   const pnl=pos.pnl||0;
   return `<div class="pos-info">
-    <div class="pos-pair">${{market}}-PERP</div>
+    <div class="pos-pair">${{market}}</div>
     <div class="pos-dir ${{side}}">● ${{side.toUpperCase()}}</div>
   </div>
   <div class="chart-zone" onclick="openDrawer('${{market}}')">
@@ -1609,7 +1636,7 @@ function openDrawer(market){{
   const hist=_priceHists[market]||[entry];
   const last=hist[hist.length-1]||entry;
   const drift=(last-entry)/(entry||1)*100;
-  document.getElementById('dSym').textContent=market+'-PERP';
+  document.getElementById('dSym').textContent=market;
   document.getElementById('dSub').textContent=(pos.side||'long').toUpperCase()+' · $'+entry.toFixed(4)+' entry';
   document.getElementById('dEntry').textContent='$'+entry.toFixed(4);
   document.getElementById('dCur').textContent='$'+last.toFixed(4);
@@ -1802,7 +1829,7 @@ def trades_page():
             s_color   = "#00ff88" if t["side"] == "long" else "#ff3355"
             s_sign    = "+" if win else ""
             reason    = t.get("reason", "?")
-            badge_cls = "rbadge-tp" if reason == "TP" else "rbadge-sl"
+            badge_cls = "rbadge-tp" if reason.startswith("TP") else "rbadge-sl"
             dur_m     = round(t.get("duration_s", 0) / 60, 1)
             rows += (
                 f'<tr>'
@@ -2093,6 +2120,8 @@ def notify_api():
 
 @app.route("/api/manual-long/<market>", methods=["POST"])
 def manual_long(market):
+    err = _auth_required()
+    if err: return err
     market = market.upper()
     price  = get_market_price(market)
     if not price:
@@ -2110,6 +2139,8 @@ def manual_long(market):
 
 @app.route("/api/manual-short/<market>", methods=["POST"])
 def manual_short(market):
+    err = _auth_required()
+    if err: return err
     market = market.upper()
     price  = get_market_price(market)
     if not price:
@@ -2142,6 +2173,8 @@ def ping_telegram():
 
 @app.route("/api/close/<market>", methods=["POST"])
 def manual_close(market):
+    err = _auth_required()
+    if err: return err
     market = market.upper()
     with _state_lock:
         if market not in _positions:
@@ -2160,6 +2193,8 @@ def manual_close(market):
 
 @app.route("/api/reset-capital", methods=["POST"])
 def reset_capital():
+    err = _auth_required()
+    if err: return err
     global _capital, _trades, _daily_pnl, _profit_secured, _positions
     global _market_stats, _market_params, _milestones_hit, _total_trades_ever
     if not DRIFT_PAPER_MODE:
@@ -2259,6 +2294,10 @@ def run_position_price_updater():
                 elif (updated["side"] == "long" and price <= updated["sl"]) or \
                      (updated["side"] == "short" and price >= updated["sl"]):
                     close_position(market, price, "SL%")
+                elif DRIFT_MAX_HOLD_MINUTES > 0:
+                    held_mins = (time.time() - updated.get("opened_at", time.time())) / 60
+                    if held_mins >= DRIFT_MAX_HOLD_MINUTES:
+                        close_position(market, price, f"TIMEOUT{DRIFT_MAX_HOLD_MINUTES}m")
         except Exception as e:
             log("warn", f"Price updater error: {e}")
         time.sleep(1)
@@ -2763,7 +2802,7 @@ function cardHTML(market, p) {{
   const pc   = pnl >= 0 ? '#00ff88' : '#ff3355';
   return `
     <div class="pos-top">
-      <span class="pos-sym">${{market}}-PERP</span>
+      <span class="pos-sym">${{market}}</span>
       <span class="pos-side" style="background:${{sc}}20;color:${{sc}}">${{side.toUpperCase()}}</span>
       <span class="pos-pnl" id="pp-${{market}}" style="color:${{pc}}">${{pnl>=0?'+':''}}$${{pnl.toFixed(2)}}</span>
     </div>
@@ -2810,7 +2849,7 @@ function openMDrawer(market) {{
   const hist  = _mPriceHists[market] || [entry];
   const last  = hist[hist.length - 1] || entry;
   const drift = (last - entry) / (entry || 1) * 100;
-  document.getElementById('mDSym').textContent  = market + '-PERP';
+  document.getElementById('mDSym').textContent  = market;
   document.getElementById('mDSub').textContent  = (pos.side||'long').toUpperCase() + ' · $' + entry.toFixed(4) + ' entry';
   document.getElementById('mDEntry').textContent = '$' + entry.toFixed(4);
   document.getElementById('mDCur').textContent   = '$' + last.toFixed(4);
@@ -2911,6 +2950,9 @@ if __name__ == "__main__":
 
     t_prices = threading.Thread(target=run_position_price_updater, daemon=True)
     t_prices.start()
+
+    t_5m = threading.Thread(target=_refresh_5m_trends_loop, daemon=True)
+    t_5m.start()
 
     notify(
         f"*{DRIFT_BOT_NAME}* started\n"
