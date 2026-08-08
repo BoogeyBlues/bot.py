@@ -1131,14 +1131,16 @@ def home():
         f'<div class="milestone" id="ms-{m}"><div class="milestone-dot"></div>${m:,}</div>'
         for m in MILESTONES
     )
-    market_rows = "".join(
-        f'<div class="market-row">'
-        f'<div class="market-label">{mk}<span class="market-sub">{_IB_CONTRACT_META.get(mk, {{}}).get("label", "")}</span></div>'
-        f'<button class="trade-btn btn-long" onclick="manualTrade(\'{mk}\',\'long\')">LONG</button>'
-        f'<button class="trade-btn btn-short" onclick="manualTrade(\'{mk}\',\'short\')">SHORT</button>'
-        f'</div>'
-        for mk in markets_list
-    )
+    market_rows = ""
+    for mk in markets_list:
+        mk_label = (_IB_CONTRACT_META.get(mk) or {}).get("label", "")
+        market_rows += (
+            f'<div class="market-row">'
+            f'<div class="market-label">{mk}<span class="market-sub">{mk_label}</span></div>'
+            f'<button class="trade-btn btn-long" onclick="manualTrade(\'{mk}\',\'long\')">LONG</button>'
+            f'<button class="trade-btn btn-short" onclick="manualTrade(\'{mk}\',\'short\')">SHORT</button>'
+            f'</div>'
+        )
 
     return f"""<!DOCTYPE html>
 <html lang="en">
