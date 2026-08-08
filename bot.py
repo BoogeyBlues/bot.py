@@ -335,6 +335,12 @@ _jup_organic_mints     = set()   # toporganicscore/5m — real volume, not bots
 _jup_toptraded_mints   = set()   # toptraded/5m — highest volume tokens
 _jup_verified_mints    = set()   # Jupiter-verified token list
 _jup_token_cache       = {}      # mint -> (timestamp, token_data) for audit checks
+# Birdeye discovery — any Solana token with momentum, any age, any DEX
+_birdeye_trending_mints = set()
+_birdeye_lock           = threading.Lock()
+_birdeye_signal_time    = 0.0
+# DexScreener organic trending — top gainers by actual 5m price momentum (not paid)
+_dsc_organic_mints      = set()
 _jup_signal_time       = 0.0
 _jup_lock              = threading.Lock()
 _JUP_TOKEN_CACHE_TTL   = 120
@@ -1593,6 +1599,43 @@ def run_signal_refresh_loop():
         _refresh_gmgn_signals()
         time.sleep(300)
 
+def _refresh_birdeye_trending():
+    """Fetch top moving tokens from Birdeye — any Solana token, any age, any DEX."""
+    global _birdeye_trending_mints, _birdeye_signal_time
+    if not BIRDEYE_API_KEY:
+        return
+    try:
+        r = _session.get(
+            "https://public-api.birdeye.so/defi/token_trending",
+            params={"sort_by": "volume24hUSD", "sort_type": "desc", "offset": 0, "limit": 50},
+            headers={"X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana"},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            log("warn", f"Birdeye trending {r.status_code}", "BIRDEYE")
+            return
+        payload = r.json()
+        items = payload.get("data") or {}
+        if isinstance(items, dict):
+            items = items.get("items", items.get("tokens", items.get("data", [])))
+        mints = set()
+        for item in (items or []):
+            addr = item.get("address") or item.get("mint") or ""
+            if addr:
+                mints.add(addr)
+        with _birdeye_lock:
+            _birdeye_trending_mints = mints
+            _birdeye_signal_time    = time.time()
+        log("info", f"Birdeye trending: {len(mints)} tokens", "BIRDEYE")
+    except Exception as e:
+        log("warn", f"Birdeye trending error: {e}", "BIRDEYE")
+
+def run_birdeye_refresh_loop():
+    """Background thread: refresh Birdeye trending every 60 seconds."""
+    while True:
+        _refresh_birdeye_trending()
+        time.sleep(60)
+
 def gmgn_signal_score(mint) -> int:
     """
     Returns 0-5 signal score for a mint:
@@ -1711,6 +1754,28 @@ def _refresh_dsc_signals():
                 except Exception:
                     pass
 
+        # Organic momentum — top Solana pairs by real 5m price action (not paid)
+        organic = set()
+        try:
+            r8 = _session.get(
+                f"{DSC_BASE}/latest/dex/search",
+                params={"q": "solana"},
+                headers=hdrs,
+                timeout=10,
+            )
+            if r8.status_code == 200:
+                for pair in (r8.json().get("pairs") or []):
+                    if pair.get("chainId", "").lower() != "solana":
+                        continue
+                    pc5  = float((pair.get("priceChange") or {}).get("m5", 0) or 0)
+                    vol5 = float((pair.get("volume") or {}).get("m5", 0) or 0)
+                    if pc5 > 3 and vol5 > 5000:
+                        addr = (pair.get("baseToken") or {}).get("address", "")
+                        if addr:
+                            organic.add(addr)
+        except Exception as oe:
+            log("warn", f"DSC organic fetch: {oe}", "DSC")
+
         with _dsc_lock:
             _dsc_boosted_mints  = boosted
             _dsc_top_mints      = top
@@ -1718,10 +1783,11 @@ def _refresh_dsc_signals():
             _dsc_ad_mints       = ads
             _dsc_takeover_mints = takeovers
             _dsc_meta_mints     = meta_mints
+            _dsc_organic_mints  = organic
             _dsc_signal_time    = time.time()
         log("info",
             f"DSC: boost={len(boosted)} top={len(top)} profiles={len(profiles)} "
-            f"ads={len(ads)} takeovers={len(takeovers)} meta={len(meta_mints)}", "DSC")
+            f"ads={len(ads)} takeovers={len(takeovers)} meta={len(meta_mints)} organic={len(organic)}", "DSC")
     except Exception as e:
         log("warn", f"DSC signal refresh: {e}", "DSC")
 
@@ -3662,6 +3728,115 @@ def scanner_loop():
                 time.sleep(0.5)
             if n_jup_entered:
                 log("info", f"JUP signal scan: entered {n_jup_entered} | pool={len(jup_signal_pool)}")
+
+            # ── Birdeye Trending Scan ─────────────────────────────────
+            # Any Solana token with real volume momentum — any age, any DEX.
+            # This is the full ecosystem feed: a 30-day-old coin heating up
+            # appears here alongside a 5-minute launch. PumpFun-agnostic.
+            with _birdeye_lock:
+                be_pool = list(_birdeye_trending_mints - blacklisted_mints)
+            n_be_entered = 0
+            for be_mint in be_pool:
+                with trades_lock:
+                    if len(open_trades) >= MAX_OPEN:
+                        break
+                    if be_mint in open_trades:
+                        continue
+                with _copy_lock:
+                    if be_mint in _copied_mints:
+                        continue
+                    _be_sold_at = _sold_mints.get(be_mint, 0)
+                if time.time() - _be_sold_at < SOLD_COOLDOWN_SECS:
+                    continue
+                if daily_limit_reached():
+                    break
+                market = get_market_data(be_mint)
+                if not market or market["price"] <= 0:
+                    continue
+                if not is_1m_trending_up(market.get("pair_address", ""), market):
+                    continue
+                rug = run_rugcheck(be_mint)
+                if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
+                    _blacklist_add(be_mint)
+                    continue
+                if gmgn_smart_money_selling(be_mint):
+                    continue
+                if market.get("vol_m5", 0) < MIN_VOL_5M:
+                    continue
+                if market.get("change5m", 0) < -5:
+                    continue
+                impact = jup_price_impact(be_mint, trade_size())
+                if impact > JUP_IMPACT_MAX_PCT:
+                    continue
+                with _copy_lock:
+                    _copied_mints[be_mint] = time.time()
+                be_sym = market.get("symbol") or be_mint[:8]
+                amt    = trade_size()
+                log("ok",
+                    f"BIRDEYE | liq=${market.get('liq',0):.0f} "
+                    f"5m={market.get('change5m',0):+.1f}% vol=${market.get('vol_m5',0):.0f}",
+                    be_sym)
+                notify(f"🦅 BIRDEYE {be_sym}",
+                       f"Birdeye trending entry\nLiq: ${market.get('liq',0):.0f}\n"
+                       f"5m: {market.get('change5m',0):+.1f}%\nAmount: ${amt:.2f}")
+                enter_trade(be_mint, be_sym, market["price"], amt, "birdeye", 0, 0)
+                n_be_entered += 1
+                time.sleep(0.5)
+            if n_be_entered:
+                log("info", f"Birdeye scan: entered {n_be_entered} | pool={len(be_pool)}")
+
+            # ── DexScreener Organic Momentum Scan ────────────────────
+            # Top Solana pairs by real 5m price gain — organic activity,
+            # not paid boosts or ads. Catches any coin on any DEX moving now.
+            with _dsc_lock:
+                dsc_org_pool = list(_dsc_organic_mints - blacklisted_mints)
+            n_org_entered = 0
+            for org_mint in dsc_org_pool:
+                with trades_lock:
+                    if len(open_trades) >= MAX_OPEN:
+                        break
+                    if org_mint in open_trades:
+                        continue
+                with _copy_lock:
+                    if org_mint in _copied_mints:
+                        continue
+                    _org_sold_at = _sold_mints.get(org_mint, 0)
+                if time.time() - _org_sold_at < SOLD_COOLDOWN_SECS:
+                    continue
+                if daily_limit_reached():
+                    break
+                market = get_market_data(org_mint)
+                if not market or market["price"] <= 0:
+                    continue
+                if not is_1m_trending_up(market.get("pair_address", ""), market):
+                    continue
+                rug = run_rugcheck(org_mint)
+                if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
+                    _blacklist_add(org_mint)
+                    continue
+                if gmgn_smart_money_selling(org_mint):
+                    continue
+                if market.get("vol_m5", 0) < MIN_VOL_5M:
+                    continue
+                impact = jup_price_impact(org_mint, trade_size())
+                if impact > JUP_IMPACT_MAX_PCT:
+                    continue
+                with _copy_lock:
+                    _copied_mints[org_mint] = time.time()
+                org_sym = market.get("symbol") or org_mint[:8]
+                amt     = trade_size()
+                log("ok",
+                    f"DSC ORGANIC | liq=${market.get('liq',0):.0f} "
+                    f"5m={market.get('change5m',0):+.1f}% vol=${market.get('vol_m5',0):.0f}",
+                    org_sym)
+                notify(f"📈 ORGANIC {org_sym}",
+                       f"DSC organic momentum\nLiq: ${market.get('liq',0):.0f}\n"
+                       f"5m: {market.get('change5m',0):+.1f}%\nAmount: ${amt:.2f}")
+                enter_trade(org_mint, org_sym, market["price"], amt, "dsc_organic", 0, 0)
+                n_org_entered += 1
+                time.sleep(0.5)
+            if n_org_entered:
+                log("info", f"DSC organic scan: entered {n_org_entered} | pool={len(dsc_org_pool)}")
 
         except Exception as e:
             log("err", f"Scanner: {e}")
@@ -9134,8 +9309,9 @@ if __name__ == "__main__":
             threading.Thread(target=_register_helius_webhook, daemon=True).start()
         t_signals = threading.Thread(target=run_signal_refresh_loop, daemon=True)
         t_signals.start()
-        threading.Thread(target=run_dsc_refresh_loop, daemon=True).start()
-        threading.Thread(target=run_jup_refresh_loop, daemon=True).start()
+        threading.Thread(target=run_dsc_refresh_loop,     daemon=True).start()
+        threading.Thread(target=run_jup_refresh_loop,     daemon=True).start()
+        threading.Thread(target=run_birdeye_refresh_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
     log("ok", "=" * 55)
     log("ok", f"Mode      : {'PAPER' if PAPER_MODE else 'LIVE'}")
