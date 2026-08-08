@@ -105,6 +105,7 @@ _5m_trend_cache    = {}   # market -> {trend, ts} — 5-min candle bias, 60s TTL
 _signal_skip_ts    = {}   # market+reason -> last_log_ts, throttles signal-skip spam
 _liquidity_cache   = {}   # market -> {factor, ts} — liquidity factor cache (always 1.0 for index futures)
 _ph_last_min       = {}   # market -> last minute bucket appended (int(ts/60)); keeps 1 candle/min
+_loss_direction_ts = {}   # market -> {direction -> timestamp} — cooldown after directional loss
 
 _session = requests.Session()
 _session.trust_env = False
@@ -365,6 +366,53 @@ def _calc_rsi(vals, period=14):
         return 100.0
     return 100 - (100 / (1 + gains / losses))
 
+def _calc_adx(vals, period=14):
+    """Average Directional Index — measures trend STRENGTH (not direction).
+    ADX > 20: trending market (signals reliable).
+    ADX < 20: choppy/ranging (skip — Supertrend flips are noise)."""
+    if len(vals) < period * 2 + 1:
+        return None
+    # +DM / -DM from price moves (close-only proxy)
+    plus_dm, minus_dm, tr_list = [], [], []
+    for i in range(1, len(vals)):
+        move = vals[i] - vals[i - 1]
+        plus_dm.append(max(move, 0))
+        minus_dm.append(max(-move, 0))
+        tr_list.append(abs(move))
+    # Wilder-smoothed averages over last `period` bars
+    def _wilder(series, n):
+        if len(series) < n:
+            return None
+        s = sum(series[-n:]) / n
+        for v in series[-n+1:]:
+            s = (s * (n - 1) + v) / n
+        return s
+    atr_w   = _wilder(tr_list, period)
+    pdm_w   = _wilder(plus_dm,  period)
+    mdm_w   = _wilder(minus_dm, period)
+    if not atr_w or atr_w == 0:
+        return None
+    pdi = 100 * pdm_w / atr_w
+    mdi = 100 * mdm_w / atr_w
+    dx  = 100 * abs(pdi - mdi) / (pdi + mdi) if (pdi + mdi) > 0 else 0
+    return dx
+
+def _in_trading_session():
+    """Return True only during regular CME Globex equity-index session hours.
+    Best signals: 9:30 AM – 3:30 PM ET (avoids open-auction noise and
+    end-of-day position squaring). Overnight and pre-market are excluded."""
+    import datetime
+    # ET offset: UTC-5 (EST) or UTC-4 (EDT). Use fixed UTC-5 as conservative
+    # approximation; DST shift is a ~30min edge case, not worth a pytz dependency.
+    et_hour = (datetime.datetime.utcnow().hour - 5) % 24
+    et_min  = datetime.datetime.utcnow().minute
+    weekday = datetime.datetime.utcnow().weekday()  # 0=Mon, 4=Fri, 5=Sat, 6=Sun
+    if weekday >= 5:   # weekend — CME closed
+        return False
+    # 9:30 AM – 3:30 PM ET only
+    et_mins = et_hour * 60 + et_min
+    return (9 * 60 + 30) <= et_mins <= (15 * 60 + 30)
+
 def _supertrend(vals, period=10, mult=3.0):
     """
     Supertrend indicator (ATR-based).
@@ -519,6 +567,13 @@ def get_signal(market):
     atr_pct = atr / cur
     if atr_pct < 0.001:
         _skip_log("low volatility", f"ATR%={atr_pct*100:.3f}")
+        _st_prev[market] = st_bull
+        return None, 0, None
+
+    # ── Regime: trending (not choppy) ─────────────────────────────
+    adx = _calc_adx(vals, 14)
+    if adx is not None and adx < 20:
+        _skip_log("choppy market", f"ADX={adx:.1f}<20")
         _st_prev[market] = st_bull
         return None, 0, None
 
@@ -802,9 +857,11 @@ def close_position(market, exit_price, reason=""):
         if not won:
             # Brief cooldown after a loss — let the market settle before re-entering
             existing_pause = mp.get("paused_until", 0)
-            loss_cooldown = time.time() + 300  # 5 min — was 15, too long with only 3 markets
+            loss_cooldown = time.time() + 300  # 5 min
             if loss_cooldown > existing_pause:
                 mp["paused_until"] = loss_cooldown
+            # Direction-specific cooldown — block same direction for 15 min after SL
+            _loss_direction_ts.setdefault(market, {})[pos["side"]] = time.time()
         global _total_trades_ever
         _total_trades_ever += 1
         trade_count = _total_trades_ever  # use monotonic counter — len(_trades) caps at 200
@@ -986,8 +1043,19 @@ def run_trading_loop():
                         log("info", f"{market} paused until {resume} — skipping", "TUNE")
                         continue
 
+                    # ── Session gate — only trade regular hours ───────
+                    if not _in_trading_session():
+                        continue
+
                     signal, confidence, sig_atr = get_signal(market)
                     if not signal:
+                        continue
+
+                    # ── Direction cooldown after loss ─────────────────
+                    LOSS_COOLDOWN_SECS = 900  # 15 min
+                    _ld = _loss_direction_ts.get(market, {})
+                    if time.time() - _ld.get(signal, 0) < LOSS_COOLDOWN_SECS:
+                        log("info", f"direction cooldown — last {signal} loss <15m ago", market)
                         continue
 
                     # Respect learned long/short bias
