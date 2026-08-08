@@ -180,6 +180,7 @@ PINNED_WALLETS = [
 COPY_TP_PCT       = float(os.environ.get("COPY_TP_PCT",  "12"))  # slow-and-steady: 12% TP
 COPY_SL_PCT       = float(os.environ.get("COPY_SL_PCT",   "6"))  # 6% SL — matches bond runner
 COPY_MAX_SECS     = int(os.environ.get("COPY_MAX_SECS",  "240"))
+COPY_MAX_OPEN     = int(os.environ.get("COPY_MAX_OPEN",   "1"))   # max copy trade slots — bond runner gets the rest
 FAST_TP_PCT       = float(os.environ.get("FAST_TP_PCT",   "12"))  # fallback for any legacy fast-strategy trades
 FAST_SL_PCT       = float(os.environ.get("FAST_SL_PCT",    "6"))
 FAST_MAX_SECS     = int(os.environ.get("FAST_MAX_SECS",   "240"))
@@ -2803,6 +2804,11 @@ def _process_copy_act(w, act, source="POLL"):
             return False
     with trades_lock:
         if mint in open_trades:
+            return False
+        # Reserve bond runner slots — count how many open trades are copy/fast strategy
+        _copy_open = sum(1 for t in open_trades.values() if t.get("strategy") in ("copy", "fast"))
+        if _copy_open >= COPY_MAX_OPEN:
+            log("info", f"COPY SKIP: {_copy_open}/{COPY_MAX_OPEN} copy slots full — reserving for bond runner", symbol)
             return False
     if mint in blacklisted_mints:
         return False
