@@ -93,7 +93,7 @@ _RISK_TIERS = {
 _CAP_TIERS = _RISK_TIERS.get(RISK_LEVEL, _RISK_TIERS["standard"])
 
 MAX_DAILY_LOSS_PCT  = float(os.environ.get("MAX_DAILY_LOSS_PCT",  "40"))  # stop day if down >40% of start capital
-SOLD_COOLDOWN_SECS = int(os.environ.get("SOLD_COOLDOWN_SECS", "1800"))  # 30 min cooldown before re-buying a sold coin
+SOLD_COOLDOWN_SECS = int(os.environ.get("SOLD_COOLDOWN_SECS", "60"))   # 60s cooldown — re-entry on same coin is core to strategy
 
 # Risk limits
 DAILY_LOSS_MAX    = int(os.environ.get("DAILY_LOSS_MAX",  "6"))   # retune after N consecutive losses
@@ -103,7 +103,7 @@ ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # kept for ref
 # Bond Runner strategy — slow & steady profile: fewer trades, quicker exits, tighter risk
 BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "57"))  # 57%+ = confirmed momentum zone
 BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "73"))
-BOND_TP_PCT     = float(os.environ.get("BOND_TP_PCT",    "12"))  # 12% TP — hits more often; partials at +7%/+10%
+BOND_TP_PCT     = float(os.environ.get("BOND_TP_PCT",    "10"))  # 10% TP — always take 10, compound fast
 BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "6"))
 BOND_GRAD_BOND  = float(os.environ.get("BOND_GRAD_BOND", "90"))  # graduation imminent — tighten TSL
 BOND_GRAD_TSL   = float(os.environ.get("BOND_GRAD_TSL",  "3"))   # tight TSL % near graduation
@@ -144,8 +144,8 @@ SHARP_DROP_PCT = float(os.environ.get("SHARP_DROP_PCT", "4"))
 
 # Partial take-profit — scale out to lock gains without killing the run
 # TP1: +7% → sell 30%; TP2: +10% → sell 30% of remaining; final ~49% rides to BOND_TP at +12%
-PARTIAL_TP1_PCT  = float(os.environ.get("PARTIAL_TP1_PCT",  "7"))
-PARTIAL_TP2_PCT  = float(os.environ.get("PARTIAL_TP2_PCT",  "10"))
+PARTIAL_TP1_PCT  = float(os.environ.get("PARTIAL_TP1_PCT",  "99"))  # disabled — clean 10% exit, no early partials
+PARTIAL_TP2_PCT  = float(os.environ.get("PARTIAL_TP2_PCT",  "99"))
 
 # Bundle mode: "avoid" or "ride"
 BUNDLE_MODE       = os.environ.get("BUNDLE_MODE", "avoid").lower()
@@ -168,7 +168,7 @@ JUP_IMPACT_MAX_PCT     = float(os.environ.get("JUP_IMPACT_MAX_PCT",     "2.0")) 
 JUP_SIGNAL_REFRESH_SECS= int(os.environ.get("JUP_SIGNAL_REFRESH_SECS", "120"))
 
 # Copy trading — manually tracked wallets via TRACKED_WALLETS env var (set in Railway)
-COPY_TRADE        = os.environ.get("COPY_TRADE", "true").lower() == "true"
+COPY_TRADE        = os.environ.get("COPY_TRADE", "false").lower() == "true"  # off by default — set true in Railway to re-enable
 COPY_MAX_AGE_SECS    = int(os.environ.get("COPY_MAX_AGE_SECS",    "120"))   # ignore trades older than 2 min
 COPY_MIN_WHALE_USD   = float(os.environ.get("COPY_MIN_WHALE_USD",  "100"))  # skip if whale spent <$100 (test nibbles)
 # Manually tracked wallets — comma-separated Solana addresses in Railway TRACKED_WALLETS env var
@@ -212,7 +212,7 @@ MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "2"))     # ≥2 signa
 MAX_RUG_SCORE    = int(os.environ.get("MAX_RUG_SCORE",    "400"))   # rugcheck score ceiling (higher = riskier)
 
 # General
-MAX_OPEN      = int(os.environ.get("MAX_OPEN",      "3"))   # max 3 concurrent — quality over quantity
+MAX_OPEN      = int(os.environ.get("MAX_OPEN",      "1"))   # 1 at a time — full focus, compound cleanly
 SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "2"))
 
 SOL_RPC         = os.environ.get("SOL_RPC", "https://api.mainnet-beta.solana.com")
@@ -607,13 +607,13 @@ def _load_daily_state():
     # One-time migration: reset aggressive auto-tuned params to slow-and-steady profile
     if s.get("strategy_version", "") != "steady_v1":
         global TSL_ACTIVATE_PCT, PARTIAL_TP1_PCT, PARTIAL_TP2_PCT
-        BOND_TP_PCT      = float(os.environ.get("BOND_TP_PCT",     "12"))
-        BOND_SL_PCT      = float(os.environ.get("BOND_SL_PCT",     "6"))
+        BOND_TP_PCT      = float(os.environ.get("BOND_TP_PCT",     "10"))
+        BOND_SL_PCT      = float(os.environ.get("BOND_SL_PCT",     "5"))
         BOND_STALE_SECS  = int(os.environ.get("BOND_STALE_SECS",   "75"))
         BOND_MAX_SECS    = int(os.environ.get("BOND_MAX_SECS",      "240"))
         TSL_ACTIVATE_PCT = float(os.environ.get("TSL_ACTIVATE_PCT", "7"))
-        PARTIAL_TP1_PCT  = float(os.environ.get("PARTIAL_TP1_PCT",  "7"))
-        PARTIAL_TP2_PCT  = float(os.environ.get("PARTIAL_TP2_PCT",  "10"))
+        PARTIAL_TP1_PCT  = float(os.environ.get("PARTIAL_TP1_PCT",  "99"))
+        PARTIAL_TP2_PCT  = float(os.environ.get("PARTIAL_TP2_PCT",  "99"))
         log("ok", f"Slow-and-steady profile applied: TP={BOND_TP_PCT}% SL={BOND_SL_PCT}% "
                   f"stale={BOND_STALE_SECS}s max={BOND_MAX_SECS}s TSL@+{TSL_ACTIVATE_PCT}%", "TUNE")
 
@@ -1254,6 +1254,59 @@ def get_market_data(mint):
 
 _1m_candle_cache = {}  # pair_address -> (fetched_at, candles_list)
 _1M_CANDLE_TTL   = 30  # seconds
+_5m_candle_cache = {}  # pair_address -> (fetched_at, rsi_float)
+_5M_CANDLE_TTL   = 60  # seconds
+
+def _calc_rsi(closes: list, period: int = 14) -> float:
+    """Wilder RSI from a list of closes. Returns 50 (neutral) if insufficient data."""
+    if len(closes) < period + 1:
+        return 50.0
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        d = closes[i] - closes[i - 1]
+        gains.append(max(d, 0.0))
+        losses.append(max(-d, 0.0))
+    avg_g = sum(gains[-period:]) / period
+    avg_l = sum(losses[-period:]) / period
+    if avg_l == 0:
+        return 100.0
+    return round(100 - 100 / (1 + avg_g / avg_l), 1)
+
+def get_5m_rsi(pair_address: str) -> float:
+    """
+    Fetch 5m candles from DexScreener and compute RSI-14.
+    Returns 50 (neutral/fail-open) when pair_address is missing or API fails.
+    Cached 60s per pair so parallel eval threads share the result.
+    """
+    if not pair_address:
+        return 50.0
+    now = int(time.time())
+    cached = _5m_candle_cache.get(pair_address)
+    if cached and now - cached[0] < _5M_CANDLE_TTL:
+        return cached[1]
+    try:
+        from_ms = (now - 25 * 5 * 60) * 1000  # 25 candles back
+        r = _session.get(
+            f"https://api.dexscreener.com/latest/dex/candles/solana/{pair_address}",
+            params={"from": from_ms, "to": now * 1000, "resolution": 5},
+            timeout=5,
+        )
+        if r.status_code != 200:
+            _5m_candle_cache[pair_address] = (now, 50.0)
+            return 50.0
+        raw = r.json()
+        raw_list = raw.get("candles", raw) if isinstance(raw, dict) else raw
+        closes = []
+        for c in sorted((raw_list or []), key=lambda x: x.get("time", x.get("t", 0))):
+            cl = float(c.get("close", c.get("c", 0)) or 0)
+            if cl > 0:
+                closes.append(cl)
+        rsi = _calc_rsi(closes[-20:])
+        _5m_candle_cache[pair_address] = (now, rsi)
+        return rsi
+    except Exception:
+        _5m_candle_cache[pair_address] = (now, 50.0)
+        return 50.0
 
 def _fetch_1m_candles(pair_address: str, n: int = 8):
     """Fetch last n 1m candles from DexScreener. Returns list of {open, close} or []."""
@@ -2749,6 +2802,16 @@ def _check_one_position(mint):
             if migrate_elapsed >= MIGRATE_MAX_SECS:
                 exit_trade(mint, price, "MIGRATE_TIME", bond); return
 
+        elif strategy in ("birdeye", "dsc_organic", "gmgn_signal"):
+            # Momentum trades: clean 10% take-profit, 5% stop, 10-min time limit.
+            move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
+            if move >= 10:
+                exit_trade(mint, price, f"{strategy.upper()}_TP", bond); return
+            if price <= trade["entry"] * 0.95:
+                exit_trade(mint, price, f"{strategy.upper()}_SL", bond); return
+            if elapsed >= 600:
+                exit_trade(mint, price, f"{strategy.upper()}_TIME", bond); return
+
         pct = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
         tsl_info = f" TSL@{tsl_price:.6f}" if entry_gain_pct >= TSL_ACTIVATE_PCT else ""
         log("info", f"[{strategy}] bond={bond:.1f}% price={pct:+.1f}% peak={entry_gain_pct:+.1f}%{tsl_info} {elapsed/60:.1f}m", symbol)
@@ -3429,6 +3492,11 @@ def scanner_loop():
                         continue
                     if res.get("action") != "trade":
                         continue
+                    # Momentum mode: Birdeye + DSC organic are the primary feeds.
+                    # Bond/trench/spike run here but yield to them — skip so the slot
+                    # stays open for higher-quality momentum entries later in the loop.
+                    if res.get("strategy") in ("bond", "trench", "spike"):
+                        continue
                     with trades_lock:
                         _already_open = res["mint"] in open_trades
                         _slots_full   = len(open_trades) >= MAX_OPEN
@@ -3755,6 +3823,10 @@ def scanner_loop():
                     continue
                 if not is_1m_trending_up(market.get("pair_address", ""), market):
                     continue
+                rsi_5m = get_5m_rsi(market.get("pair_address", ""))
+                if rsi_5m > 70:
+                    log("info", f"BIRDEYE SKIP: 5m RSI {rsi_5m:.0f} overbought — no room left", be_mint[:8])
+                    continue
                 rug = run_rugcheck(be_mint)
                 if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
                     _blacklist_add(be_mint)
@@ -3809,6 +3881,10 @@ def scanner_loop():
                 if not market or market["price"] <= 0:
                     continue
                 if not is_1m_trending_up(market.get("pair_address", ""), market):
+                    continue
+                rsi_5m = get_5m_rsi(market.get("pair_address", ""))
+                if rsi_5m > 70:
+                    log("info", f"DSC ORGANIC SKIP: 5m RSI {rsi_5m:.0f} overbought", org_mint[:8])
                     continue
                 rug = run_rugcheck(org_mint)
                 if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
