@@ -214,6 +214,7 @@ MAX_RUG_SCORE    = int(os.environ.get("MAX_RUG_SCORE",    "400"))   # rugcheck s
 # General
 MAX_OPEN      = int(os.environ.get("MAX_OPEN",      "1"))   # 1 at a time — full focus, compound cleanly
 SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "2"))
+RSI_ENTRY_MAX = float(os.environ.get("RSI_ENTRY_MAX", "80"))  # skip if 5m RSI above this (80 = overbought but still riding)
 
 SOL_RPC         = os.environ.get("SOL_RPC", "https://api.mainnet-beta.solana.com")
 HELIUS_API_KEY        = os.environ.get("HELIUS_API_KEY", "")
@@ -3593,6 +3594,139 @@ def scanner_loop():
                 enter_trade(gmint, gc["symbol"], market["price"], amt, "migrate", 0, 0, raydium=True)
                 time.sleep(0.5)
 
+            # ── Birdeye Trending Scan ─────────────────────────────────
+            # PRIMARY MOMENTUM FEED — runs first so it gets the MAX_OPEN=1 slot.
+            # Any Solana token with real volume momentum — any age, any DEX.
+            with _birdeye_lock:
+                be_pool = list(_birdeye_trending_mints - blacklisted_mints)
+            n_be_entered = 0
+            n_be_skipped = 0
+            for be_mint in be_pool:
+                with trades_lock:
+                    if len(open_trades) >= MAX_OPEN:
+                        break
+                    if be_mint in open_trades:
+                        continue
+                with _copy_lock:
+                    if be_mint in _copied_mints:
+                        continue
+                    _be_sold_at = _sold_mints.get(be_mint, 0)
+                if time.time() - _be_sold_at < SOLD_COOLDOWN_SECS:
+                    continue
+                if daily_limit_reached():
+                    break
+                market = get_market_data(be_mint)
+                if not market or market["price"] <= 0:
+                    # Token not indexed on DexScreener yet — get price directly from Birdeye
+                    be_price = get_birdeye_price(be_mint) if BIRDEYE_API_KEY else 0
+                    if not be_price or be_price <= 0:
+                        n_be_skipped += 1
+                        continue
+                    market = {"price": be_price, "liq": 0, "vol_m5": 0, "change5m": 0, "pair_address": ""}
+                if not is_1m_trending_up(market.get("pair_address", ""), market):
+                    n_be_skipped += 1
+                    continue
+                rsi_5m = get_5m_rsi(market.get("pair_address", ""))
+                if rsi_5m > RSI_ENTRY_MAX:
+                    log("info", f"BIRDEYE SKIP: 5m RSI {rsi_5m:.0f}>{RSI_ENTRY_MAX:.0f} overbought", be_mint[:8])
+                    n_be_skipped += 1
+                    continue
+                rug = run_rugcheck(be_mint)
+                if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
+                    _blacklist_add(be_mint)
+                    continue
+                if gmgn_smart_money_selling(be_mint):
+                    n_be_skipped += 1
+                    continue
+                if market.get("vol_m5", 0) < MIN_VOL_5M:
+                    n_be_skipped += 1
+                    continue
+                if market.get("change5m", 0) < -5:
+                    n_be_skipped += 1
+                    continue
+                impact = jup_price_impact(be_mint, trade_size())
+                if impact > JUP_IMPACT_MAX_PCT:
+                    n_be_skipped += 1
+                    continue
+                with _copy_lock:
+                    _copied_mints[be_mint] = time.time()
+                be_sym = market.get("symbol") or be_mint[:8]
+                amt    = trade_size()
+                log("ok",
+                    f"BIRDEYE | liq=${market.get('liq',0):.0f} "
+                    f"5m={market.get('change5m',0):+.1f}% vol=${market.get('vol_m5',0):.0f} rsi={rsi_5m:.0f}",
+                    be_sym)
+                notify(f"🦅 BIRDEYE {be_sym}",
+                       f"Birdeye trending entry\nLiq: ${market.get('liq',0):.0f}\n"
+                       f"5m: {market.get('change5m',0):+.1f}%\nAmount: ${amt:.2f}")
+                enter_trade(be_mint, be_sym, market["price"], amt, "birdeye", 0, 0)
+                n_be_entered += 1
+                time.sleep(0.5)
+            log("info", f"Birdeye scan: pool={len(be_pool)} entered={n_be_entered} skipped={n_be_skipped}")
+
+            # ── DexScreener Organic Momentum Scan ────────────────────
+            # SECOND FEED — top Solana pairs by real 5m price gain.
+            # Organic activity, not paid boosts. Catches any coin on any DEX moving now.
+            with _dsc_lock:
+                dsc_org_pool = list(_dsc_organic_mints - blacklisted_mints)
+            n_org_entered = 0
+            n_org_skipped = 0
+            for org_mint in dsc_org_pool:
+                with trades_lock:
+                    if len(open_trades) >= MAX_OPEN:
+                        break
+                    if org_mint in open_trades:
+                        continue
+                with _copy_lock:
+                    if org_mint in _copied_mints:
+                        continue
+                    _org_sold_at = _sold_mints.get(org_mint, 0)
+                if time.time() - _org_sold_at < SOLD_COOLDOWN_SECS:
+                    continue
+                if daily_limit_reached():
+                    break
+                market = get_market_data(org_mint)
+                if not market or market["price"] <= 0:
+                    n_org_skipped += 1
+                    continue
+                if not is_1m_trending_up(market.get("pair_address", ""), market):
+                    n_org_skipped += 1
+                    continue
+                rsi_5m = get_5m_rsi(market.get("pair_address", ""))
+                if rsi_5m > RSI_ENTRY_MAX:
+                    log("info", f"DSC ORGANIC SKIP: 5m RSI {rsi_5m:.0f}>{RSI_ENTRY_MAX:.0f} overbought", org_mint[:8])
+                    n_org_skipped += 1
+                    continue
+                rug = run_rugcheck(org_mint)
+                if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
+                    _blacklist_add(org_mint)
+                    continue
+                if gmgn_smart_money_selling(org_mint):
+                    n_org_skipped += 1
+                    continue
+                if market.get("vol_m5", 0) < MIN_VOL_5M:
+                    n_org_skipped += 1
+                    continue
+                impact = jup_price_impact(org_mint, trade_size())
+                if impact > JUP_IMPACT_MAX_PCT:
+                    n_org_skipped += 1
+                    continue
+                with _copy_lock:
+                    _copied_mints[org_mint] = time.time()
+                org_sym = market.get("symbol") or org_mint[:8]
+                amt     = trade_size()
+                log("ok",
+                    f"DSC ORGANIC | liq=${market.get('liq',0):.0f} "
+                    f"5m={market.get('change5m',0):+.1f}% vol=${market.get('vol_m5',0):.0f} rsi={rsi_5m:.0f}",
+                    org_sym)
+                notify(f"📈 ORGANIC {org_sym}",
+                       f"DSC organic momentum\nLiq: ${market.get('liq',0):.0f}\n"
+                       f"5m: {market.get('change5m',0):+.1f}%\nAmount: ${amt:.2f}")
+                enter_trade(org_mint, org_sym, market["price"], amt, "dsc_organic", 0, 0)
+                n_org_entered += 1
+                time.sleep(0.5)
+            log("info", f"DSC organic scan: pool={len(dsc_org_pool)} entered={n_org_entered} skipped={n_org_skipped}")
+
             # ── GMGN Signal Scan ─────────────────────────────────────
             # Enter coins GMGN flags as hot (trending, hot search, SM buy, KOL)
             # even if they aren't in pump.fun's live top-50
@@ -3653,8 +3787,7 @@ def scanner_loop():
                 enter_trade(sig_mint, sig_sym, market["price"], amt, "copy", 0, 0)
                 n_signal_entered += 1
                 time.sleep(0.5)
-            if n_signal_entered:
-                log("info", f"GMGN signal scan: entered {n_signal_entered} | pool={len(signal_mints)}")
+            log("info", f"GMGN signal scan: pool={len(signal_mints)} entered={n_signal_entered}")
 
             # ── DexScreener Boost / Ad / Meta Scan ───────────────────
             # Enter tokens where devs are actively spending money on DSC
@@ -3796,123 +3929,6 @@ def scanner_loop():
                 time.sleep(0.5)
             if n_jup_entered:
                 log("info", f"JUP signal scan: entered {n_jup_entered} | pool={len(jup_signal_pool)}")
-
-            # ── Birdeye Trending Scan ─────────────────────────────────
-            # Any Solana token with real volume momentum — any age, any DEX.
-            # This is the full ecosystem feed: a 30-day-old coin heating up
-            # appears here alongside a 5-minute launch. PumpFun-agnostic.
-            with _birdeye_lock:
-                be_pool = list(_birdeye_trending_mints - blacklisted_mints)
-            n_be_entered = 0
-            for be_mint in be_pool:
-                with trades_lock:
-                    if len(open_trades) >= MAX_OPEN:
-                        break
-                    if be_mint in open_trades:
-                        continue
-                with _copy_lock:
-                    if be_mint in _copied_mints:
-                        continue
-                    _be_sold_at = _sold_mints.get(be_mint, 0)
-                if time.time() - _be_sold_at < SOLD_COOLDOWN_SECS:
-                    continue
-                if daily_limit_reached():
-                    break
-                market = get_market_data(be_mint)
-                if not market or market["price"] <= 0:
-                    continue
-                if not is_1m_trending_up(market.get("pair_address", ""), market):
-                    continue
-                rsi_5m = get_5m_rsi(market.get("pair_address", ""))
-                if rsi_5m > 70:
-                    log("info", f"BIRDEYE SKIP: 5m RSI {rsi_5m:.0f} overbought — no room left", be_mint[:8])
-                    continue
-                rug = run_rugcheck(be_mint)
-                if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
-                    _blacklist_add(be_mint)
-                    continue
-                if gmgn_smart_money_selling(be_mint):
-                    continue
-                if market.get("vol_m5", 0) < MIN_VOL_5M:
-                    continue
-                if market.get("change5m", 0) < -5:
-                    continue
-                impact = jup_price_impact(be_mint, trade_size())
-                if impact > JUP_IMPACT_MAX_PCT:
-                    continue
-                with _copy_lock:
-                    _copied_mints[be_mint] = time.time()
-                be_sym = market.get("symbol") or be_mint[:8]
-                amt    = trade_size()
-                log("ok",
-                    f"BIRDEYE | liq=${market.get('liq',0):.0f} "
-                    f"5m={market.get('change5m',0):+.1f}% vol=${market.get('vol_m5',0):.0f}",
-                    be_sym)
-                notify(f"🦅 BIRDEYE {be_sym}",
-                       f"Birdeye trending entry\nLiq: ${market.get('liq',0):.0f}\n"
-                       f"5m: {market.get('change5m',0):+.1f}%\nAmount: ${amt:.2f}")
-                enter_trade(be_mint, be_sym, market["price"], amt, "birdeye", 0, 0)
-                n_be_entered += 1
-                time.sleep(0.5)
-            if n_be_entered:
-                log("info", f"Birdeye scan: entered {n_be_entered} | pool={len(be_pool)}")
-
-            # ── DexScreener Organic Momentum Scan ────────────────────
-            # Top Solana pairs by real 5m price gain — organic activity,
-            # not paid boosts or ads. Catches any coin on any DEX moving now.
-            with _dsc_lock:
-                dsc_org_pool = list(_dsc_organic_mints - blacklisted_mints)
-            n_org_entered = 0
-            for org_mint in dsc_org_pool:
-                with trades_lock:
-                    if len(open_trades) >= MAX_OPEN:
-                        break
-                    if org_mint in open_trades:
-                        continue
-                with _copy_lock:
-                    if org_mint in _copied_mints:
-                        continue
-                    _org_sold_at = _sold_mints.get(org_mint, 0)
-                if time.time() - _org_sold_at < SOLD_COOLDOWN_SECS:
-                    continue
-                if daily_limit_reached():
-                    break
-                market = get_market_data(org_mint)
-                if not market or market["price"] <= 0:
-                    continue
-                if not is_1m_trending_up(market.get("pair_address", ""), market):
-                    continue
-                rsi_5m = get_5m_rsi(market.get("pair_address", ""))
-                if rsi_5m > 70:
-                    log("info", f"DSC ORGANIC SKIP: 5m RSI {rsi_5m:.0f} overbought", org_mint[:8])
-                    continue
-                rug = run_rugcheck(org_mint)
-                if rug and (rug.get("has_mint_auth") or rug.get("has_freeze_auth")):
-                    _blacklist_add(org_mint)
-                    continue
-                if gmgn_smart_money_selling(org_mint):
-                    continue
-                if market.get("vol_m5", 0) < MIN_VOL_5M:
-                    continue
-                impact = jup_price_impact(org_mint, trade_size())
-                if impact > JUP_IMPACT_MAX_PCT:
-                    continue
-                with _copy_lock:
-                    _copied_mints[org_mint] = time.time()
-                org_sym = market.get("symbol") or org_mint[:8]
-                amt     = trade_size()
-                log("ok",
-                    f"DSC ORGANIC | liq=${market.get('liq',0):.0f} "
-                    f"5m={market.get('change5m',0):+.1f}% vol=${market.get('vol_m5',0):.0f}",
-                    org_sym)
-                notify(f"📈 ORGANIC {org_sym}",
-                       f"DSC organic momentum\nLiq: ${market.get('liq',0):.0f}\n"
-                       f"5m: {market.get('change5m',0):+.1f}%\nAmount: ${amt:.2f}")
-                enter_trade(org_mint, org_sym, market["price"], amt, "dsc_organic", 0, 0)
-                n_org_entered += 1
-                time.sleep(0.5)
-            if n_org_entered:
-                log("info", f"DSC organic scan: entered {n_org_entered} | pool={len(dsc_org_pool)}")
 
         except Exception as e:
             log("err", f"Scanner: {e}")
