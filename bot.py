@@ -508,6 +508,8 @@ def _load_daily_state():
             if os.path.exists(STATE_FILE):
                 with open(STATE_FILE) as f:
                     s = json.load(f)
+            else:
+                s = {}
         except Exception:
             s = {}
     if s:
