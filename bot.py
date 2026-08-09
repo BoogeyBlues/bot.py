@@ -2709,6 +2709,8 @@ def _check_one_position(mint):
             "bond": BOND_SL_PCT, "bundle": BOND_SL_PCT, "trench": TRENCH_SL_PCT,
             "spike": SPIKE_SL_PCT, "copy": COPY_SL_PCT, "fast": FAST_SL_PCT,
             "migrate": MIGRATE_SL_PCT,
+            "gmgn_signal": BOND_SL_PCT, "dsc_signal": BOND_SL_PCT, "jup_signal": BOND_SL_PCT,
+            "birdeye": BOND_SL_PCT, "dsc_organic": BOND_SL_PCT,
         }.get(strategy, BOND_SL_PCT)
         tsl_price = (price_high if entry_gain_pct >= TSL_ACTIVATE_PCT else trade["entry"]) * (1 - _sl_pct / 100)
 
@@ -2805,12 +2807,12 @@ def _check_one_position(mint):
             if migrate_elapsed >= MIGRATE_MAX_SECS:
                 exit_trade(mint, price, "MIGRATE_TIME", bond); return
 
-        elif strategy in ("birdeye", "dsc_organic", "gmgn_signal"):
-            # Momentum trades: clean 10% take-profit, 5% stop, 10-min time limit.
+        elif strategy in ("birdeye", "dsc_organic", "gmgn_signal", "dsc_signal", "jup_signal"):
+            # Momentum trades: configurable TP/SL, 10-min time limit.
             move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
-            if move >= 10:
+            if move >= BOND_TP_PCT:
                 exit_trade(mint, price, f"{strategy.upper()}_TP", bond); return
-            if price <= trade["entry"] * 0.95:
+            if price <= trade["entry"] * (1 - BOND_SL_PCT / 100):
                 exit_trade(mint, price, f"{strategy.upper()}_SL", bond); return
             if elapsed >= 600:
                 exit_trade(mint, price, f"{strategy.upper()}_TIME", bond); return
@@ -2956,7 +2958,7 @@ def _process_copy_act(w, act, source="POLL"):
     with trades_lock:
         if mint in open_trades:
             return False
-        # Reserve bond runner slots — count how many open trades are copy/fast strategy
+        # Reserve bond runner slots — only count real wallet-copy and fast trades
         _copy_open = sum(1 for t in open_trades.values() if t.get("strategy") in ("copy", "fast"))
         if _copy_open >= COPY_MAX_OPEN:
             log("info", f"COPY SKIP: {_copy_open}/{COPY_MAX_OPEN} copy slots full — reserving for bond runner", symbol)
@@ -3786,7 +3788,7 @@ def scanner_loop():
                 amt       = trade_size()
                 log("ok", f"GMGN SIGNAL | liq=${market['liq']:.0f} 5m={market.get('change5m',0):+.1f}% | sig={sig_score}", sig_sym)
                 notify(f"📡 SIGNAL {sig_sym}", f"GMGN signal entry\nLiq: ${market['liq']:.0f}\nSig score: {sig_score}\nAmount: ${amt:.2f}")
-                enter_trade(sig_mint, sig_sym, market["price"], amt, "copy", 0, 0)
+                enter_trade(sig_mint, sig_sym, market["price"], amt, "gmgn_signal", 0, 0)
                 n_signal_entered += 1
                 time.sleep(0.5)
             log("info", f"GMGN signal scan: pool={len(signal_mints)} entered={n_signal_entered}")
@@ -3854,7 +3856,7 @@ def scanner_loop():
                 log("ok", f"DSC {_why} | liq=${market['liq']:.0f} 5m={market.get('change5m',0):+.1f}% | sig={sig_score}", dsc_sym)
                 notify(f"📊 DSC {_why} {dsc_sym}",
                        f"DexScreener signal entry\nLiq: ${market['liq']:.0f}\nSig: {sig_score}\nAmount: ${amt:.2f}")
-                enter_trade(dsc_mint, dsc_sym, market["price"], amt, "copy", 0, 0)
+                enter_trade(dsc_mint, dsc_sym, market["price"], amt, "dsc_signal", 0, 0)
                 n_dsc_entered += 1
                 time.sleep(0.5)
             if n_dsc_entered:
@@ -3926,7 +3928,7 @@ def scanner_loop():
                 log("ok", f"JUP {_why} | liq=${market['liq']:.0f} 5m={market.get('change5m',0):+.1f}% | sig={sig_score}", jup_sym)
                 notify(f"⚡ JUP {_why} {jup_sym}",
                        f"Jupiter signal entry\nLiq: ${market['liq']:.0f}\nSig: {sig_score}\nAmount: ${amt:.2f}")
-                enter_trade(jup_mint, jup_sym, market["price"], amt, "copy", 0, 0)
+                enter_trade(jup_mint, jup_sym, market["price"], amt, "jup_signal", 0, 0)
                 n_jup_entered += 1
                 time.sleep(0.5)
             if n_jup_entered:
@@ -4819,6 +4821,13 @@ def status_api():
     next_tune_str = time.strftime("Mon %b %d · 07:00 UTC", time.gmtime(TUNE_PAUSED_UNTIL)) if TUNE_PAUSED_UNTIL > 0 else "—"
     with usdc_lock:
         locked = usdc_locked
+    with _birdeye_lock:
+        be_pool_size = len(_birdeye_trending_mints)
+    with _dsc_lock:
+        dsc_org_size = len(_dsc_organic_mints)
+    with _signal_lock:
+        gmgn_pool_size = len(_gmgn_sm_signal_mints | _gmgn_surge_mints | _gmgn_kol_mints
+                             | _gmgn_trending_mints | _gmgn_hot_mints)
     return jsonify({
         "capital":      round(cap, 2),
         "paper_mode":   PAPER_MODE,
@@ -4837,6 +4846,11 @@ def status_api():
         "daily_limit":  _cap_tier(cap)[1],
         "today": {"trades": _daily_trades, "wins": _daily_wins, "losses": _daily_losses,
                   "paused_until": time.strftime("%H:%M", time.localtime(_pause_until)) if _pause_until > time.time() else None},
+        "pools": {
+            "birdeye":     be_pool_size,
+            "dsc_organic": dsc_org_size,
+            "gmgn_signal": gmgn_pool_size,
+        },
     })
 
 @app.route("/status", methods=["GET"])
