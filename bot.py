@@ -79,7 +79,7 @@ BOT_NAME          = os.environ.get("BOT_NAME", "Boogey's Treasure Chest")
 BOT_PAUSED        = os.environ.get("BOT_PAUSED", "false").lower() == "true"  # set true in Railway to halt all trading
 
 # Position sizing — capital-tiered (protects small accounts)
-MIN_TRADE         = float(os.environ.get("MIN_TRADE",   "3"))
+MIN_TRADE         = float(os.environ.get("MIN_TRADE",   "2"))
 MAX_TRADE         = float(os.environ.get("MAX_TRADE",   "500"))
 FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "0"))   # 0 = use tiered % sizing
 
@@ -154,7 +154,7 @@ RUGCHECK_API_KEY  = os.environ.get("RUGCHECK_API_KEY", "")  # rugcheck.xyz JWT �
 BUNDLE_RIDE_TP = float(os.environ.get("BUNDLE_RIDE_TP", "88"))
 
 # USDC profit lock
-USDC_LOCK_THRESHOLD = float(os.environ.get("USDC_LOCK_THRESHOLD", "80"))
+USDC_LOCK_THRESHOLD = float(os.environ.get("USDC_LOCK_THRESHOLD", "30"))
 USDC_MINT  = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 WSOL_MINT  = "So11111111111111111111111111111111111111112"
 GMGN_ROUTE = "https://gmgn.ai/defi/router/v1/sol/tx/get_swap_route"
@@ -266,7 +266,7 @@ API_SECRET  = os.environ.get("API_SECRET", "")
 MILESTONES = [100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000]
 
 # ── STATE ────────────────────────────────────────────────────────
-capital           = float(os.environ.get("STARTING_CAPITAL", "100"))
+capital           = float(os.environ.get("STARTING_CAPITAL", "25"))
 STARTING_CAPITAL  = capital  # snapshot of configured start, for UI display
 SOL_ALLOCATED     = float(os.environ.get("SOL_ALLOCATED",     "19.67"))  # SOL wallet funded for trading
 capital_lock      = threading.Lock()
