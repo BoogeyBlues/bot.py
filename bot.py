@@ -162,6 +162,7 @@ GMGN_ROUTE = "https://gmgn.ai/defi/router/v1/sol/tx/get_swap_route"
 # Jupiter APIs (agent-skills suite)
 JUPITER_API_KEY        = os.environ.get("JUPITER_API_KEY", "")
 JUPITER_QUOTE_URL      = "https://api.jup.ag/swap/v1/quote"
+JUPITER_SWAP_URL       = "https://api.jup.ag/swap/v1/swap"
 JUP_TOKENS_URL         = "https://api.jup.ag/tokens/v2"
 JUP_PRICE_V3_URL       = "https://api.jup.ag/price/v3/price"
 JUP_IMPACT_MAX_PCT     = float(os.environ.get("JUP_IMPACT_MAX_PCT",     "2.0"))  # tighter — only liquid entries
@@ -2177,8 +2178,118 @@ def _buy_with_pool(keypair, mint, symbol, sol_amount, pool):
             log("warn", f"Buy attempt on {p} pool: {e}", symbol)
     return None
 
+# ── JUPITER BUY / SELL (momentum tokens on any Solana DEX) ───────
+def _jup_hdrs():
+    h = {"Accept": "application/json", "Content-Type": "application/json"}
+    if JUPITER_API_KEY:
+        h["x-api-key"] = JUPITER_API_KEY
+    return h
+
+def execute_buy_jupiter(mint, symbol, amount):
+    """Buy via Jupiter — works for any Raydium/Orca/Meteora token, not just pump.fun."""
+    if PAPER_MODE:
+        log("ok", f"[PAPER] JUP Buy ${amount:.2f} -> {symbol}", symbol)
+        return "PAPER_TX"
+    try:
+        keypair = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+    except Exception as ke:
+        log("err", f"INVALID PRIVATE KEY: {ke} — check WALLET_PRIVATE_KEY in Railway", symbol)
+        return None
+    sol_price = get_sol_price()
+    if not sol_price:
+        log("err", "Cannot get SOL price — JUP buy aborted", symbol)
+        return None
+    lamports = int((amount / sol_price) * 1_000_000_000)
+    if lamports <= 0:
+        return None
+    try:
+        _rpc = Client(_rpc_endpoints()[0])
+        sol_bal = _rpc.get_balance(Pubkey.from_string(WALLET)).value / 1e9
+        min_sol = amount / sol_price + 0.005
+        if sol_bal < min_sol:
+            log("err", f"LOW SOL: {sol_bal:.4f} available, need {min_sol:.4f} — top up wallet", symbol)
+            return None
+        hdrs = _jup_hdrs()
+        r = _session.get(JUPITER_QUOTE_URL, params={
+            "inputMint": WSOL_MINT, "outputMint": mint,
+            "amount": lamports, "swapMode": "ExactIn",
+            "slippageBps": 100, "restrictIntermediateTokens": "true", "maxAccounts": 64,
+        }, headers=hdrs, timeout=10)
+        if r.status_code != 200:
+            log("err", f"JUP quote {r.status_code}: {r.text[:120]}", symbol)
+            return None
+        r2 = _session.post(JUPITER_SWAP_URL, json={
+            "quoteResponse": r.json(), "userPublicKey": WALLET,
+            "wrapAndUnwrapSol": True, "prioritizationFeeLamports": 5000,
+            "dynamicComputeUnitLimit": True,
+        }, headers=hdrs, timeout=15)
+        if r2.status_code != 200:
+            log("err", f"JUP swap tx {r2.status_code}: {r2.text[:120]}", symbol)
+            return None
+        import base64
+        tx_bytes = base64.b64decode(r2.json()["swapTransaction"])
+        tx  = VersionedTransaction(VersionedTransaction.from_bytes(tx_bytes).message, [keypair])
+        sig = _send_tx(bytes(tx), symbol)
+        if sig:
+            log("ok", f"JUP bought | solscan.io/tx/{sig}", symbol)
+            return sig
+        log("err", "JUP buy: tx broadcast failed", symbol)
+        return None
+    except Exception as e:
+        log("err", f"JUP buy error [{type(e).__name__}]: {e}", symbol)
+        return None
+
+def execute_sell_jupiter(mint, symbol, tokens_estimate):
+    """Sell via Jupiter — fetches actual wallet token balance to avoid amount mismatch."""
+    if PAPER_MODE:
+        log("ok", f"[PAPER] JUP Sell {symbol}", symbol)
+        return "PAPER_TX"
+    try:
+        keypair = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+    except Exception as ke:
+        log("err", f"INVALID PRIVATE KEY: {ke}", symbol)
+        return None
+    try:
+        raw_amount, decimals = _get_token_raw_amount(mint)
+        if raw_amount <= 0:
+            log("warn", f"JUP sell: wallet shows 0 tokens — using estimate", symbol)
+            raw_amount = int(tokens_estimate * (10 ** 6))
+        if raw_amount <= 0:
+            log("err", "JUP sell: zero token amount", symbol)
+            return None
+        hdrs = _jup_hdrs()
+        r = _session.get(JUPITER_QUOTE_URL, params={
+            "inputMint": mint, "outputMint": WSOL_MINT,
+            "amount": raw_amount, "swapMode": "ExactIn", "slippageBps": 200,
+        }, headers=hdrs, timeout=10)
+        if r.status_code != 200:
+            log("err", f"JUP sell quote {r.status_code}: {r.text[:120]}", symbol)
+            return None
+        r2 = _session.post(JUPITER_SWAP_URL, json={
+            "quoteResponse": r.json(), "userPublicKey": WALLET,
+            "wrapAndUnwrapSol": True, "prioritizationFeeLamports": 8000,
+            "dynamicComputeUnitLimit": True,
+        }, headers=hdrs, timeout=15)
+        if r2.status_code != 200:
+            log("err", f"JUP sell swap tx {r2.status_code}: {r2.text[:120]}", symbol)
+            return None
+        import base64
+        tx_bytes = base64.b64decode(r2.json()["swapTransaction"])
+        tx  = VersionedTransaction(VersionedTransaction.from_bytes(tx_bytes).message, [keypair])
+        sig = _send_tx(bytes(tx), symbol)
+        if sig:
+            log("ok", f"JUP sold | solscan.io/tx/{sig}", symbol)
+            return sig
+        log("err", "JUP sell: tx broadcast failed", symbol)
+        return None
+    except Exception as e:
+        log("err", f"JUP sell error [{type(e).__name__}]: {e}", symbol)
+        return None
+
 # ── TRADE EXECUTION ──────────────────────────────────────────────
-def execute_buy(mint, symbol, amount, pump_swap=False, raydium=False):
+def execute_buy(mint, symbol, amount, pump_swap=False, raydium=False, use_jupiter=False):
+    if use_jupiter:
+        return execute_buy_jupiter(mint, symbol, amount)
     if PAPER_MODE:
         log("ok", f"[PAPER] Buy ${amount:.2f} -> {symbol}", symbol)
         return "PAPER_TX"
@@ -2226,7 +2337,9 @@ def execute_buy(mint, symbol, amount, pump_swap=False, raydium=False):
         log("err", f"Buy error [{type(e).__name__}]: {e}", symbol)
         return None
 
-def execute_sell(tokens, mint, symbol, pump_swap=False, raydium=False):
+def execute_sell(tokens, mint, symbol, pump_swap=False, raydium=False, use_jupiter=False):
+    if use_jupiter:
+        return execute_sell_jupiter(mint, symbol, tokens)
     if PAPER_MODE:
         log("ok", f"[PAPER] Sell {symbol}", symbol)
         return "PAPER_TX"
@@ -2302,12 +2415,13 @@ def _partial_exit(mint, price, fraction, label):
         trade["tokens"]            -= tokens_to_sell
         trade["partial_proceeds"]  += proceeds
         trade["partial_tp_done"]   += 1
-        symbol    = trade["symbol"]
-        pump_swap = trade.get("pump_swap", False)
-        raydium   = trade.get("raydium", False)
+        symbol      = trade["symbol"]
+        pump_swap   = trade.get("pump_swap", False)
+        raydium     = trade.get("raydium", False)
+        use_jupiter = trade.get("use_jupiter", False)
 
     # Execute sell FIRST; only credit capital once the transaction is confirmed
-    sell_ok = execute_sell(tokens_to_sell, mint, symbol, pump_swap=pump_swap, raydium=raydium)
+    sell_ok = execute_sell(tokens_to_sell, mint, symbol, pump_swap=pump_swap, raydium=raydium, use_jupiter=use_jupiter)
     if not sell_ok:
         # Revert trade state changes since sell failed
         with trades_lock:
@@ -2353,6 +2467,31 @@ def _check_token_balance(mint):
             continue
     return 0
 
+def _get_token_raw_amount(mint):
+    """Return (raw_integer_units, decimals) for mint in WALLET. (0, 6) on error/not found."""
+    if not WALLET:
+        return 0, 6
+    for rpc_url in _rpc_endpoints():
+        try:
+            resp = _session.post(rpc_url, json={
+                "jsonrpc": "2.0", "id": 1,
+                "method": "getTokenAccountsByOwner",
+                "params": [WALLET, {"mint": mint}, {"encoding": "jsonParsed"}]
+            }, timeout=8)
+            if resp.status_code != 200:
+                continue
+            for acct in resp.json().get("result", {}).get("value", []):
+                tok = (acct.get("account", {}).get("data", {})
+                       .get("parsed", {}).get("info", {}).get("tokenAmount", {}))
+                raw = int(tok.get("amount", "0") or "0")
+                dec = int(tok.get("decimals", 6) or 6)
+                if raw > 0:
+                    return raw, dec
+            return 0, 6
+        except Exception:
+            continue
+    return 0, 6
+
 def _verify_tx_landed(sig, mint, symbol, amount):
     """Background: check wallet token balance. If tokens never arrived, cleanup ghost."""
     for attempt, delay in [(1, 10), (2, 20), (3, 30)]:
@@ -2387,7 +2526,7 @@ def _cleanup_ghost(mint, amount, symbol):
             notify(f"⚠️ Ghost Cleared {symbol}", f"TX failed on-chain. ${amount:.2f} refunded.")
 
 # ── ENTER / EXIT ─────────────────────────────────────────────────
-def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, replies=0, pump_swap=False, raydium=False):
+def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, replies=0, pump_swap=False, raydium=False, use_jupiter=False):
     global capital, _daily_trades
     if BOT_PAUSED or _pause_until > time.time():
         return False
@@ -2423,7 +2562,7 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
     with _daily_lock:
         _daily_trades += 1
 
-    tx = execute_buy(mint, symbol, amount, pump_swap=pump_swap, raydium=raydium)
+    tx = execute_buy(mint, symbol, amount, pump_swap=pump_swap, raydium=raydium, use_jupiter=use_jupiter)
     if not tx:
         # Buy failed — release all reservations
         with trades_lock:
@@ -2453,6 +2592,7 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
             "replies":           replies,
             "pump_swap":         pump_swap,
             "raydium":           raydium,
+            "use_jupiter":       use_jupiter,
             "partial_tp_done":   0,
             "partial_proceeds":  0.0,
             "tx":                tx if tx not in (None, "PAPER_TX") else "",
@@ -2538,7 +2678,8 @@ def exit_trade(mint, price, reason, bond=0):
     # Fire sell immediately — do NOT block waiting for on-chain confirmation
     sell_sig = execute_sell(trade["tokens"], mint, trade["symbol"],
                             pump_swap=trade.get("pump_swap", False),
-                            raydium=trade.get("raydium", False))
+                            raydium=trade.get("raydium", False),
+                            use_jupiter=trade.get("use_jupiter", False))
     if not sell_sig:
         # Couldn't even submit — put position back for retry next tick
         with trades_lock:
@@ -3663,7 +3804,7 @@ def scanner_loop():
                 notify(f"🦅 BIRDEYE {be_sym}",
                        f"Birdeye trending entry\nLiq: ${market.get('liq',0):.0f}\n"
                        f"5m: {market.get('change5m',0):+.1f}%\nAmount: ${amt:.2f}")
-                enter_trade(be_mint, be_sym, market["price"], amt, "birdeye", 0, 0)
+                enter_trade(be_mint, be_sym, market["price"], amt, "birdeye", 0, 0, use_jupiter=True)
                 n_be_entered += 1
                 time.sleep(0.5)
             log("info", f"Birdeye scan: pool={len(be_pool)} entered={n_be_entered} skipped={n_be_skipped}")
@@ -3726,7 +3867,7 @@ def scanner_loop():
                 notify(f"📈 ORGANIC {org_sym}",
                        f"DSC organic momentum\nLiq: ${market.get('liq',0):.0f}\n"
                        f"5m: {market.get('change5m',0):+.1f}%\nAmount: ${amt:.2f}")
-                enter_trade(org_mint, org_sym, market["price"], amt, "dsc_organic", 0, 0)
+                enter_trade(org_mint, org_sym, market["price"], amt, "dsc_organic", 0, 0, use_jupiter=True)
                 n_org_entered += 1
                 time.sleep(0.5)
             log("info", f"DSC organic scan: pool={len(dsc_org_pool)} entered={n_org_entered} skipped={n_org_skipped}")
@@ -3788,7 +3929,7 @@ def scanner_loop():
                 amt       = trade_size()
                 log("ok", f"GMGN SIGNAL | liq=${market['liq']:.0f} 5m={market.get('change5m',0):+.1f}% | sig={sig_score}", sig_sym)
                 notify(f"📡 SIGNAL {sig_sym}", f"GMGN signal entry\nLiq: ${market['liq']:.0f}\nSig score: {sig_score}\nAmount: ${amt:.2f}")
-                enter_trade(sig_mint, sig_sym, market["price"], amt, "gmgn_signal", 0, 0)
+                enter_trade(sig_mint, sig_sym, market["price"], amt, "gmgn_signal", 0, 0, use_jupiter=True)
                 n_signal_entered += 1
                 time.sleep(0.5)
             log("info", f"GMGN signal scan: pool={len(signal_mints)} entered={n_signal_entered}")
@@ -3856,7 +3997,7 @@ def scanner_loop():
                 log("ok", f"DSC {_why} | liq=${market['liq']:.0f} 5m={market.get('change5m',0):+.1f}% | sig={sig_score}", dsc_sym)
                 notify(f"📊 DSC {_why} {dsc_sym}",
                        f"DexScreener signal entry\nLiq: ${market['liq']:.0f}\nSig: {sig_score}\nAmount: ${amt:.2f}")
-                enter_trade(dsc_mint, dsc_sym, market["price"], amt, "dsc_signal", 0, 0)
+                enter_trade(dsc_mint, dsc_sym, market["price"], amt, "dsc_signal", 0, 0, use_jupiter=True)
                 n_dsc_entered += 1
                 time.sleep(0.5)
             if n_dsc_entered:
@@ -3928,7 +4069,7 @@ def scanner_loop():
                 log("ok", f"JUP {_why} | liq=${market['liq']:.0f} 5m={market.get('change5m',0):+.1f}% | sig={sig_score}", jup_sym)
                 notify(f"⚡ JUP {_why} {jup_sym}",
                        f"Jupiter signal entry\nLiq: ${market['liq']:.0f}\nSig: {sig_score}\nAmount: ${amt:.2f}")
-                enter_trade(jup_mint, jup_sym, market["price"], amt, "jup_signal", 0, 0)
+                enter_trade(jup_mint, jup_sym, market["price"], amt, "jup_signal", 0, 0, use_jupiter=True)
                 n_jup_entered += 1
                 time.sleep(0.5)
             if n_jup_entered:
