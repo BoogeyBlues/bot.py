@@ -176,7 +176,10 @@ COPY_MIN_WHALE_USD   = float(os.environ.get("COPY_MIN_WHALE_USD",  "100"))  # sk
 TRACKED_WALLETS   = [w.strip() for w in os.environ.get("TRACKED_WALLETS", "").split(",") if w.strip()]
 # Pinned wallets — always monitored, mirror their exact USD trade size, use bot's own TP/SL/exits
 PINNED_WALLETS = [
-    # add verified wallets here
+    "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump",  # Ansem
+    "CREDBHvVqREBCAxMihzr8D1nepHMr2gmQoZWpmgGmeta",  # Cred
+    "wQFd44Kh6nsrXn49vcu4bpjDCqe18iTGYzTgcWppump",   # Doom
+    "Ha4zQAGVvmvjxAogMhenwYK9HCdfpNs82LTZ4MKTpump",  # Saof
 ]
 COPY_TP_PCT       = float(os.environ.get("COPY_TP_PCT",  "12"))  # slow-and-steady: 12% TP
 COPY_SL_PCT       = float(os.environ.get("COPY_SL_PCT",   "6"))  # 6% SL — matches bond runner
