@@ -209,7 +209,7 @@ NTFY_TOPIC       = os.environ.get("NTFY_TOPIC", "")
 
 # Social / quality gates
 MIN_REPLIES      = int(os.environ.get("MIN_REPLIES",      "2"))   # 2+ replies = some engagement; bond % (57%+) is the real momentum proof
-MIN_SOCIALS      = int(os.environ.get("MIN_SOCIALS",       "2"))   # need Twitter + Telegram minimum
+MIN_SOCIALS      = int(os.environ.get("MIN_SOCIALS",       "1"))   # Twitter or website is enough — telegram not required
 MIN_LIQ          = float(os.environ.get("MIN_LIQ",        "500"))
 MIN_VOL_5M       = float(os.environ.get("MIN_VOL_5M",      "500"))  # 5-min volume gate; bonding-curve coins (liq=0) use $100 floor, Raydium coins use full threshold
 MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "2"))     # ≥2 signal points — 1 confirmation + organic is enough at early bonding stage
@@ -3243,7 +3243,7 @@ def _eval_coin(coin):
     mint   = coin["mint"]
     symbol = coin["symbol"]
     bond   = coin.get("bond_pct", 0)
-    _sig_pre = sum([bool(coin.get("twitter")), bool(coin.get("telegram")), bool(coin.get("website"))])
+    _sig_pre = sum([bool(coin.get("twitter")), bool(coin.get("website"))])
 
     # Bond Runner
     if BOND_ENTRY_MIN <= bond <= BOND_ENTRY_MAX:
@@ -3559,7 +3559,6 @@ def scanner_loop():
                 _soc = coin.get("socials") or {}
                 social_count = sum([
                     bool(coin.get("twitter") or coin.get("twitter_url") or _soc.get("twitter")),
-                    bool(coin.get("telegram") or coin.get("telegram_url") or _soc.get("telegram")),
                     bool(coin.get("website") or coin.get("website_url") or _soc.get("website")),
                 ])
                 if social_count < MIN_SOCIALS:
