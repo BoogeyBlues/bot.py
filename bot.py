@@ -6362,6 +6362,27 @@ def _load_pause():
         except (TypeError, ValueError):
             _pause_until = 0.0
 
+@app.route("/admin/clear-stuck", methods=["POST"])
+def admin_clear_stuck():
+    """Clear ghost/stuck open trades and any loss-streak pause — without touching capital or history."""
+    denied = _auth_required()
+    if denied: return denied
+    global BOT_PAUSED
+    cleared = []
+    with trades_lock:
+        for mint, t in list(open_trades.items()):
+            cleared.append(t.get("symbol", mint[:8]))
+            open_trades.pop(mint)
+    redis_save("bot_open_trades", [])
+    BOT_PAUSED = False
+    _persist_pause(0.0)
+    log("ok", f"clear-stuck: removed {len(cleared)} ghost trade(s), pause cleared — scanner unblocked")
+    return jsonify({
+        "ok": True,
+        "cleared_trades": cleared,
+        "msg": f"Cleared {len(cleared)} stuck trade(s) and reset pause. Scanner is now unblocked."
+    })
+
 @app.route("/admin/pause", methods=["POST"])
 def admin_pause():
     denied = _auth_required()
