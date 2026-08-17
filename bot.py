@@ -80,7 +80,7 @@ BOT_PAUSED        = os.environ.get("BOT_PAUSED", "false").lower() == "true"  # s
 
 # Position sizing — capital-tiered (protects small accounts)
 MIN_TRADE         = float(os.environ.get("MIN_TRADE",   "5"))
-MIN_TOKENS_BUY    = float(os.environ.get("MIN_TOKENS_BUY", "1000000"))  # only enter if trade size buys ≥1M tokens — forces early/low-cap entries (0 = off)
+MIN_TOKENS_BUY    = float(os.environ.get("MIN_TOKENS_BUY", "100000"))   # only enter if trade size buys ≥100K tokens (≤ ~$50K mcap) — early but past the rug gauntlet (0 = off)
 EST_FEE_USD       = float(os.environ.get("EST_FEE_USD", "0.15"))        # est. round-trip cost: priority fees + AMM fees; profit targets shift up to clear this
 MAX_TRADE         = float(os.environ.get("MAX_TRADE",   "500"))
 FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "0"))   # 0 = use tiered % sizing
@@ -103,7 +103,7 @@ LOSS_COOLDOWN_HRS = float(os.environ.get("LOSS_COOLDOWN_HRS", "0.083")) # 5-min 
 ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # kept for reference only — retune is weekly (Monday 07:00 UTC)
 
 # Bond Runner strategy — slow & steady profile: fewer trades, quicker exits, tighter risk
-BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "10"))  # 10%+ = early accumulation zone — get in while $5 still buys 1M+ tokens
+BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "57"))  # 57%+ = confirmed momentum zone — coin has survived the early rug window
 BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "73"))
 BOND_TP_PCT     = float(os.environ.get("BOND_TP_PCT",    "10"))  # 10% TP — always take 10, compound fast
 BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "8"))
@@ -214,7 +214,7 @@ MIN_REPLIES      = int(os.environ.get("MIN_REPLIES",      "2"))   # 2+ replies =
 MIN_SOCIALS      = int(os.environ.get("MIN_SOCIALS",       "0"))   # no social requirement — bond % is the quality gate
 MIN_LIQ          = float(os.environ.get("MIN_LIQ",        "500"))
 MIN_VOL_5M       = float(os.environ.get("MIN_VOL_5M",      "250"))  # 5-min volume gate; lowered to catch early momentum entries
-MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "0"))     # 0 — fresh launches aren't in GMGN/DSC signal sets yet; rugcheck/bundler/holder/uptrend gates still apply
+MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "1"))     # ≥1 confirmation (smart money / boost / trending) — filters unconfirmed pumps
 MAX_RUG_SCORE    = int(os.environ.get("MAX_RUG_SCORE",    "400"))   # rugcheck score ceiling (higher = riskier)
 
 # General
@@ -1390,6 +1390,12 @@ def is_1m_trending_up(pair_address, market=None) -> bool:
     Fails open (True) when data is missing so API downtime doesn't block entries.
     """
     try:
+        # Buy-pressure gate: more sellers than buyers in the last 5m = distribution,
+        # not accumulation — entering there is how win rate dies. (0/0 passes: data missing.)
+        if market:
+            buys, sells = int(market.get("buys_m5", 0) or 0), int(market.get("sells_m5", 0) or 0)
+            if sells > buys:
+                return False
         if not pair_address:
             change5m = float((market or {}).get("change5m", 0) or 0)
             return change5m >= -2.0
@@ -2928,7 +2934,7 @@ def _check_one_position(mint):
         fee_pct = (EST_FEE_USD / max(trade.get("amount", MIN_TRADE), 0.01)) * 100
 
         if partial_done == 0 and move_pct >= PARTIAL_TP1_PCT + fee_pct:
-            _partial_exit(mint, price, 0.30, "PARTIAL_TP1")
+            _partial_exit(mint, price, 0.50, "PARTIAL_TP1")
             with trades_lock:
                 if mint not in open_trades or open_trades[mint].get("_exiting"):
                     return
