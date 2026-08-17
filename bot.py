@@ -101,7 +101,7 @@ LOSS_COOLDOWN_HRS = float(os.environ.get("LOSS_COOLDOWN_HRS", "0.083")) # 5-min 
 ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # kept for reference only — retune is weekly (Monday 07:00 UTC)
 
 # Bond Runner strategy — slow & steady profile: fewer trades, quicker exits, tighter risk
-BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "57"))  # 57%+ = confirmed momentum zone
+BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "50"))  # 50%+ = confirmed momentum zone
 BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "73"))
 BOND_TP_PCT     = float(os.environ.get("BOND_TP_PCT",    "10"))  # 10% TP — always take 10, compound fast
 BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "8"))
@@ -209,10 +209,10 @@ NTFY_TOPIC       = os.environ.get("NTFY_TOPIC", "")
 
 # Social / quality gates
 MIN_REPLIES      = int(os.environ.get("MIN_REPLIES",      "2"))   # 2+ replies = some engagement; bond % (57%+) is the real momentum proof
-MIN_SOCIALS      = int(os.environ.get("MIN_SOCIALS",       "1"))   # Twitter or website is enough — telegram not required
+MIN_SOCIALS      = int(os.environ.get("MIN_SOCIALS",       "0"))   # no social requirement — bond % is the quality gate
 MIN_LIQ          = float(os.environ.get("MIN_LIQ",        "500"))
 MIN_VOL_5M       = float(os.environ.get("MIN_VOL_5M",      "250"))  # 5-min volume gate; lowered to catch early momentum entries
-MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "2"))     # ≥2 signal points — 1 confirmation + organic is enough at early bonding stage
+MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "1"))     # ≥1 signal point — bond % is the primary filter; 1 confirmation enough
 MAX_RUG_SCORE    = int(os.environ.get("MAX_RUG_SCORE",    "400"))   # rugcheck score ceiling (higher = riskier)
 
 # General
