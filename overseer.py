@@ -93,23 +93,103 @@ def _extract_json(text):
     s, e = text.find("{"), text.rfind("}") + 1
     return json.loads(text[s:e]) if s != -1 and e > 0 else {}
 
+# ── Supabase fleet reporting ──────────────────────────────────────────────────
+# Shares the heartbeats/events tables with the jupiterbot fleet dashboard.
+# bot_name "overseer" is owned by jupiterbot's monitor, so this service
+# reports itself as "overseer_bp".
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+SB_SELF_NAME = "overseer_bp"
+_SB_ENABLED  = bool(SUPABASE_URL and SUPABASE_KEY and _HAS_REQUESTS)
+
+def _sb_headers(upsert=False):
+    h = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
+    if upsert:
+        h["Prefer"] = "resolution=merge-duplicates"
+    return h
+
+def _sb_heartbeat(bot_name, status, metadata=None):
+    """Upsert a heartbeat row. Never raises — reporting must not break the guardian."""
+    if not _SB_ENABLED:
+        return
+    try:
+        # metadata is a JSON-encoded string, matching how the jupiterbot side
+        # writes (and its dashboards read) these jsonb columns
+        _req.post(
+            f"{SUPABASE_URL}/rest/v1/heartbeats?on_conflict=bot_name",
+            headers=_sb_headers(upsert=True),
+            json={
+                "bot_name": bot_name,
+                "status": status,
+                "last_heartbeat": datetime.now(timezone.utc).isoformat(),
+                "metadata": json.dumps(metadata or {}, default=str),
+            },
+            timeout=6,
+        )
+    except Exception as exc:
+        log("SB", f"heartbeat({bot_name}) failed: {exc}")
+
+def _sb_event(bot_name, event_type, data):
+    """Insert an event row. Never raises."""
+    if not _SB_ENABLED:
+        return
+    try:
+        _req.post(
+            f"{SUPABASE_URL}/rest/v1/events",
+            headers=_sb_headers(),
+            json={
+                "bot_name": bot_name,
+                "event_type": event_type,
+                "data": json.dumps(data, default=str),
+            },
+            timeout=6,
+        )
+    except Exception as exc:
+        log("SB", f"event({bot_name}/{event_type}) failed: {exc}")
+
 # ── 1. Health monitor ─────────────────────────────────────────────────────────
 def _health_loop():
     for bot in BOTS:
         if not bot["health_url"].startswith("http"):
             log("HEALTH", f"WARNING: {bot['name'].upper()}_URL not set — health checks disabled for {bot['name']}")
     time.sleep(30)
+    last_state = {}
     while _running:
+        _sb_heartbeat(SB_SELF_NAME, "online", {"service": "overseer.py"})
         for bot in BOTS:
             url = bot["health_url"]
             if not url.startswith("http") or not _HAS_REQUESTS:
                 continue
+            name = bot["name"]
+            state = "offline"
+            meta = {}
             try:
                 r      = _req.get(url, timeout=10)
                 status = "healthy" if r.status_code == 200 else f"HTTP {r.status_code}"
-                log("HEALTH", f"{bot['name']}: {status}")
+                log("HEALTH", f"{name}: {status}")
+                meta["http_status"] = r.status_code
+                if r.status_code == 200:
+                    state = "online"
+                    try:
+                        j = r.json()
+                        if isinstance(j, dict):
+                            scalars = {k: v for k, v in j.items()
+                                       if isinstance(v, (str, int, float, bool))}
+                            meta.update(dict(list(scalars.items())[:8]))
+                    except Exception:
+                        pass
             except Exception as exc:
-                log("HEALTH", f"{bot['name']}: UNREACHABLE — {exc}")
+                log("HEALTH", f"{name}: UNREACHABLE — {exc}")
+                meta["error"] = str(exc)[:200]
+            _sb_heartbeat(name, state, meta)
+            if last_state.get(name) != state:
+                _sb_event(name, "status_change",
+                          {"from": last_state.get(name), "to": state, **meta})
+                last_state[name] = state
         time.sleep(60)
 
 # ── Wraith scan ───────────────────────────────────────────────────────────────
@@ -360,6 +440,7 @@ def _shutdown(sig, _frame):
     global _running
     _running = False
     log("MGR", "Shutdown received")
+    _sb_heartbeat(SB_SELF_NAME, "offline")
     sys.exit(0)
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -372,6 +453,7 @@ if __name__ == "__main__":
     log("HEALTH",  f"Sniper URL: {os.environ.get('SNIPER_URL', 'NOT SET')}")
     log("HEALTH",  f"Drift URL:  {os.environ.get('DRIFT_URL',  'NOT SET')}")
     log("MGR",    f"Scan {SCAN_INTERVAL}s | Strategy {STRATEGY_INTERVAL}s | Ideas {IDEA_INTERVAL}s")
+    log("SB",     f"Supabase reporting: {'ENABLED as ' + SB_SELF_NAME if _SB_ENABLED else 'disabled — set SUPABASE_URL / SUPABASE_KEY'}")
 
     threading.Thread(target=_health_server, daemon=True).start()
     threading.Thread(target=_health_loop,   daemon=True).start()
