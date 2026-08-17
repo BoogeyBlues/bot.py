@@ -80,6 +80,8 @@ BOT_PAUSED        = os.environ.get("BOT_PAUSED", "false").lower() == "true"  # s
 
 # Position sizing — capital-tiered (protects small accounts)
 MIN_TRADE         = float(os.environ.get("MIN_TRADE",   "5"))
+MIN_TOKENS_BUY    = float(os.environ.get("MIN_TOKENS_BUY", "1000000"))  # only enter if trade size buys ≥1M tokens — forces early/low-cap entries (0 = off)
+EST_FEE_USD       = float(os.environ.get("EST_FEE_USD", "0.15"))        # est. round-trip cost: priority fees + AMM fees; profit targets shift up to clear this
 MAX_TRADE         = float(os.environ.get("MAX_TRADE",   "500"))
 FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "0"))   # 0 = use tiered % sizing
 
@@ -101,7 +103,7 @@ LOSS_COOLDOWN_HRS = float(os.environ.get("LOSS_COOLDOWN_HRS", "0.083")) # 5-min 
 ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # kept for reference only — retune is weekly (Monday 07:00 UTC)
 
 # Bond Runner strategy — slow & steady profile: fewer trades, quicker exits, tighter risk
-BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "50"))  # 50%+ = confirmed momentum zone
+BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "10"))  # 10%+ = early accumulation zone — get in while $5 still buys 1M+ tokens
 BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "73"))
 BOND_TP_PCT     = float(os.environ.get("BOND_TP_PCT",    "10"))  # 10% TP — always take 10, compound fast
 BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "8"))
@@ -212,7 +214,7 @@ MIN_REPLIES      = int(os.environ.get("MIN_REPLIES",      "2"))   # 2+ replies =
 MIN_SOCIALS      = int(os.environ.get("MIN_SOCIALS",       "0"))   # no social requirement — bond % is the quality gate
 MIN_LIQ          = float(os.environ.get("MIN_LIQ",        "500"))
 MIN_VOL_5M       = float(os.environ.get("MIN_VOL_5M",      "250"))  # 5-min volume gate; lowered to catch early momentum entries
-MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "1"))     # ≥1 signal point — bond % is the primary filter; 1 confirmation enough
+MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "0"))     # 0 — fresh launches aren't in GMGN/DSC signal sets yet; rugcheck/bundler/holder/uptrend gates still apply
 MAX_RUG_SCORE    = int(os.environ.get("MAX_RUG_SCORE",    "400"))   # rugcheck score ceiling (higher = riskier)
 
 # General
@@ -2574,6 +2576,16 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
         _log_scan(symbol, mint, bond_entry, 0, "cap", -1, "DAILY CAP / COOLDOWN")
         return False
 
+    # Early-entry gate: trade must buy at least MIN_TOKENS_BUY tokens at current price.
+    # Forces entries while the coin is still cheap/low-cap — skip anything we're late to.
+    # Copy trades exempt (they mirror KOL buys at whatever level the KOL entered).
+    if strategy != "copy" and MIN_TOKENS_BUY > 0 and entry_price > 0:
+        est_tokens = amount / entry_price
+        if est_tokens < MIN_TOKENS_BUY:
+            _log_scan(symbol, mint, bond_entry, 0, "px", -1, f"ONLY {est_tokens/1000:.0f}K TOKENS")
+            log("info", f"SKIP: ${amount:.2f} buys {est_tokens:,.0f} tokens < {MIN_TOKENS_BUY:,.0f} min — too late on this coin", symbol)
+            return False
+
     # Skip recently sold coins — check before any reservation
     with _copy_lock:
         sold_at = _sold_mints.get(mint, 0)
@@ -2911,8 +2923,11 @@ def _check_one_position(mint):
 
         move_pct     = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
         partial_done = trade.get("partial_tp_done", 0)
+        # Fee-aware targets: shift profit triggers up by the round-trip fee cost as a %
+        # of this trade's size, so a "win" is a net win after priority + AMM fees.
+        fee_pct = (EST_FEE_USD / max(trade.get("amount", MIN_TRADE), 0.01)) * 100
 
-        if partial_done == 0 and move_pct >= PARTIAL_TP1_PCT:
+        if partial_done == 0 and move_pct >= PARTIAL_TP1_PCT + fee_pct:
             _partial_exit(mint, price, 0.30, "PARTIAL_TP1")
             with trades_lock:
                 if mint not in open_trades or open_trades[mint].get("_exiting"):
@@ -2920,7 +2935,7 @@ def _check_one_position(mint):
                 trade = dict(open_trades[mint])
             partial_done = 1
 
-        if partial_done == 1 and move_pct >= PARTIAL_TP2_PCT:
+        if partial_done == 1 and move_pct >= PARTIAL_TP2_PCT + fee_pct:
             _partial_exit(mint, price, 0.30, "PARTIAL_TP2")
             with trades_lock:
                 if mint not in open_trades or open_trades[mint].get("_exiting"):
@@ -3002,8 +3017,9 @@ def _check_one_position(mint):
                 exit_trade(mint, price,
                            f"{strategy.upper()}_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else f"{strategy.upper()}_SL",
                            bond); return
-            if elapsed >= 900 and move < BOND_TP_PCT:
-                # Time-limit only kicks a trade that never reached TP — winners ride until the TSL fires
+            if elapsed >= 300 and move < BOND_TP_PCT + fee_pct:
+                # Quick in and out: 5-min limit on trades that never reached net TP —
+                # winners keep riding until the TSL fires
                 exit_trade(mint, price, f"{strategy.upper()}_TIME", bond); return
 
         pct = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
