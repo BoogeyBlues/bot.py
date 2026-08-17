@@ -250,7 +250,7 @@ def _send_tx(tx_bytes, symbol=""):
                 )
                 sig = str(result.value)
                 if sig and len(sig) > 10:
-                    log("ok", f"TX landed via {rpc_name}: {sig[:14]}...", symbol)
+                    log("ok", f"TX sent via {rpc_name}: {sig[:14]}... (verifying on-chain)", symbol)
                     return sig
             except Exception as e:
                 log("warn", f"RPC {rpc_name} attempt {attempt+1}: {e}", symbol)
@@ -2245,7 +2245,7 @@ def execute_buy_jupiter(mint, symbol, amount):
         quote_params = {
             "inputMint": WSOL_MINT, "outputMint": mint,
             "amount": lamports, "swapMode": "ExactIn",
-            "slippageBps": 100, "restrictIntermediateTokens": "true", "maxAccounts": 64,
+            "slippageBps": 300, "restrictIntermediateTokens": "true", "maxAccounts": 64,
         }
         r = _session.get(JUPITER_QUOTE_URL, params=quote_params, headers=hdrs, timeout=10)
         if r.status_code == 401:
@@ -2256,7 +2256,7 @@ def execute_buy_jupiter(mint, symbol, amount):
             return None
         r2 = _session.post(JUPITER_SWAP_URL, json={
             "quoteResponse": r.json(), "userPublicKey": WALLET,
-            "wrapAndUnwrapSol": True, "prioritizationFeeLamports": 5000,
+            "wrapAndUnwrapSol": True, "prioritizationFeeLamports": 100000,
             "dynamicComputeUnitLimit": True,
         }, headers=hdrs, timeout=15)
         if r2.status_code != 200:
@@ -2296,7 +2296,7 @@ def execute_sell_jupiter(mint, symbol, tokens_estimate):
         hdrs = _jup_hdrs()
         sell_params = {
             "inputMint": mint, "outputMint": WSOL_MINT,
-            "amount": raw_amount, "swapMode": "ExactIn", "slippageBps": 200,
+            "amount": raw_amount, "swapMode": "ExactIn", "slippageBps": 500,
         }
         r = _session.get(JUPITER_QUOTE_URL, params=sell_params, headers=hdrs, timeout=10)
         if r.status_code == 401:
@@ -2307,7 +2307,7 @@ def execute_sell_jupiter(mint, symbol, tokens_estimate):
             return None
         r2 = _session.post(JUPITER_SWAP_URL, json={
             "quoteResponse": r.json(), "userPublicKey": WALLET,
-            "wrapAndUnwrapSol": True, "prioritizationFeeLamports": 8000,
+            "wrapAndUnwrapSol": True, "prioritizationFeeLamports": 200000,
             "dynamicComputeUnitLimit": True,
         }, headers=hdrs, timeout=15)
         if r2.status_code != 200:
@@ -2678,7 +2678,8 @@ def _verify_sell_and_retry(sig, trade, mint, clamped_return, reason):
     log("warn", f"Sell tx failed — {bal:.0f} tokens still in wallet — retrying", symbol)
     retry_sig = execute_sell(bal, mint, symbol,
                              pump_swap=trade.get("pump_swap", False),
-                             raydium=trade.get("raydium", False))
+                             raydium=trade.get("raydium", False),
+                             use_jupiter=trade.get("use_jupiter", False))
     if retry_sig and retry_sig != "PAPER_TX":
         log("ok", f"Sell retry submitted: {retry_sig[:12]}... — verifying in 20s", symbol)
         time.sleep(20)
