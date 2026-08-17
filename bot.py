@@ -1259,6 +1259,36 @@ def get_market_data(mint):
     except Exception:
         return None
 
+_jup_price_cache = {}  # mint -> (fetched_at, price)
+_JUP_PRICE_TTL   = 2   # seconds — near-real-time for open-position monitoring
+
+def get_jup_price(mint):
+    """Near-real-time USD price from Jupiter Price API.
+    Much fresher than DexScreener (which lags 30-60s on fast pumps) — and it's
+    the venue we actually sell on, so this is the executable price.
+    Returns 0.0 on failure so callers can fall back to DexScreener."""
+    now = time.time()
+    hit = _jup_price_cache.get(mint)
+    if hit and now - hit[0] < _JUP_PRICE_TTL:
+        return hit[1]
+    for base in ("https://lite-api.jup.ag/price/v3", "https://api.jup.ag/price/v3"):
+        try:
+            hdrs = {"Accept": "application/json"}
+            if "//api.jup.ag" in base and JUPITER_API_KEY:
+                hdrs["x-api-key"] = JUPITER_API_KEY
+            r = _session.get(base, params={"ids": mint}, headers=hdrs, timeout=4)
+            if r.status_code != 200:
+                continue
+            data = r.json() or {}
+            entry = (data.get("data") or data).get(mint) or {}
+            price = float(entry.get("usdPrice", entry.get("price", 0)) or 0)
+            if price > 0:
+                _jup_price_cache[mint] = (now, price)
+                return price
+        except Exception:
+            continue
+    return 0.0
+
 _1m_candle_cache = {}  # pair_address -> (fetched_at, candles_list)
 _1M_CANDLE_TTL   = 30  # seconds
 _5m_candle_cache = {}  # pair_address -> (fetched_at, rsi_float)
@@ -2791,8 +2821,12 @@ def _check_one_position(mint):
                 market = get_market_data(mint)
                 price = market["price"] if market and market["price"] > 0 else trade.get("_last_price", trade["entry"])
         else:
-            market = get_market_data(mint)
-            price = market["price"] if market and market["price"] > 0 else trade.get("_last_price", trade["entry"])
+            # Momentum/graduated tokens: Jupiter price first (near-real-time, matches
+            # the venue we sell on), DexScreener fallback (lags 30-60s on fast pumps)
+            price = get_jup_price(mint)
+            if price <= 0:
+                market = get_market_data(mint)
+                price = market["price"] if market and market["price"] > 0 else trade.get("_last_price", trade["entry"])
 
         with trades_lock:
             if mint not in open_trades or open_trades[mint].get("_exiting"):
@@ -2959,13 +2993,16 @@ def _check_one_position(mint):
                 exit_trade(mint, price, "MIGRATE_TIME", bond); return
 
         elif strategy in ("birdeye", "dsc_organic", "gmgn_signal", "dsc_signal", "jup_signal"):
-            # Momentum trades: configurable TP/SL, 10-min time limit.
+            # Momentum trades: partials already lock 60% by +8%; the remainder rides a
+            # trailing stop (trails BOND_SL_PCT below peak once up TSL_ACTIVATE_PCT)
+            # instead of a hard +10% TP — lets +30% runners actually run.
             move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
-            if move >= BOND_TP_PCT:
-                exit_trade(mint, price, f"{strategy.upper()}_TP", bond); return
-            if price <= trade["entry"] * (1 - BOND_SL_PCT / 100):
-                exit_trade(mint, price, f"{strategy.upper()}_SL", bond); return
-            if elapsed >= 900:
+            if price <= tsl_price:
+                exit_trade(mint, price,
+                           f"{strategy.upper()}_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else f"{strategy.upper()}_SL",
+                           bond); return
+            if elapsed >= 900 and move < BOND_TP_PCT:
+                # Time-limit only kicks a trade that never reached TP — winners ride until the TSL fires
                 exit_trade(mint, price, f"{strategy.upper()}_TIME", bond); return
 
         pct = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
