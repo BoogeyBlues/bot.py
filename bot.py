@@ -1483,21 +1483,20 @@ def jup_price_impact(mint: str, usd_amount: float) -> float:
         hdrs = {"Accept": "application/json"}
         if JUPITER_API_KEY:
             hdrs["x-api-key"] = JUPITER_API_KEY
-        r = _session.get(
-            JUPITER_QUOTE_URL,
-            params={
-                "inputMint":                 WSOL_MINT,
-                "outputMint":                mint,
-                "amount":                    lamports,
-                "swapMode":                  "ExactIn",
-                "slippageBps":               50,
-                "restrictIntermediateTokens":"true",
-                "maxAccounts":               64,
-                "instructionVersion":        "V1",
-            },
-            headers=hdrs,
-            timeout=6
-        )
+        impact_params = {
+            "inputMint":                 WSOL_MINT,
+            "outputMint":                mint,
+            "amount":                    lamports,
+            "swapMode":                  "ExactIn",
+            "slippageBps":               50,
+            "restrictIntermediateTokens":"true",
+            "maxAccounts":               64,
+            "instructionVersion":        "V1",
+        }
+        r = _session.get(JUPITER_QUOTE_URL, params=impact_params, headers=hdrs, timeout=6)
+        if r.status_code == 401:
+            hdrs.pop("x-api-key", None)
+            r = _session.get(JUPITER_QUOTE_URL, params=impact_params, headers=hdrs, timeout=6)
         if r.status_code == 200:
             impact = float(r.json().get("priceImpactPct", 0) or 0)
             _jup_impact_cache[mint] = (now, impact)
@@ -2213,11 +2212,15 @@ def execute_buy_jupiter(mint, symbol, amount):
             log("err", f"LOW SOL: {sol_bal:.4f} available, need {min_sol:.4f} — top up wallet", symbol)
             return None
         hdrs = _jup_hdrs()
-        r = _session.get(JUPITER_QUOTE_URL, params={
+        quote_params = {
             "inputMint": WSOL_MINT, "outputMint": mint,
             "amount": lamports, "swapMode": "ExactIn",
             "slippageBps": 100, "restrictIntermediateTokens": "true", "maxAccounts": 64,
-        }, headers=hdrs, timeout=10)
+        }
+        r = _session.get(JUPITER_QUOTE_URL, params=quote_params, headers=hdrs, timeout=10)
+        if r.status_code == 401:
+            hdrs.pop("x-api-key", None)
+            r = _session.get(JUPITER_QUOTE_URL, params=quote_params, headers=hdrs, timeout=10)
         if r.status_code != 200:
             log("err", f"JUP quote {r.status_code}: {r.text[:120]}", symbol)
             return None
@@ -2261,10 +2264,14 @@ def execute_sell_jupiter(mint, symbol, tokens_estimate):
             log("err", "JUP sell: zero token amount", symbol)
             return None
         hdrs = _jup_hdrs()
-        r = _session.get(JUPITER_QUOTE_URL, params={
+        sell_params = {
             "inputMint": mint, "outputMint": WSOL_MINT,
             "amount": raw_amount, "swapMode": "ExactIn", "slippageBps": 200,
-        }, headers=hdrs, timeout=10)
+        }
+        r = _session.get(JUPITER_QUOTE_URL, params=sell_params, headers=hdrs, timeout=10)
+        if r.status_code == 401:
+            hdrs.pop("x-api-key", None)
+            r = _session.get(JUPITER_QUOTE_URL, params=sell_params, headers=hdrs, timeout=10)
         if r.status_code != 200:
             log("err", f"JUP sell quote {r.status_code}: {r.text[:120]}", symbol)
             return None
