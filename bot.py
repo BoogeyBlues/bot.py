@@ -1828,7 +1828,7 @@ def _refresh_dsc_signals():
                         continue
                     pc5  = float((pair.get("priceChange") or {}).get("m5", 0) or 0)
                     vol5 = float((pair.get("volume") or {}).get("m5", 0) or 0)
-                    if pc5 > 3 and vol5 > 5000:
+                    if pc5 > 3 and vol5 > 1000:
                         addr = (pair.get("baseToken") or {}).get("address", "")
                         if addr:
                             organic.add(addr)
@@ -3023,7 +3023,7 @@ def _helius_wallet_buys(addr):
         res = _session.get(
             f"https://api.helius.xyz/v0/addresses/{addr}/transactions",
             params={"api-key": HELIUS_API_KEY, "type": "SWAP", "limit": 10},
-            timeout=8
+            timeout=15
         )
         if res.status_code != 200:
             log("warn", f"Helius {res.status_code} for {addr[:8]}", "COPY")
@@ -9608,5 +9608,17 @@ if __name__ == "__main__":
     else:
         log("warn", "TRACKED_WALLETS not set — add wallet addresses in Railway env vars")
     log("ok", f"USDC lock : activates at ${USDC_LOCK_THRESHOLD:.0f} capital")
+    # API key audit — show which feeds are live vs dead
+    keys = {
+        "BIRDEYE":  bool(BIRDEYE_API_KEY),
+        "HELIUS":   bool(HELIUS_API_KEY),
+        "GMGN":     bool(GMGN_API_KEY),
+        "RUGCHECK": bool(RUGCHECK_API_KEY),
+        "JUPITER":  bool(JUPITER_API_KEY),
+    }
+    live = [k for k, v in keys.items() if v]
+    dead = [k for k, v in keys.items() if not v]
+    if live:  log("ok",   f"API keys SET   : {', '.join(live)}")
+    if dead:  log("warn", f"API keys MISSING: {', '.join(dead)} — those feeds are disabled")
     log("ok", "=" * 55)
     app.run(host="0.0.0.0", port=port, use_reloader=False)
