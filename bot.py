@@ -104,7 +104,7 @@ ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # kept for ref
 BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "57"))  # 57%+ = confirmed momentum zone
 BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "73"))
 BOND_TP_PCT     = float(os.environ.get("BOND_TP_PCT",    "10"))  # 10% TP — always take 10, compound fast
-BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "6"))
+BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "8"))
 BOND_GRAD_BOND  = float(os.environ.get("BOND_GRAD_BOND", "90"))  # graduation imminent — tighten TSL
 BOND_GRAD_TSL   = float(os.environ.get("BOND_GRAD_TSL",  "3"))   # tight TSL % near graduation
 BOND_MAX_SECS       = int(os.environ.get("BOND_MAX_SECS",       "240"))  # 4 min max — don't babysit slow coins
@@ -144,8 +144,8 @@ SHARP_DROP_PCT = float(os.environ.get("SHARP_DROP_PCT", "4"))
 
 # Partial take-profit — scale out to lock gains without killing the run
 # TP1: +7% → sell 30%; TP2: +10% → sell 30% of remaining; final ~49% rides to BOND_TP at +12%
-PARTIAL_TP1_PCT  = float(os.environ.get("PARTIAL_TP1_PCT",  "99"))  # disabled — clean 10% exit, no early partials
-PARTIAL_TP2_PCT  = float(os.environ.get("PARTIAL_TP2_PCT",  "99"))
+PARTIAL_TP1_PCT  = float(os.environ.get("PARTIAL_TP1_PCT",  "5"))   # sell 30% at +5% — lock early profit
+PARTIAL_TP2_PCT  = float(os.environ.get("PARTIAL_TP2_PCT",  "8"))   # sell 30% more at +8% — remaining 49% rides to full TP
 
 # Bundle mode: "avoid" or "ride"
 BUNDLE_MODE       = os.environ.get("BUNDLE_MODE", "avoid").lower()
@@ -169,7 +169,7 @@ JUP_IMPACT_MAX_PCT     = float(os.environ.get("JUP_IMPACT_MAX_PCT",     "2.0")) 
 JUP_SIGNAL_REFRESH_SECS= int(os.environ.get("JUP_SIGNAL_REFRESH_SECS", "120"))
 
 # Copy trading — manually tracked wallets via TRACKED_WALLETS env var (set in Railway)
-COPY_TRADE        = os.environ.get("COPY_TRADE", "false").lower() == "true"  # off by default — set true in Railway to re-enable
+COPY_TRADE        = os.environ.get("COPY_TRADE", "true").lower() == "true"   # on by default — KOL wallets active
 COPY_MAX_AGE_SECS    = int(os.environ.get("COPY_MAX_AGE_SECS",    "120"))   # ignore trades older than 2 min
 COPY_MIN_WHALE_USD   = float(os.environ.get("COPY_MIN_WHALE_USD",  "100"))  # skip if whale spent <$100 (test nibbles)
 # Manually tracked wallets — comma-separated Solana addresses in Railway TRACKED_WALLETS env var
@@ -211,7 +211,7 @@ NTFY_TOPIC       = os.environ.get("NTFY_TOPIC", "")
 MIN_REPLIES      = int(os.environ.get("MIN_REPLIES",      "2"))   # 2+ replies = some engagement; bond % (57%+) is the real momentum proof
 MIN_SOCIALS      = int(os.environ.get("MIN_SOCIALS",       "1"))   # Twitter or website is enough — telegram not required
 MIN_LIQ          = float(os.environ.get("MIN_LIQ",        "500"))
-MIN_VOL_5M       = float(os.environ.get("MIN_VOL_5M",      "500"))  # 5-min volume gate; bonding-curve coins (liq=0) use $100 floor, Raydium coins use full threshold
+MIN_VOL_5M       = float(os.environ.get("MIN_VOL_5M",      "250"))  # 5-min volume gate; lowered to catch early momentum entries
 MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "2"))     # ≥2 signal points — 1 confirmation + organic is enough at early bonding stage
 MAX_RUG_SCORE    = int(os.environ.get("MAX_RUG_SCORE",    "400"))   # rugcheck score ceiling (higher = riskier)
 
@@ -2958,7 +2958,7 @@ def _check_one_position(mint):
                 exit_trade(mint, price, f"{strategy.upper()}_TP", bond); return
             if price <= trade["entry"] * (1 - BOND_SL_PCT / 100):
                 exit_trade(mint, price, f"{strategy.upper()}_SL", bond); return
-            if elapsed >= 600:
+            if elapsed >= 900:
                 exit_trade(mint, price, f"{strategy.upper()}_TIME", bond); return
 
         pct = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
