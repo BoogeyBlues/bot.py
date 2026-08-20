@@ -3251,9 +3251,11 @@ def _process_copy_act(w, act, source="POLL"):
 
 def copy_trade_loop():
     time.sleep(15)
-    while scan_active:
+    while True:
         try:
-            if BOT_PAUSED or _pause_until > time.time():
+            # scan_active is a pause flag, not a kill switch — thread must survive
+            # halts so /admin resets can revive trading without a redeploy
+            if not scan_active or BOT_PAUSED or _pause_until > time.time():
                 time.sleep(5)
                 continue
 
@@ -3549,10 +3551,11 @@ def scanner_loop():
     log("ok", f"Mode: {'PAPER' if PAPER_MODE else 'LIVE'}")
     log("ok", "=" * 55)
 
-    while scan_active:
+    while True:
         try:
-            # Pause gate — check before doing any work
-            if BOT_PAUSED or _pause_until > time.time():
+            # Pause gate — check before doing any work. scan_active is a pause flag,
+            # not a kill switch: the thread survives halts so /admin resets revive trading.
+            if not scan_active or BOT_PAUSED or _pause_until > time.time():
                 time.sleep(5)
                 continue
 
@@ -6205,18 +6208,27 @@ def admin_reset_daily():
 def admin_reset_capital():
     denied = _auth_required()
     if denied: return denied
-    global capital, usdc_locked
+    global capital, usdc_locked, scan_active, BOT_PAUSED
+    global _day_start_cap, _daily_cap_notified, _consecutive_losses
     with capital_lock:
         capital = STARTING_CAPITAL
     with trades_lock:
         completed_trades.clear()
     with usdc_lock:
         usdc_locked = 0.0
+    with _daily_lock:
+        _day_start_cap      = STARTING_CAPITAL  # stale baseline would trip the daily-loss guard
+        _daily_cap_notified = False
+        _consecutive_losses = 0
+    # Revive trading — a capital halt or pause must not survive an explicit reset
+    scan_active = True
+    BOT_PAUSED  = False
+    _persist_pause(0.0)
     _redis_cmd("DEL", "bot_trades")
     redis_save("bot_trades", [])
     _save_daily_state()
-    log("ok", f"Capital reset to ${STARTING_CAPITAL:.2f} via /admin/reset-capital")
-    return jsonify({"ok": True, "msg": f"Capital reset to ${STARTING_CAPITAL:.2f} and win rate cleared"})
+    log("ok", f"Capital reset to ${STARTING_CAPITAL:.2f} via /admin/reset-capital — scanner revived")
+    return jsonify({"ok": True, "msg": f"Capital reset to ${STARTING_CAPITAL:.2f}, win rate cleared, scanner running"})
 
 @app.route("/set-capital/<float:amount>")
 def set_capital_get(amount):
@@ -6387,9 +6399,9 @@ def clear_ghosts_get():
 def admin_reset_all():
     denied = _auth_required()
     if denied: return denied
-    global capital, usdc_locked
+    global capital, usdc_locked, scan_active, BOT_PAUSED
     global _daily_trades, _daily_wins, _daily_losses, _daily_cap_notified
-    global _day_start_cap
+    global _day_start_cap, _consecutive_losses
 
     with capital_lock:
         capital = STARTING_CAPITAL
@@ -6404,13 +6416,19 @@ def admin_reset_all():
         _daily_losses       = 0
         _daily_cap_notified = False
         _day_start_cap      = STARTING_CAPITAL
+        _consecutive_losses = 0
+
+    # Revive trading — halts and pauses must not survive an explicit full reset
+    scan_active = True
+    BOT_PAUSED  = False
+    _persist_pause(0.0)
 
     _save_daily_state()
     redis_save("bot_trades", [])
     redis_save("bot_open_trades", [])
 
-    log("ok", f"FULL RESET — capital=${STARTING_CAPITAL:.2f}, all history wiped")
-    return jsonify({"ok": True, "msg": f"Full reset — capital restored to ${STARTING_CAPITAL:.2f}. Reload the page."})
+    log("ok", f"FULL RESET — capital=${STARTING_CAPITAL:.2f}, all history wiped, scanner revived")
+    return jsonify({"ok": True, "msg": f"Full reset — capital restored to ${STARTING_CAPITAL:.2f}, scanner running. Reload the page."})
 
 def _persist_pause(until_ts: float):
     """Write pause timestamp to Redis so it survives restarts and daily resets."""
@@ -6434,14 +6452,15 @@ def admin_clear_stuck():
     """Clear ghost/stuck open trades and any loss-streak pause — without touching capital or history."""
     denied = _auth_required()
     if denied: return denied
-    global BOT_PAUSED
+    global BOT_PAUSED, scan_active
     cleared = []
     with trades_lock:
         for mint, t in list(open_trades.items()):
             cleared.append(t.get("symbol", mint[:8]))
             open_trades.pop(mint)
     redis_save("bot_open_trades", [])
-    BOT_PAUSED = False
+    scan_active = True
+    BOT_PAUSED  = False
     _persist_pause(0.0)
     log("ok", f"clear-stuck: removed {len(cleared)} ghost trade(s), pause cleared — scanner unblocked")
     return jsonify({
@@ -6464,9 +6483,10 @@ def admin_pause():
 
 @app.route("/admin/resume", methods=["POST"])
 def admin_resume():
-    global BOT_PAUSED
+    global BOT_PAUSED, scan_active
     denied = _auth_required()
     if denied: return denied
+    scan_active = True   # revive a capital-halt too, not just pauses
     BOT_PAUSED = False   # clear env-var halt so scanner gates pass immediately
     _persist_pause(0.0)
     log("ok", "Scanner RESUMED via admin endpoint")
