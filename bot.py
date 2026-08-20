@@ -146,8 +146,8 @@ SHARP_DROP_PCT = float(os.environ.get("SHARP_DROP_PCT", "4"))
 
 # Partial take-profit — scale out to lock gains without killing the run
 # TP1: +7% → sell 30%; TP2: +10% → sell 30% of remaining; final ~49% rides to BOND_TP at +12%
-PARTIAL_TP1_PCT  = float(os.environ.get("PARTIAL_TP1_PCT",  "5"))   # sell 30% at +5% — lock early profit
-PARTIAL_TP2_PCT  = float(os.environ.get("PARTIAL_TP2_PCT",  "8"))   # sell 30% more at +8% — remaining 49% rides to full TP
+PARTIAL_TP1_PCT  = float(os.environ.get("PARTIAL_TP1_PCT",  "5"))   # sell 50% at net +5% — lock early profit
+PARTIAL_TP2_PCT  = float(os.environ.get("PARTIAL_TP2_PCT",  "8"))   # sell 30% more at net +8% — remainder rides the TSL
 
 # Bundle mode: "avoid" or "ride"
 BUNDLE_MODE       = os.environ.get("BUNDLE_MODE", "avoid").lower()
