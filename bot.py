@@ -2965,69 +2965,59 @@ def _check_one_position(mint):
                 trade = dict(open_trades[mint])
 
         if strategy == "bond":
+            # No hard TP — partials lock 80% by net +8%; the rest rides the TSL
+            # while momentum holds (trail = momentum gate: 8% off peak = broken)
             move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
-            if move >= BOND_TP_PCT:
-                exit_trade(mint, price, "BOND_TP", bond); return
             if bond >= BOND_GRAD_BOND and entry_gain_pct >= 3:
                 tight_tsl = price_high * (1 - BOND_GRAD_TSL / 100)
                 if price <= tight_tsl:
                     exit_trade(mint, price, "BOND_GRAD_TSL", bond); return
             if price <= tsl_price:
                 exit_trade(mint, price, "BOND_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "BOND_SL", bond); return
-            if elapsed >= BOND_MAX_SECS:
+            if elapsed >= BOND_MAX_SECS and move < BOND_TP_PCT + fee_pct:
                 exit_trade(mint, price, "BOND_TIME", bond); return
 
         elif strategy == "spike":
             move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
-            if move >= SPIKE_TP_PCT:
-                exit_trade(mint, price, "SPIKE_TP", bond); return
             if price <= tsl_price:
                 exit_trade(mint, price, "SPIKE_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "SPIKE_SL", bond); return
-            if elapsed >= SPIKE_MAX_SECS:
+            if elapsed >= SPIKE_MAX_SECS and move < SPIKE_TP_PCT:
                 exit_trade(mint, price, "SPIKE_TIME", bond); return
 
         elif strategy == "copy":
             # Bond-based exits — same as bond runner; price feed unreliable for new tokens
             move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
-            if move >= BOND_TP_PCT:
-                exit_trade(mint, price, "COPY_TP", bond); return
             if bond >= BOND_GRAD_BOND and entry_gain_pct >= 3:
                 tight_tsl = price_high * (1 - BOND_GRAD_TSL / 100)
                 if price <= tight_tsl:
                     exit_trade(mint, price, "COPY_GRAD_TSL", bond); return
             if price <= tsl_price:
                 exit_trade(mint, price, "COPY_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "COPY_SL", bond); return
-            if elapsed >= BOND_MAX_SECS:
+            if elapsed >= BOND_MAX_SECS and move < COPY_TP_PCT + fee_pct:
                 exit_trade(mint, price, "COPY_TIME", bond); return
 
         elif strategy == "fast":
             move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
-            if move >= FAST_TP_PCT:
-                exit_trade(mint, price, "FAST_TP", bond); return
-            if price <= trade["entry"] * (1 - FAST_SL_PCT / 100):
-                exit_trade(mint, price, "FAST_SL", bond); return
-            if elapsed >= FAST_MAX_SECS:
+            if price <= tsl_price:
+                exit_trade(mint, price, "FAST_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "FAST_SL", bond); return
+            if elapsed >= FAST_MAX_SECS and move < FAST_TP_PCT + fee_pct:
                 exit_trade(mint, price, "FAST_TIME", bond); return
 
         elif strategy == "trench":
             move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
             if bond >= 99:
                 exit_trade(mint, price, "TRENCH_GRAD", bond); return
-            if move >= TRENCH_TP_PCT:
-                exit_trade(mint, price, "TRENCH_TP", bond); return
             if price <= tsl_price:
                 exit_trade(mint, price, "TRENCH_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "TRENCH_SL", bond); return
-            if elapsed >= TRENCH_MAX_SECS:
+            if elapsed >= TRENCH_MAX_SECS and move < TRENCH_TP_PCT:
                 exit_trade(mint, price, "TRENCH_TIME", bond); return
 
         elif strategy == "migrate":
             migrate_elapsed = time.time() - trade.get("grad_opened_at", trade["opened_at"])
             move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
-            if move >= MIGRATE_TP_PCT:
-                exit_trade(mint, price, "MIGRATE_TP", bond); return
             if price <= tsl_price:
                 exit_trade(mint, price, "MIGRATE_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "MIGRATE_SL", bond); return
-            if migrate_elapsed >= MIGRATE_MAX_SECS:
+            if migrate_elapsed >= MIGRATE_MAX_SECS and move < MIGRATE_TP_PCT:
                 exit_trade(mint, price, "MIGRATE_TIME", bond); return
 
         elif strategy in ("birdeye", "dsc_organic", "gmgn_signal", "dsc_signal", "jup_signal"):
