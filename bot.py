@@ -157,7 +157,20 @@ BUNDLE_RIDE_TP = float(os.environ.get("BUNDLE_RIDE_TP", "88"))
 
 # USDC profit lock
 USDC_LOCK_THRESHOLD = float(os.environ.get("USDC_LOCK_THRESHOLD", "35"))   # legacy display threshold — locking now batches per-win, see USDC_LOCK_MIN_SWAP
-USDC_LOCK_MIN_SWAP  = float(os.environ.get("USDC_LOCK_MIN_SWAP", "2"))     # accumulate win profits; swap SOL→USDC once pending ≥ this (keeps fees from eating tiny locks)
+USDC_LOCK_MIN_SWAP  = float(os.environ.get("USDC_LOCK_MIN_SWAP", "2"))     # mid tier ($50-99 capital): swap SOL→USDC once pending ≥ this
+USDC_LOCK_TINY_SWAP = float(os.environ.get("USDC_LOCK_TINY_SWAP", "0.10")) # under $50 capital: secure every win as often as possible
+USDC_LOCK_BIG_SWAP  = float(os.environ.get("USDC_LOCK_BIG_SWAP", "10"))    # $100+ capital: only lock meaningful dollar amounts
+
+def _usdc_lock_min():
+    """Capital-adaptive sweep threshold: small accounts bank every win,
+    big accounts batch profits into meaningful dollar chunks."""
+    with capital_lock:
+        cap = capital
+    if cap < 50:
+        return USDC_LOCK_TINY_SWAP
+    if cap < 100:
+        return USDC_LOCK_MIN_SWAP
+    return USDC_LOCK_BIG_SWAP
 USDC_MINT  = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 WSOL_MINT  = "So11111111111111111111111111111111111111112"
 GMGN_ROUTE = "https://gmgn.ai/defi/router/v1/sol/tx/get_swap_route"
@@ -2809,19 +2822,20 @@ def exit_trade(mint, price, reason, bond=0):
     _save_daily_state()
 
     # Secure profits: every win adds to the pending pot; sweep SOL→USDC once it
-    # reaches USDC_LOCK_MIN_SWAP so fees don't eat tiny locks. No capital threshold —
-    # live profits get secured from the first winning trade.
+    # reaches the capital-adaptive threshold — under $50 capital that's every win
+    # (as often as possible), $100+ batches into meaningful dollar amounts.
     if pnl > 0:
         global _pending_lock_usd
+        lock_min = _usdc_lock_min()
         with usdc_lock:
             _pending_lock_usd += pnl
             pending = _pending_lock_usd
-        if pending >= USDC_LOCK_MIN_SWAP:
+        if pending >= lock_min:
             with usdc_lock:
                 _pending_lock_usd = 0.0
             threading.Thread(target=lock_profit_to_usdc, args=(pending,), daemon=True).start()
         else:
-            log("info", f"Profit pot: ${pending:.2f} pending (locks at ${USDC_LOCK_MIN_SWAP:.0f})", "USDC")
+            log("info", f"Profit pot: ${pending:.2f} pending (locks at ${lock_min:.2f})", "USDC")
 
     if capital < 2:
         global scan_active
