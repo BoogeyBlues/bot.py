@@ -156,7 +156,8 @@ RUGCHECK_API_KEY  = os.environ.get("RUGCHECK_API_KEY", "")  # rugcheck.xyz JWT �
 BUNDLE_RIDE_TP = float(os.environ.get("BUNDLE_RIDE_TP", "88"))
 
 # USDC profit lock
-USDC_LOCK_THRESHOLD = float(os.environ.get("USDC_LOCK_THRESHOLD", "35"))
+USDC_LOCK_THRESHOLD = float(os.environ.get("USDC_LOCK_THRESHOLD", "35"))   # legacy display threshold — locking now batches per-win, see USDC_LOCK_MIN_SWAP
+USDC_LOCK_MIN_SWAP  = float(os.environ.get("USDC_LOCK_MIN_SWAP", "2"))     # accumulate win profits; swap SOL→USDC once pending ≥ this (keeps fees from eating tiny locks)
 USDC_MINT  = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 WSOL_MINT  = "So11111111111111111111111111111111111111112"
 GMGN_ROUTE = "https://gmgn.ai/defi/router/v1/sol/tx/get_swap_route"
@@ -291,6 +292,7 @@ scan_active       = True
 _milestones_hit   = set()
 _milestone_lock   = threading.Lock()
 usdc_locked       = 0.0
+_pending_lock_usd = 0.0    # win profits accumulate here; swept to USDC once ≥ USDC_LOCK_MIN_SWAP
 usdc_lock         = threading.Lock()
 # Trading window — 0/0 = 24/7 (no gate). Set START/END to restrict hours (UTC).
 TRADE_START_HOUR = int(os.environ.get("TRADE_START_HOUR", "0"))
@@ -451,7 +453,8 @@ def _save_daily_state():
     with capital_lock:
         cap_snapshot = capital
     with usdc_lock:
-        usdc_snap = usdc_locked
+        usdc_snap    = usdc_locked
+        pending_snap = _pending_lock_usd
     with _copy_lock:
         sold_snapshot = dict(_sold_mints)
     with _watchlist_lock:
@@ -481,6 +484,7 @@ def _save_daily_state():
         "sold_mints":     sold_snapshot,
         "watchlist":      wl_snapshot,
         "usdc_locked":    usdc_snap,
+        "pending_lock":   pending_snap,
         "strategy_version": "steady_v1",
     }
     try:
@@ -496,7 +500,7 @@ def _save_daily_state():
 def _load_daily_state():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses
     global _pause_until, capital, _week_start_date, _week_day_logs, completed_trades
-    global _day_start_cap, TUNE_PAUSED_UNTIL, usdc_locked
+    global _day_start_cap, TUNE_PAUSED_UNTIL, usdc_locked, _pending_lock_usd
     global BOND_ENTRY_MIN, BOND_ENTRY_MAX, BOND_TP_PCT, BOND_SL_PCT
     global BOND_STALE_SECS, BOND_MAX_SECS, SPIKE_TP_PCT, TRENCH_TP_PCT
     # Compute the same @HH day key used by _save_daily_state so the date comparison matches
@@ -533,6 +537,8 @@ def _load_daily_state():
             # usdc_locked accumulates across trades — always restore regardless of date
             if "usdc_locked" in s:
                 usdc_locked = float(s["usdc_locked"])
+            if "pending_lock" in s:
+                _pending_lock_usd = float(s["pending_lock"])
             _week_start_date = s.get("week_start", "")
             _week_day_logs   = s.get("week_logs",  [])
             if s.get("day_start_cap", 0) > 0:
@@ -2110,8 +2116,10 @@ def jup_audit_ok(mint: str) -> tuple:
 
 # ── USDC PROFIT LOCK ─────────────────────────────────────────────
 def lock_profit_to_usdc(profit_usd):
-    """Swap profit_usd worth of SOL into USDC via GMGN after winning trade."""
-    global usdc_locked
+    """Swap profit_usd worth of SOL into USDC via Jupiter after winning trades.
+    On any failure the amount is returned to the pending accumulator so the
+    profit gets locked with the next winning trade instead of vanishing."""
+    global usdc_locked, _pending_lock_usd
     if profit_usd <= 0:
         return
     if PAPER_MODE:
@@ -2119,55 +2127,55 @@ def lock_profit_to_usdc(profit_usd):
             usdc_locked += profit_usd
         log("ok", f"[PAPER] Locked ${profit_usd:.4f} profit -> USDC | Total: ${usdc_locked:.2f}", "USDC")
         return
+
+    def _refund():
+        global _pending_lock_usd
+        with usdc_lock:
+            _pending_lock_usd += profit_usd
+        log("warn", f"USDC lock deferred — ${profit_usd:.2f} back in pending, retries on next win", "USDC")
+
     try:
         sol_price = get_sol_price()
         if not sol_price:
-            log("warn", "Cannot get SOL price — skipping USDC lock", "USDC")
+            _refund(); return
+        lamports = int((profit_usd / sol_price) * 1_000_000_000)
+        if lamports < 100_000:   # dust — not worth a tx fee
             return
-        sol_amount = profit_usd / sol_price
-        lamports   = int(sol_amount * 1_000_000_000)
-        if lamports < 5_000:
-            return
-
-        # Get swap route from GMGN
-        res = _session.get(
-            GMGN_ROUTE,
-            params={
-                "token_in_address":  WSOL_MINT,
-                "token_out_address": USDC_MINT,
-                "in_amount":         lamports,
-                "from_address":      WALLET,
-                "slippage":          0.5,
-            },
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10
-        )
-        if res.status_code != 200:
-            log("warn", f"GMGN route failed {res.status_code}: {res.text[:80]}", "USDC")
-            return
-
-        data    = res.json()
-        raw_tx  = data.get("data", {}).get("raw_tx", {}).get("swapTransaction", "")
-        out_amt = data.get("data", {}).get("quote", {}).get("outputAmount", 0)
-        if not raw_tx:
-            log("warn", f"GMGN returned no transaction: {str(data)[:120]}", "USDC")
-            return
-
+        keypair = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+        hdrs = _jup_hdrs()
+        quote_params = {
+            "inputMint": WSOL_MINT, "outputMint": USDC_MINT,
+            "amount": lamports, "swapMode": "ExactIn", "slippageBps": 50,
+        }
+        r = _session.get(JUPITER_QUOTE_URL, params=quote_params, headers=hdrs, timeout=10)
+        if r.status_code == 401:
+            hdrs.pop("x-api-key", None)
+            r = _session.get(JUPITER_QUOTE_URL, params=quote_params, headers=hdrs, timeout=10)
+        if r.status_code != 200:
+            log("warn", f"USDC lock quote {r.status_code}: {r.text[:100]}", "USDC")
+            _refund(); return
+        quote = r.json()
+        r2 = _session.post(JUPITER_SWAP_URL, json={
+            "quoteResponse": quote, "userPublicKey": WALLET,
+            "wrapAndUnwrapSol": True, "prioritizationFeeLamports": 100000,
+            "dynamicComputeUnitLimit": True,
+        }, headers=hdrs, timeout=15)
+        if r2.status_code != 200:
+            log("warn", f"USDC lock swap {r2.status_code}: {r2.text[:100]}", "USDC")
+            _refund(); return
         import base64
-        tx_bytes = base64.b64decode(raw_tx)
-        keypair  = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
-        tx       = VersionedTransaction(VersionedTransaction.from_bytes(tx_bytes).message, [keypair])
-        client   = Client(SOL_RPC)
-        result   = client.send_raw_transaction(bytes(tx), opts=TxOpts(skip_preflight=True, preflight_commitment="confirmed"))
-        sig      = str(result.value)
-
-        usdc_out = float(out_amt) / 1_000_000  # USDC has 6 decimals
+        tx_bytes = base64.b64decode(r2.json()["swapTransaction"])
+        tx  = VersionedTransaction(VersionedTransaction.from_bytes(tx_bytes).message, [keypair])
+        sig = _send_tx(bytes(tx), "USDC")
+        if not sig:
+            _refund(); return
+        usdc_out = float(quote.get("outAmount", 0) or 0) / 1_000_000  # USDC has 6 decimals
         with usdc_lock:
             usdc_locked += usdc_out
-        log("ok", f"GMGN locked ${usdc_out:.4f} USDC | Total: ${usdc_locked:.4f} | sig={sig[:20]}...", "USDC")
-        log("ok", f"https://solscan.io/tx/{sig}", "USDC")
+        log("ok", f"JUP locked ${usdc_out:.4f} USDC | Total: ${usdc_locked:.4f} | solscan.io/tx/{sig}", "USDC")
     except Exception as e:
-        log("warn", f"USDC lock error: {e}", "USDC")
+        log("warn", f"USDC lock error [{type(e).__name__}]: {e}", "USDC")
+        _refund()
 
 # ── POOL DETECTION + BUY HELPER ──────────────────────────────────
 def _detect_pool(mint, symbol=""):
@@ -2800,12 +2808,20 @@ def exit_trade(mint, price, reason, bond=0):
     check_milestones()
     _save_daily_state()
 
-    # Lock profits into USDC once capital >= threshold
+    # Secure profits: every win adds to the pending pot; sweep SOL→USDC once it
+    # reaches USDC_LOCK_MIN_SWAP so fees don't eat tiny locks. No capital threshold —
+    # live profits get secured from the first winning trade.
     if pnl > 0:
-        with capital_lock:
-            cap_now = capital
-        if cap_now >= USDC_LOCK_THRESHOLD:
-            threading.Thread(target=lock_profit_to_usdc, args=(pnl,), daemon=True).start()
+        global _pending_lock_usd
+        with usdc_lock:
+            _pending_lock_usd += pnl
+            pending = _pending_lock_usd
+        if pending >= USDC_LOCK_MIN_SWAP:
+            with usdc_lock:
+                _pending_lock_usd = 0.0
+            threading.Thread(target=lock_profit_to_usdc, args=(pending,), daemon=True).start()
+        else:
+            log("info", f"Profit pot: ${pending:.2f} pending (locks at ${USDC_LOCK_MIN_SWAP:.0f})", "USDC")
 
     if capital < 2:
         global scan_active
