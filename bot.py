@@ -82,6 +82,8 @@ BOT_PAUSED        = os.environ.get("BOT_PAUSED", "false").lower() == "true"  # s
 MIN_TRADE         = float(os.environ.get("MIN_TRADE",   "8"))
 MIN_TOKENS_BUY    = float(os.environ.get("MIN_TOKENS_BUY", "250000"))   # only enter if trade size buys ≥250K tokens (~$50K mcap ceiling at $12 trades) — early but past the rug gauntlet (0 = off)
 EST_FEE_USD       = float(os.environ.get("EST_FEE_USD", "0.15"))        # est. round-trip cost: priority fees + AMM fees; profit targets shift up to clear this
+EARLY_CUT_PCT     = float(os.environ.get("EARLY_CUT_PCT", "5"))         # young trade (≤2 min) down this % = bad entry, cut before the full 8% SL
+RECONCILE_SECS    = int(os.environ.get("RECONCILE_SECS", "600"))        # sync capital counter to real wallet balance every N secs (live, no open trades)
 MAX_TRADE         = float(os.environ.get("MAX_TRADE",   "500"))
 FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "0"))   # 0 = use tiered % sizing
 
@@ -173,7 +175,6 @@ def _usdc_lock_min():
     return USDC_LOCK_BIG_SWAP
 USDC_MINT  = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 WSOL_MINT  = "So11111111111111111111111111111111111111112"
-GMGN_ROUTE = "https://gmgn.ai/defi/router/v1/sol/tx/get_swap_route"
 
 # Jupiter APIs (agent-skills suite)
 JUPITER_API_KEY        = os.environ.get("JUPITER_API_KEY", "")
@@ -370,7 +371,11 @@ scan_log               = []
 _scan_log_lock         = threading.Lock()
 
 # ── LOGGING ─────────────────────────────────────────────────────
+_log_counts = {"err": 0, "warn": 0}   # since boot — surfaced in /status/api for health visibility
+
 def log(tag, msg, symbol=""):
+    if tag in _log_counts:
+        _log_counts[tag] += 1
     prefix = f"[{symbol}] " if symbol else ""
     entry  = f"[{time.strftime('%H:%M:%S')}] [{tag.upper()}] {prefix}{msg}"
     print(entry, flush=True)
@@ -2978,6 +2983,12 @@ def _check_one_position(mint):
                     return
                 trade = dict(open_trades[mint])
 
+        # Early loser cut: a trade ≤2 min old already down EARLY_CUT_PCT never had
+        # momentum — cut it before the full SL. Winners shed 80% early; this keeps
+        # losers from holding the full bag to -8% (fixes the size asymmetry).
+        if EARLY_CUT_PCT > 0 and 20 <= elapsed <= 120 and move_pct <= -EARLY_CUT_PCT:
+            exit_trade(mint, price, "EARLY_CUT", bond); return
+
         if strategy == "bond":
             # No hard TP — partials lock 80% by net +8%; the rest rides the TSL
             # while momentum holds (trail = momentum gate: 8% off peak = broken)
@@ -3048,11 +3059,58 @@ def _check_one_position(mint):
                 # winners keep riding until the TSL fires
                 exit_trade(mint, price, f"{strategy.upper()}_TIME", bond); return
 
+        else:
+            # Generic fallback for any strategy without a dedicated block (bundle, legacy,
+            # future) — guarantees every open position has a working SL/TSL and time limit
+            move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
+            if price <= tsl_price:
+                exit_trade(mint, price,
+                           f"{strategy.upper()}_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else f"{strategy.upper()}_SL",
+                           bond); return
+            if elapsed >= BOND_MAX_SECS and move < BOND_TP_PCT + fee_pct:
+                exit_trade(mint, price, f"{strategy.upper()}_TIME", bond); return
+
         pct = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
         tsl_info = f" TSL@{tsl_price:.6f}" if entry_gain_pct >= TSL_ACTIVATE_PCT else ""
         log("info", f"[{strategy}] bond={bond:.1f}% price={pct:+.1f}% peak={entry_gain_pct:+.1f}%{tsl_info} {elapsed/60:.1f}m", symbol)
     except Exception as e:
         log("warn", f"Monitor [{mint[:8]}]: {e}")
+
+def reconcile_capital_loop():
+    """Every RECONCILE_SECS, snap the internal capital counter to the real wallet
+    balance (SOL, minus a gas buffer). The counter drifts from reality via slippage,
+    fees and failed fills — and every sizing/risk decision keys off it. Only runs
+    live, and only between trades so open-position value doesn't confuse the math."""
+    global capital
+    time.sleep(120)  # let startup settle
+    while True:
+        try:
+            if not PAPER_MODE and WALLET:
+                with trades_lock:
+                    no_open = len(open_trades) == 0
+                if no_open:
+                    sol_price = get_sol_price()
+                    if sol_price:
+                        for rpc_url in _rpc_endpoints():
+                            try:
+                                sol_bal = Client(rpc_url).get_balance(Pubkey.from_string(WALLET)).value / 1e9
+                            except Exception:
+                                continue
+                            real_usd = max(0.0, (sol_bal - 0.005)) * sol_price  # keep gas buffer out
+                            adjusted = False
+                            with capital_lock:
+                                drift = real_usd - capital
+                                if abs(drift) > max(1.0, capital * 0.05):
+                                    old = capital
+                                    capital = real_usd
+                                    adjusted = True
+                            if adjusted:
+                                log("warn", f"RECONCILE: counter ${old:.2f} → wallet ${real_usd:.2f} (drift {drift:+.2f})", "SYNC")
+                                _save_daily_state()
+                            break
+        except Exception as e:
+            log("warn", f"Reconcile loop: {e}", "SYNC")
+        time.sleep(RECONCILE_SECS)
 
 def monitor_loop():
     while True:
@@ -5084,7 +5142,27 @@ def status_api():
             "dsc_organic": dsc_org_size,
             "gmgn_signal": gmgn_pool_size,
         },
+        # Per-strategy scoreboard — which feeds earn their slot and which should be cut
+        "strategies": _strategy_stats(),
+        "health": {"errors_since_boot": _log_counts["err"], "warns_since_boot": _log_counts["warn"],
+                   "pending_profit_pot": round(_pending_lock_usd, 2)},
     })
+
+def _strategy_stats():
+    """Win rate and pnl per strategy from closed trades — the freeze-and-measure scoreboard."""
+    stats = {}
+    with trades_lock:
+        closed = list(completed_trades)
+    for t in closed:
+        s = stats.setdefault(t.get("strategy", "?"), {"trades": 0, "wins": 0, "pnl": 0.0})
+        s["trades"] += 1
+        if t.get("pnl", 0) > 0:
+            s["wins"] += 1
+        s["pnl"] += t.get("pnl", 0)
+    for s in stats.values():
+        s["win_rate"] = round(s["wins"] / max(s["trades"], 1) * 100, 1)
+        s["pnl"]      = round(s["pnl"], 2)
+    return stats
 
 @app.route("/status", methods=["GET"])
 def status():
@@ -9681,6 +9759,7 @@ if __name__ == "__main__":
         log("warn", "=" * 55)
     else:
         threading.Thread(target=monitor_loop,       daemon=True).start()
+        threading.Thread(target=reconcile_capital_loop, daemon=True).start()
         threading.Thread(target=scanner_loop,       daemon=True).start()
         threading.Thread(target=daily_summary_loop, daemon=True).start()
         if COPY_TRADE:
