@@ -79,8 +79,8 @@ BOT_NAME          = os.environ.get("BOT_NAME", "Boogey's Treasure Chest")
 BOT_PAUSED        = os.environ.get("BOT_PAUSED", "false").lower() == "true"  # set true in Railway to halt all trading
 
 # Position sizing — capital-tiered (protects small accounts)
-MIN_TRADE         = float(os.environ.get("MIN_TRADE",   "5"))
-MIN_TOKENS_BUY    = float(os.environ.get("MIN_TOKENS_BUY", "100000"))   # only enter if trade size buys ≥100K tokens (≤ ~$50K mcap) — early but past the rug gauntlet (0 = off)
+MIN_TRADE         = float(os.environ.get("MIN_TRADE",   "8"))
+MIN_TOKENS_BUY    = float(os.environ.get("MIN_TOKENS_BUY", "250000"))   # only enter if trade size buys ≥250K tokens (~$50K mcap ceiling at $12 trades) — early but past the rug gauntlet (0 = off)
 EST_FEE_USD       = float(os.environ.get("EST_FEE_USD", "0.15"))        # est. round-trip cost: priority fees + AMM fees; profit targets shift up to clear this
 MAX_TRADE         = float(os.environ.get("MAX_TRADE",   "500"))
 FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "0"))   # 0 = use tiered % sizing
@@ -156,7 +156,7 @@ RUGCHECK_API_KEY  = os.environ.get("RUGCHECK_API_KEY", "")  # rugcheck.xyz JWT �
 BUNDLE_RIDE_TP = float(os.environ.get("BUNDLE_RIDE_TP", "88"))
 
 # USDC profit lock
-USDC_LOCK_THRESHOLD = float(os.environ.get("USDC_LOCK_THRESHOLD", "35"))   # legacy display threshold — locking now batches per-win, see USDC_LOCK_MIN_SWAP
+USDC_LOCK_THRESHOLD = float(os.environ.get("USDC_LOCK_THRESHOLD", "80"))   # legacy display threshold — locking now batches per-win, see USDC_LOCK_MIN_SWAP
 USDC_LOCK_MIN_SWAP  = float(os.environ.get("USDC_LOCK_MIN_SWAP", "2"))     # mid tier ($50-99 capital): swap SOL→USDC once pending ≥ this
 USDC_LOCK_TINY_SWAP = float(os.environ.get("USDC_LOCK_TINY_SWAP", "0.10")) # under $50 capital: secure every win as often as possible
 USDC_LOCK_BIG_SWAP  = float(os.environ.get("USDC_LOCK_BIG_SWAP", "10"))    # $100+ capital: only lock meaningful dollar amounts
@@ -286,7 +286,7 @@ API_SECRET  = os.environ.get("API_SECRET", "")
 MILESTONES = [100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000]
 
 # ── STATE ────────────────────────────────────────────────────────
-capital           = float(os.environ.get("STARTING_CAPITAL", "27"))
+capital           = float(os.environ.get("STARTING_CAPITAL", "100"))
 STARTING_CAPITAL  = capital  # snapshot of configured start, for UI display
 SOL_ALLOCATED     = float(os.environ.get("SOL_ALLOCATED",     "19.67"))  # SOL wallet funded for trading
 capital_lock      = threading.Lock()
