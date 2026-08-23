@@ -7028,6 +7028,23 @@ nav::-webkit-scrollbar{display:none}
 .sec2-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
 .sec2-title{font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;letter-spacing:2px;color:var(--text);text-transform:uppercase}
 .sec2-link{font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--cyan);text-decoration:none}
+.wal-row{display:flex;align-items:center;gap:10px;padding:10px;background:var(--bg2);border:1px solid rgba(255,255,255,.04);border-radius:10px;margin-bottom:6px;transition:border-color .4s,box-shadow .4s}
+.wal-row.wal-top{border-color:rgba(0,255,136,.3);box-shadow:0 0 14px rgba(0,255,136,.08)}
+.wal-rank{font-family:'Bebas Neue',sans-serif;font-size:20px;color:var(--muted);width:20px;text-align:center;flex-shrink:0}
+.wal-rank.wal-r1{color:var(--yellow)}
+.wal-main{flex:1;min-width:0}
+.wal-top-row{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.wal-name-wrap{display:flex;align-items:center;gap:6px;min-width:0}
+.wal-name{font-family:'Bebas Neue',sans-serif;font-size:18px;letter-spacing:1px;color:var(--cyan);line-height:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wal-live-dot{width:6px;height:6px;border-radius:50%;background:var(--green);animation:pulse 1.4s ease infinite;flex-shrink:0}
+.wal-badges{display:flex;gap:4px;flex-shrink:0}
+.wal-badge{font-family:'JetBrains Mono',monospace;font-size:7px;padding:2px 6px;border-radius:10px;font-weight:700;white-space:nowrap}
+.wal-badge.wal-pinned{background:rgba(0,229,255,.08);border:1px solid rgba(0,229,255,.22);color:var(--cyan)}
+.wal-badge.wal-backoff{background:rgba(255,238,0,.1);border:1px solid rgba(255,238,0,.3);color:var(--yellow)}
+.wal-bar-track{height:5px;background:rgba(255,255,255,.06);border-radius:3px;margin-top:7px;overflow:hidden}
+.wal-bar-fill{height:5px;border-radius:3px;background:linear-gradient(90deg,var(--cyan),var(--green));transition:width .8s cubic-bezier(.22,.8,.36,1);width:0%}
+.wal-bottom-row{display:flex;align-items:center;justify-content:space-between;margin-top:5px;gap:8px}
+.wal-stats{font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--muted);white-space:nowrap}
 .trade-row{display:flex;align-items:flex-start;gap:9px;padding:10px;background:var(--bg2);border:1px solid rgba(255,255,255,.04);border-radius:10px;margin-bottom:6px}
 .tr-time{font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--muted);white-space:nowrap;margin-top:2px}
 .tr-icon{width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;flex-shrink:0}
@@ -7122,6 +7139,13 @@ nav::-webkit-scrollbar{display:none}
     <a href="/trades" class="sec2-link">FULL HISTORY &#x2192;</a>
   </div>
   <div id="eventsWrap"><div style="font-family:monospace;font-size:9px;color:var(--muted);text-align:center;padding:20px">Waiting for events...</div></div>
+</div>
+<div class="section2">
+  <div class="sec2-hdr">
+    <div class="sec2-title">WALLET TRACKING</div>
+    <a href="/wallets" class="sec2-link">RAW DATA &#x2192;</a>
+  </div>
+  <div id="walletsWrap"><div style="font-family:monospace;font-size:9px;color:var(--muted);text-align:center;padding:20px">Loading wallet activity...</div></div>
 </div>
 <div class="bot-name">__BOT_NAME__ &#xB7; Live</div>
 <script>
@@ -7648,6 +7672,66 @@ function poll(){
 }
 poll();
 setInterval(poll,3000);
+
+// WALLET TRACKING & RANKING
+function timeAgo(utcStr){
+  try{
+    var ms=Date.parse(utcStr.replace(' UTC','Z').replace(' ','T'));
+    if(isNaN(ms))return utcStr;
+    var s=Math.floor((Date.now()-ms)/1000);
+    if(s<5)return 'just now';
+    if(s<60)return s+'s ago';
+    if(s<3600)return Math.floor(s/60)+'m ago';
+    if(s<86400)return Math.floor(s/3600)+'h ago';
+    return Math.floor(s/86400)+'d ago';
+  }catch(e){return utcStr;}
+}
+function renderWallets(list){
+  var wrap=document.getElementById('walletsWrap');
+  if(!wrap)return;
+  if(!list||!list.length){
+    wrap.innerHTML='<div style="font-family:monospace;font-size:9px;color:var(--muted);text-align:center;padding:20px">No wallets tracked</div>';
+    return;
+  }
+  var maxD=Math.max.apply(null,list.map(function(w){return w.detections||0;}))||1;
+  var now=Date.now();
+  var rows=list.map(function(w,i){
+    var pct=Math.max(2,Math.round(((w.detections||0)/maxD)*100));
+    var isTop=i===0&&(w.detections||0)>0;
+    var live='';
+    if(w.last_seen){
+      var seenMs=Date.parse(w.last_seen.replace(' UTC','Z').replace(' ','T'));
+      if(!isNaN(seenMs)&&(now-seenMs)<5*60*1000)live='<span class="wal-live-dot"></span>';
+    }
+    var badges='';
+    if(w.pinned)badges+='<span class="wal-badge wal-pinned">PINNED</span>';
+    if(w.backoff)badges+='<span class="wal-badge wal-backoff">COOLDOWN</span>';
+    var lastStr=w.last_seen?timeAgo(w.last_seen):'never';
+    return '<div class="wal-row'+(isTop?' wal-top':'')+'">'
+      +'<div class="wal-rank'+(i===0?' wal-r1':'')+'">'+(i+1)+'</div>'
+      +'<div class="wal-main">'
+        +'<div class="wal-top-row">'
+          +'<div class="wal-name-wrap"><div class="wal-name">'+w.name+'</div>'+live+'</div>'
+          +'<div class="wal-badges">'+badges+'</div>'
+        +'</div>'
+        +'<div class="wal-bar-track"><div class="wal-bar-fill" style="width:'+pct+'%"></div></div>'
+        +'<div class="wal-bottom-row">'
+          +'<span class="wal-stats">'+(w.detections||0)+' seen &#xB7; '+(w.copy_entries||0)+' entered</span>'
+          +'<span class="wal-stats">'+lastStr+'</span>'
+        +'</div>'
+      +'</div>'
+    +'</div>';
+  }).join('');
+  wrap.innerHTML=rows;
+}
+function pollWallets(){
+  fetch('/wallets').then(function(r){return r.json();}).then(function(d){
+    renderWallets(d.activity_most_active_first||[]);
+  }).catch(function(){});
+}
+pollWallets();
+setInterval(pollWallets,10000);
+
 async function _punkAdminPost(url,body){
   var s=localStorage.getItem('api_secret')||'';
   if(!s){s=prompt('API secret:');if(!s)return null;localStorage.setItem('api_secret',s);}
