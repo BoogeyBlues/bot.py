@@ -3235,20 +3235,33 @@ def _parse_helius_enhanced_tx(tx, wallet_addr):
         "cost":          (sol_lamports / 1e9) * sol_price,
     }
 
+_helius_backoff = {}   # addr -> {"until": unix_ts, "level": int} — per-wallet 429 backoff
+
 def _helius_wallet_buys(addr):
     """Fetch recent pump.fun buys for a wallet via Helius Enhanced Transactions API.
     Returns list of {token_address, token_symbol, timestamp, cost} dicts."""
     if not HELIUS_API_KEY:
         return []
+    now = time.time()
+    bo = _helius_backoff.get(addr)
+    if bo and now < bo["until"]:
+        return []   # still cooling down from a 429 — skip silently, don't add to the log storm
     try:
         res = _session.get(
             f"https://api.helius.xyz/v0/addresses/{addr}/transactions",
             params={"api-key": HELIUS_API_KEY, "type": "SWAP", "limit": 10},
             timeout=15
         )
+        if res.status_code == 429:
+            level = min((bo["level"] + 1) if bo else 1, 6)   # cap at 2^6 * 30s = 32min
+            cooldown = 30 * (2 ** (level - 1))
+            _helius_backoff[addr] = {"until": now + cooldown, "level": level}
+            log("warn", f"Helius 429 for {addr[:8]} — backing off {cooldown}s (was polling every ~15s)", "COPY")
+            return []
         if res.status_code != 200:
             log("warn", f"Helius {res.status_code} for {addr[:8]}", "COPY")
             return []
+        _helius_backoff.pop(addr, None)   # request succeeded — clear any prior backoff
         acts = [a for tx in res.json() if (a := _parse_helius_enhanced_tx(tx, addr))]
         return acts
     except Exception as e:
@@ -3459,7 +3472,7 @@ def copy_trade_loop():
                     acts = _helius_wallet_buys(w["address"])
                     for act in acts:
                         _process_copy_act(w, act, source="POLL")
-                    time.sleep(0.5)
+                    time.sleep(2.5)   # spread requests out — 4 wallets back-to-back was bursty enough to trip Helius's rate limit
                 except Exception as e:
                     log("warn", f"Wallet {w['address'][:8]} activity: {e}", "COPY")
         except Exception as e:
