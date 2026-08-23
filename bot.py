@@ -205,6 +205,13 @@ PINNED_WALLETS = [
     "wQFd44Kh6nsrXn49vcu4bpjDCqe18iTGYzTgcWppump",   # Doom
     "Ha4zQAGVvmvjxAogMhenwYK9HCdfpNs82LTZ4MKTpump",  # Saof
 ]
+PINNED_WALLET_NAMES = {
+    "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump": "Ansem",
+    "CREDBHvVqREBCAxMihzr8D1nepHMr2gmQoZWpmgGmeta": "Cred",
+    "wQFd44Kh6nsrXn49vcu4bpjDCqe18iTGYzTgcWppump":  "Doom",
+    "Ha4zQAGVvmvjxAogMhenwYK9HCdfpNs82LTZ4MKTpump":  "Saof",
+}
+_wallet_activity = {}   # addr -> {"detections": int, "entries": int, "last_seen": ts} — per-wallet copy-trade activity
 COPY_TP_PCT       = float(os.environ.get("COPY_TP_PCT",  "12"))  # slow-and-steady: 12% TP
 COPY_SL_PCT       = float(os.environ.get("COPY_SL_PCT",   "6"))  # 6% SL — matches bond runner
 COPY_MAX_SECS     = int(os.environ.get("COPY_MAX_SECS",  "240"))
@@ -3325,6 +3332,11 @@ def _process_copy_act(w, act, source="POLL"):
     act = buy event dict (token_address, token_symbol, timestamp, cost).
     source = "PUSH" (Helius webhook) or "POLL" (polling fallback).
     Returns True if a trade was attempted."""
+    _addr = w.get("address", "")
+    if _addr:
+        rec = _wallet_activity.setdefault(_addr, {"detections": 0, "entries": 0, "last_seen": 0.0})
+        rec["detections"] += 1
+        rec["last_seen"]   = time.time()
     if daily_limit_reached():
         return False
     mint   = act.get("token_address", "")
@@ -3397,6 +3409,8 @@ def _process_copy_act(w, act, source="POLL"):
     addr   = w["address"]
     prefix = "[PUSH] " if source == "PUSH" else ""
     amt    = trade_size()
+    if addr in _wallet_activity:
+        _wallet_activity[addr]["entries"] += 1
     if is_fast:
         log("ok", f"{prefix}FAST {addr[:8]}... NO-FILTER | ${amt:.2f}", symbol)
         notify(f"⚡ {'PUSH ' if source=='PUSH' else ''}FAST {symbol}",
@@ -8334,7 +8348,20 @@ async function testTelegram() {{
 @app.route("/wallets", methods=["GET"])
 def wallets_status():
     """Shows which wallets are being tracked — use this to confirm TRACKED_WALLETS is set correctly."""
-    discovered = []
+    all_addrs = list(TRACKED_WALLETS) + list(PINNED_WALLETS)
+    activity = []
+    for addr in all_addrs:
+        rec = _wallet_activity.get(addr, {"detections": 0, "entries": 0, "last_seen": 0.0})
+        activity.append({
+            "address":       addr,
+            "name":          PINNED_WALLET_NAMES.get(addr, addr[:8] + "..."),
+            "pinned":        addr in PINNED_WALLETS,
+            "detections":    rec["detections"],   # buy activity seen on-chain, regardless of whether it passed our gates
+            "copy_entries":  rec["entries"],       # actually attempted as a trade
+            "last_seen":     time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(rec["last_seen"])) if rec["last_seen"] else None,
+            "backoff":       addr in _helius_backoff and _helius_backoff[addr]["until"] > time.time(),
+        })
+    activity.sort(key=lambda r: r["detections"], reverse=True)
     return jsonify({
         "tracked_wallets": {
             "count":     len(TRACKED_WALLETS),
@@ -8347,6 +8374,7 @@ def wallets_status():
         },
         "total_watching": len(TRACKED_WALLETS) + len(PINNED_WALLETS),
         "copy_trade_on":  COPY_TRADE,
+        "activity_most_active_first": activity,
     })
 
 @app.route("/blacklist/<mint>", methods=["GET"])
