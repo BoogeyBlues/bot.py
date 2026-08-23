@@ -202,8 +202,8 @@ TRACKED_WALLETS   = [w.strip() for w in os.environ.get("TRACKED_WALLETS", "").sp
 PINNED_WALLETS = [
     "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump",  # Ansem
     "CREDBHvVqREBCAxMihzr8D1nepHMr2gmQoZWpmgGmeta",  # Cred
-    "wQFd44Kh6nsrXn49vcu4bpjDCqe18iTGYzTgcWppump",   # Doom
-    "Ha4zQAGVvmvjxAogMhenwYK9HCdfpNs82LTZ4MKTpump",  # Saof
+    # "wQFd44Kh6nsrXn49vcu4bpjDCqe18iTGYzTgcWppump",   # Doom — dropped, cut to 2 wallets
+    # "Ha4zQAGVvmvjxAogMhenwYK9HCdfpNs82LTZ4MKTpump",  # Saof — dropped, cut to 2 wallets
 ]
 PINNED_WALLET_NAMES = {
     "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump": "Ansem",
