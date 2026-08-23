@@ -1,4 +1,4 @@
-import os, time, threading, requests, json, re, csv, io
+import os, time, threading, requests, json, re, csv, io, random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, jsonify, Response, request
 from collections import defaultdict, deque
@@ -211,7 +211,51 @@ PINNED_WALLET_NAMES = {
     "wQFd44Kh6nsrXn49vcu4bpjDCqe18iTGYzTgcWppump":  "Doom",
     "Ha4zQAGVvmvjxAogMhenwYK9HCdfpNs82LTZ4MKTpump":  "Saof",
 }
-_wallet_activity = {}   # addr -> {"detections": int, "entries": int, "last_seen": ts} — per-wallet copy-trade activity
+_wallet_activity = {}   # addr -> {"detections","entries","last_seen","hp","hits_landed","hits_taken","hp_updated_at"}
+_activity_lock   = threading.Lock()
+_combat_events   = []   # rolling log: {"ts","attacker","attacker_name","targets","dmg"} — last COMBAT_EVENTS_MAX kept
+COMBAT_EVENTS_MAX  = 30
+COMBAT_HP_REGEN    = 2.2   # HP/sec, matches the arena's client-side pacing
+COMBAT_DMG_MIN     = 9.0
+COMBAT_DMG_MAX     = 15.0
+
+def _wallet_rec(addr):
+    """Get-or-create addr's activity record with full combat-state defaults."""
+    return _wallet_activity.setdefault(addr, {
+        "detections": 0, "entries": 0, "last_seen": 0.0,
+        "hp": 100.0, "hits_landed": 0, "hits_taken": 0, "hp_updated_at": time.time(),
+    })
+
+def _settle_hp(rec, now):
+    """Apply passive regen up to `now` and return the current HP. Mutates rec in place."""
+    elapsed = max(0.0, now - rec.get("hp_updated_at", now))
+    rec["hp"] = min(100.0, rec.get("hp", 100.0) + COMBAT_HP_REGEN * elapsed)
+    rec["hp_updated_at"] = now
+    return rec["hp"]
+
+def _apply_combat_hit(attacker_addr, attacker_name, roster_addrs):
+    """A copy trade just landed for attacker_addr — it hits every other tracked wallet.
+    Persisted server-side so HP/hits survive redeploys and are consistent for every viewer."""
+    now = time.time()
+    dmg = random.uniform(COMBAT_DMG_MIN, COMBAT_DMG_MAX)
+    targets = [a for a in roster_addrs if a != attacker_addr]
+    if not targets:
+        return
+    with _activity_lock:
+        attacker_rec = _wallet_rec(attacker_addr)
+        attacker_rec["hits_landed"] += 1
+        for t in targets:
+            rec = _wallet_rec(t)
+            _settle_hp(rec, now)
+            rec["hp"] = max(0.0, rec["hp"] - dmg)
+            rec["hp_updated_at"] = now
+            rec["hits_taken"] += 1
+        _combat_events.append({
+            "ts": now, "attacker": attacker_addr, "attacker_name": attacker_name,
+            "targets": targets, "dmg": round(dmg, 1),
+        })
+        del _combat_events[:-COMBAT_EVENTS_MAX]
+    _save_daily_state()
 
 # ── DYNAMIC WALLET ROSTER (Wallet Arena add/remove) ──────────────
 # PINNED_WALLETS above is now only the first-boot seed. From then on the roster
@@ -521,6 +565,9 @@ def _save_daily_state():
         sold_snapshot = dict(_sold_mints)
     with _watchlist_lock:
         wl_snapshot = {m: {"res": e["res"], "added_at": e["added_at"]} for m, e in _watchlist.items()}
+    with _activity_lock:
+        activity_snap = dict(_wallet_activity)
+        events_snap   = list(_combat_events)
     state = {
         "date":           _daily_date,
         "trades":         _daily_trades,
@@ -548,6 +595,8 @@ def _save_daily_state():
         "usdc_locked":    usdc_snap,
         "paper_mode":     PAPER_MODE,
         "pending_lock":   pending_snap,
+        "wallet_activity": activity_snap,
+        "combat_events":   events_snap,
         "strategy_version": "steady_v1",
     }
     try:
@@ -564,6 +613,7 @@ def _load_daily_state():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses
     global _pause_until, capital, _week_start_date, _week_day_logs, completed_trades
     global _day_start_cap, TUNE_PAUSED_UNTIL, usdc_locked, _pending_lock_usd, PAPER_MODE
+    global _wallet_activity, _combat_events
     global BOND_ENTRY_MIN, BOND_ENTRY_MAX, BOND_TP_PCT, BOND_SL_PCT
     global BOND_STALE_SECS, BOND_MAX_SECS, SPIKE_TP_PCT, TRENCH_TP_PCT
     # Compute the same @HH day key used by _save_daily_state so the date comparison matches
@@ -602,6 +652,13 @@ def _load_daily_state():
                 usdc_locked = float(s["usdc_locked"])
             if "pending_lock" in s:
                 _pending_lock_usd = float(s["pending_lock"])
+            # Wallet Arena combat state — HP/hits/detections accumulate across restarts
+            if "wallet_activity" in s:
+                with _activity_lock:
+                    _wallet_activity = s["wallet_activity"] or {}
+            if "combat_events" in s:
+                with _activity_lock:
+                    _combat_events = s["combat_events"] or []
             # Restore a dashboard-toggled paper/live mode across restarts — UNLESS
             # Railway's PAPER_MODE env var is explicitly set, which always wins as
             # the operator's hard override (prevents a stale toggle fighting an
@@ -3365,9 +3422,10 @@ def _process_copy_act(w, act, source="POLL"):
     Returns True if a trade was attempted."""
     _addr = w.get("address", "")
     if _addr:
-        rec = _wallet_activity.setdefault(_addr, {"detections": 0, "entries": 0, "last_seen": 0.0})
-        rec["detections"] += 1
-        rec["last_seen"]   = time.time()
+        with _activity_lock:
+            rec = _wallet_rec(_addr)
+            rec["detections"] += 1
+            rec["last_seen"]   = time.time()
     if daily_limit_reached():
         return False
     mint   = act.get("token_address", "")
@@ -3441,7 +3499,10 @@ def _process_copy_act(w, act, source="POLL"):
     prefix = "[PUSH] " if source == "PUSH" else ""
     amt    = trade_size()
     if addr in _wallet_activity:
-        _wallet_activity[addr]["entries"] += 1
+        with _activity_lock:
+            _wallet_activity[addr]["entries"] += 1
+        # Wallet Arena: this copy trade just landed — it hits every other tracked wallet
+        _apply_combat_hit(addr, w.get("name") or addr[:8], list(_all_tracked_addrs()))
     if is_fast:
         log("ok", f"{prefix}FAST {addr[:8]}... NO-FILTER | ${amt:.2f}", symbol)
         notify(f"⚡ {'PUSH ' if source=='PUSH' else ''}FAST {symbol}",
@@ -3500,7 +3561,7 @@ def copy_trade_loop():
                 log("info", f"Drained {drained} webhook event(s)", "PUSH")
 
             # ── Poll TRACKED_WALLETS (env var) and the dynamic roster ──
-            wallets = [{"address": w["address"], "winrate": 100.0, "pinned": True} for w in _tracked_wallet_list()]
+            wallets = [{"address": w["address"], "name": w["name"], "winrate": 100.0, "pinned": True} for w in _tracked_wallet_list()]
             _seen = {w["address"] for w in wallets}
             for addr in TRACKED_WALLETS:
                 if addr not in _seen:
@@ -6381,7 +6442,7 @@ def helius_webhook():
         for addr in TRACKED_WALLETS:
             addr_map.setdefault(addr.lower(), {"address": addr, "winrate": 100.0})
         for w in _tracked_wallet_list():
-            addr_map.setdefault(w["address"].lower(), {"address": w["address"], "winrate": 100.0, "pinned": True})
+            addr_map.setdefault(w["address"].lower(), {"address": w["address"], "name": w["name"], "winrate": 100.0, "pinned": True})
 
         enqueued = 0
         for tx in payload:
@@ -8468,18 +8529,23 @@ def wallets_status():
     roster = _tracked_wallet_list()
     roster_addrs = {w["address"] for w in roster}
     activity = []
-    for w in roster:
-        addr = w["address"]
-        rec = _wallet_activity.get(addr, {"detections": 0, "entries": 0, "last_seen": 0.0})
-        activity.append({
-            "address":       addr,
-            "name":          w["name"],
-            "pinned":        True,
-            "detections":    rec["detections"],   # buy activity seen on-chain, regardless of whether it passed our gates
-            "copy_entries":  rec["entries"],       # actually attempted as a trade
-            "last_seen":     time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(rec["last_seen"])) if rec["last_seen"] else None,
-            "backoff":       addr in _helius_backoff and _helius_backoff[addr]["until"] > time.time(),
-        })
+    with _activity_lock:
+        for w in roster:
+            addr = w["address"]
+            rec = _wallet_rec(addr)
+            _settle_hp(rec, time.time())
+            activity.append({
+                "address":       addr,
+                "name":          w["name"],
+                "pinned":        True,
+                "detections":    rec["detections"],   # buy activity seen on-chain, regardless of whether it passed our gates
+                "copy_entries":  rec["entries"],       # actually attempted as a trade
+                "last_seen":     time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(rec["last_seen"])) if rec["last_seen"] else None,
+                "backoff":       addr in _helius_backoff and _helius_backoff[addr]["until"] > time.time(),
+                "hp":            round(rec["hp"], 1),
+                "hits_landed":   rec["hits_landed"],
+                "hits_taken":    rec["hits_taken"],
+            })
     activity.sort(key=lambda r: r["detections"], reverse=True)
     return jsonify({
         "tracked_wallets": {
@@ -8664,7 +8730,6 @@ var SPARKS = [];
 var leaderId = null, crownX=160, crownY=90;
 var PALETTE = ['#f5c542','#00e5ff','#4ade80','#ff6b9d','#a78bfa','#fb923c'];
 var colorCursor = 0;
-var lastSeenEntries = {}; // address -> copy_entries at last poll, to detect new hits
 
 function nextColor(){ return PALETTE[(colorCursor++) % PALETTE.length]; }
 
@@ -8755,33 +8820,30 @@ function drawCrown(x,y){
   rect(x+4,y-18,3,5,'#f5c542');
 }
 
-function fireAttack(attacker){
-  var others = AGENTS.filter(function(a){return a.id!==attacker.id;});
-  others.forEach(function(target){
+// attacker/targets/dmg come from a real server-side combat event — no client-side
+// guessing. hitsLanded/hitsTaken/HP are server-authoritative and hard-synced on
+// every poll; the local mutations below are cosmetic instant feedback only, so
+// the numbers may flicker very slightly before the next poll confirms them.
+function fireAttack(attacker, targets, dmg){
+  targets.forEach(function(target){
     PROJECTILES.push({
       fx:attacker.x, fy:attacker.y-26, tx:target.x, ty:target.y-20,
-      t:0, dur:.4, color:attacker.color, targetId:target.id, attackerId:attacker.id, dmg:9+Math.random()*6
+      t:0, dur:.4, color:attacker.color, targetId:target.id, attackerId:attacker.id, dmg:dmg
     });
   });
-  if(others.length){
-    setTicker('<b>'+attacker.name.toUpperCase()+'</b> copy trade hit &mdash; firing at '+others.map(function(o){return o.name;}).join(', '));
+  if(targets.length){
+    setTicker('<b>'+attacker.name.toUpperCase()+'</b> copy trade hit &mdash; firing at '+targets.map(function(o){return o.name;}).join(', '));
   }
 }
 
 function resolveHit(p){
   var target = AGENTS.find(function(a){return a.id===p.targetId;});
-  var attacker = AGENTS.find(function(a){return a.id===p.attackerId;});
   if(!target) return;
-  if(target.barrier>0){
-    target.barrier=0;
-    SPARKS.push({x:target.x,y:target.y-26,t:0,color:'#f5c542'});
-    POPUPS.push({x:target.x,y:target.y-40,text:'BLOCKED',t:0,color:'#f5c542'});
-    return;
-  }
+  // Barriers are cosmetic only (a "shield up" flourish) — real damage is always
+  // applied server-side regardless, so blocking it here would just cause the
+  // HP bar to visibly drop right after showing BLOCKED on the next poll sync.
   target.hp = Math.max(0, target.hp - p.dmg);
   target.flash = 0.35;
-  if(attacker) attacker.hitsLanded++;
-  target.hitsTaken++;
   POPUPS.push({x:target.x,y:target.y-40,text:'-'+Math.round(p.dmg),t:0,color:'#f87171'});
   SPARKS.push({x:target.x,y:target.y-26,t:0,color:'#f87171'});
 }
@@ -8896,29 +8958,25 @@ function loop(now){
 }
 requestAnimationFrame(loop);
 
-// ── REAL DATA: poll /arena/api, sync roster, fire attacks on real copy-trade hits ──
-function syncFromServer(data){
+// ── REAL DATA: HP/hits are server-authoritative and persisted (survive redeploys).
+// Attacks fire from the server's actual combat-event log, not guessed deltas — so
+// simultaneous copy trades between polls each get their own volley, correctly. ──
+var lastEventTs = 0;
+var arenaPrimed = false;
+
+function syncRosterAndHp(data){
   var serverAddrs = data.wallets.map(function(w){return w.address;});
-
-  // remove agents no longer tracked server-side
   AGENTS = AGENTS.filter(function(a){ return serverAddrs.indexOf(a.id)!==-1; });
-
   data.wallets.forEach(function(w){
     var existing = AGENTS.find(function(a){return a.id===w.address;});
     if(!existing){
-      AGENTS.push(makeAgent(w.address, w.name));
-      lastSeenEntries[w.address] = w.copy_entries;
-      return;
+      existing = makeAgent(w.address, w.name);
+      AGENTS.push(existing);
     }
-    var prevEntries = lastSeenEntries[w.address];
-    if(prevEntries!==undefined && w.copy_entries>prevEntries){
-      fireAttack(existing);
-    }
-    lastSeenEntries[w.address] = w.copy_entries;
+    existing.hp = w.hp;                 // server-truth hard sync
+    existing.hitsLanded = w.hits_landed;
+    existing.hitsTaken  = w.hits_taken;
   });
-
-  renderRoster();
-
   var statusEl = document.getElementById('copyStatus');
   if(!data.copy_trade_on){
     statusEl.textContent='COPY TRADE OFF';
@@ -8930,10 +8988,37 @@ function syncFromServer(data){
 }
 
 function pollArena(){
-  fetch('/arena/api').then(function(r){return r.json();}).then(syncFromServer).catch(function(){});
+  fetch('/arena/api?since='+lastEventTs).then(function(r){return r.json();}).then(function(data){
+    syncRosterAndHp(data);
+    (data.events||[]).forEach(function(ev){
+      var attacker = AGENTS.find(function(a){return a.id===ev.attacker;});
+      if(!attacker) return;
+      var targets = ev.targets.map(function(id){return AGENTS.find(function(a){return a.id===id;});}).filter(Boolean);
+      if(targets.length) fireAttack(attacker, targets, ev.dmg);
+    });
+    if(data.events && data.events.length){
+      lastEventTs = Math.max.apply(null, data.events.map(function(e){return e.ts;}));
+    } else if(data.server_now){
+      lastEventTs = data.server_now;
+    }
+    renderRoster();
+  }).catch(function(){});
 }
-pollArena();
-setInterval(pollArena, 3000);
+
+function primeArena(){
+  // First load: establish the roster/HP baseline and set lastEventTs to "now" so
+  // we don't replay the whole historical combat log as fresh animations on open.
+  fetch('/arena/api').then(function(r){return r.json();}).then(function(data){
+    lastEventTs = data.server_now || (Date.now()/1000);
+    syncRosterAndHp(data);
+    renderRoster();
+    arenaPrimed = true;
+    setInterval(pollArena, 3000);
+  }).catch(function(){
+    setTimeout(primeArena, 3000);
+  });
+}
+primeArena();
 
 // ── ADD / REMOVE ROSTER — hits real backend, persists across redeploys ──
 async function _arenaAdminPost(url,body){
@@ -8977,7 +9062,6 @@ function addAgent(){
     btn.disabled=false;
     if(d && d.ok){
       AGENTS.push(makeAgent(d.address, d.name));
-      lastSeenEntries[d.address]=0;
       nameEl.value=''; addrEl.value='';
       setTicker('<b>'+d.name.toUpperCase()+'</b> entered the arena');
       renderRoster();
@@ -8996,24 +9080,33 @@ renderRoster();
 
 @app.route("/arena/api", methods=["GET"])
 def arena_api():
-    """Lean polling endpoint for the Wallet Arena page — raw unix last_seen so the
-    client can diff copy_entries locally and trigger an attack animation on change."""
+    """Polling endpoint for the Wallet Arena page. HP/hits are server-authoritative and
+    persisted, so combat state survives page reloads and redeploys. `events` carries
+    the recent combat log (with a `since` param, only events after that timestamp) so
+    the client can animate real attacks precisely instead of guessing from deltas."""
     roster = _tracked_wallet_list()
     now = time.time()
+    since = float(request.args.get("since", 0) or 0)
     out = []
-    for w in roster:
-        addr = w["address"]
-        rec = _wallet_activity.get(addr, {"detections": 0, "entries": 0, "last_seen": 0.0})
-        out.append({
-            "address":      addr,
-            "name":         w["name"],
-            "detections":   rec["detections"],
-            "copy_entries": rec["entries"],
-            "last_seen":    rec["last_seen"],
-            "backoff":      addr in _helius_backoff and _helius_backoff[addr]["until"] > now,
-        })
+    with _activity_lock:
+        for w in roster:
+            addr = w["address"]
+            rec = _wallet_rec(addr)
+            _settle_hp(rec, now)
+            out.append({
+                "address":      addr,
+                "name":         w["name"],
+                "detections":   rec["detections"],
+                "copy_entries": rec["entries"],
+                "last_seen":    rec["last_seen"],
+                "backoff":      addr in _helius_backoff and _helius_backoff[addr]["until"] > now,
+                "hp":           round(rec["hp"], 1),
+                "hits_landed":  rec["hits_landed"],
+                "hits_taken":   rec["hits_taken"],
+            })
+        events = [e for e in _combat_events if e["ts"] > since]
     out.sort(key=lambda r: r["detections"], reverse=True)
-    return jsonify({"wallets": out, "copy_trade_on": COPY_TRADE})
+    return jsonify({"wallets": out, "copy_trade_on": COPY_TRADE, "events": events, "server_now": now})
 
 @app.route("/blacklist/<mint>", methods=["GET"])
 def blacklist_route(mint):
