@@ -1103,6 +1103,22 @@ def check_milestones():
                        f"Capital: ${cap:.2f}\nNew trade size: ${ts:.2f}\nKeep going!")
 
 # ── ADAPTIVE LEARNING ────────────────────────────────────────────
+TRADE_ARCHIVE_MAX = 5000   # permanent ledger cap — far beyond the 200-trade working window
+
+def _archive_trade(trade_data):
+    """Permanent, append-only trade ledger. Unlike bot_trades (working view, capped at
+    200, and historically wiped by /admin/reset-* calls) this key is NEVER cleared or
+    trimmed by any reset endpoint — nothing in the codebase deletes it. This is the
+    real, durable answer to "does the bot keep a log of trades prior.\""""
+    try:
+        archive = redis_load("bot_trades_archive") or []
+        archive.append(trade_data)
+        if len(archive) > TRADE_ARCHIVE_MAX:
+            archive = archive[-TRADE_ARCHIVE_MAX:]
+        redis_save("bot_trades_archive", archive)
+    except Exception as e:
+        log("warn", f"Trade archive write failed: {e}", "ARCHIVE")
+
 def record_trade(trade_data):
     try:
         # Caller already appended to completed_trades — read from in-memory list,
@@ -1111,6 +1127,7 @@ def record_trade(trade_data):
         with open(LEARN_FILE, "w") as f:
             json.dump(trimmed, f)
         redis_save("bot_trades", trimmed)
+        _archive_trade(trade_data)
     except Exception as e:
         log("warn", f"Learning record: {e}")
 
@@ -6501,13 +6518,14 @@ def admin_reset_daily():
         _pause_until         = 0.0
         _daily_cap_notified  = False
         _day_start_cap       = cap_now  # reset loss guard baseline to current capital
-    with trades_lock:
-        completed_trades.clear()
-    _redis_cmd("DEL", "bot_trades")
-    redis_save("bot_trades", [])
+    # Despite the name, this used to also wipe ALL-TIME trade history (completed_trades
+    # + the Redis bot_trades key) — the same destructive step /admin/reset-capital and
+    # /admin/reset-all use. A "reset DAILY" call should never delete permanent history;
+    # that's exactly what the safe automatic day-rollover (_reset_daily_if_needed) does
+    # NOT do. Trade history is untouched here now — this only resets today's counters.
     _save_daily_state()
     log("ok", f"Daily state reset via /admin/reset-daily — loss guard baseline reset to ${cap_now:.2f}")
-    return jsonify({"ok": True, "msg": "Daily counters reset — bot will resume trading"})
+    return jsonify({"ok": True, "msg": "Daily counters reset — trade history untouched — bot will resume trading"})
 
 @app.route("/admin/reset-capital", methods=["POST"])
 def admin_reset_capital():
@@ -9191,6 +9209,36 @@ def export_wins():
     filename = f"winning_trades_{time.strftime('%Y%m%d')}.csv"
     return Response(buf.getvalue(), mimetype="text/csv",
                     headers={"Content-Disposition": f"attachment; filename={filename}"})
+
+@app.route("/trades/archive", methods=["GET"])
+def trades_archive():
+    """The permanent trade ledger — survives every /admin/reset-* call, unlike
+    completed_trades (200-trade working view). This is the real all-time record."""
+    archive = redis_load("bot_trades_archive") or []
+    wins = [t for t in archive if t.get("pnl", 0) > 0]
+    total_pnl = sum(t.get("pnl", 0) for t in archive)
+    by_strategy = {}
+    for t in archive:
+        s = by_strategy.setdefault(t.get("strategy", "?"), {"trades": 0, "wins": 0, "pnl": 0.0})
+        s["trades"] += 1
+        if t.get("pnl", 0) > 0:
+            s["wins"] += 1
+        s["pnl"] += t.get("pnl", 0)
+    for s in by_strategy.values():
+        s["win_rate"] = round(s["wins"] / max(s["trades"], 1) * 100, 1)
+        s["pnl"] = round(s["pnl"], 2)
+    return jsonify({
+        "total_trades_all_time": len(archive),
+        "wins": len(wins),
+        "losses": len(archive) - len(wins),
+        "win_rate": round(len(wins) / max(len(archive), 1) * 100, 1),
+        "total_pnl_all_time": round(total_pnl, 4),
+        "archive_cap": TRADE_ARCHIVE_MAX,
+        "by_strategy": by_strategy,
+        "oldest_kept": archive[0].get("time") if archive else None,
+        "newest": archive[-1].get("time") if archive else None,
+        "recent_500": archive[-500:],
+    })
 
 @app.route("/export/all", methods=["GET"])
 def export_all():
