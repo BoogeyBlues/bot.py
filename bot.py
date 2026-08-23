@@ -2160,6 +2160,20 @@ def lock_profit_to_usdc(profit_usd):
         lamports = int((profit_usd / sol_price) * 1_000_000_000)
         if lamports < 100_000:   # dust — not worth a tx fee
             return
+        # Preflight: wallet needs the swap amount + priority fee + enough spare SOL to
+        # cover a first-time USDC token-account creation (~0.0025 SOL rent) if the
+        # wallet has never held USDC before. Skipping this check let low-SOL wallets
+        # submit a swap doomed to revert on-chain — the exact bug that made locked
+        # profit silently stay as SOL instead of becoming USDC.
+        for rpc_url in _rpc_endpoints():
+            try:
+                sol_bal = Client(rpc_url).get_balance(Pubkey.from_string(WALLET)).value / 1e9
+                if sol_bal < (lamports / 1e9) + 0.003:
+                    log("warn", f"USDC lock skipped — SOL too low ({sol_bal:.4f}) to cover swap + ATA rent", "USDC")
+                    _refund(); return
+                break
+            except Exception:
+                continue
         keypair = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
         hdrs = _jup_hdrs()
         quote_params = {
@@ -2189,12 +2203,49 @@ def lock_profit_to_usdc(profit_usd):
         if not sig:
             _refund(); return
         usdc_out = float(quote.get("outAmount", 0) or 0) / 1_000_000  # USDC has 6 decimals
-        with usdc_lock:
-            usdc_locked += usdc_out
-        log("ok", f"JUP locked ${usdc_out:.4f} USDC | Total: ${usdc_locked:.4f} | solscan.io/tx/{sig}", "USDC")
+        # A signature only means the RPC broadcast it — NOT that the swap landed.
+        # skip_preflight=True means a reverted tx (e.g. insufficient SOL to also
+        # cover a first-time USDC token-account rent) still returns a signature.
+        # Credit usdc_locked only after confirming on-chain, same as buy/sell.
+        _verify_usdc_lock(sig, profit_usd, usdc_out)
     except Exception as e:
         log("warn", f"USDC lock error [{type(e).__name__}]: {e}", "USDC")
         _refund()
+
+def _verify_usdc_lock(sig, profit_usd, usdc_out):
+    """Background: confirm the USDC-lock swap actually landed before crediting
+    usdc_locked. Falls through to a real USDC balance check as ground truth if
+    the signature status is inconclusive — mirrors _verify_sell_and_retry."""
+    global usdc_locked, _pending_lock_usd
+    for attempt, delay in [(1, 10), (2, 20)]:
+        time.sleep(delay)
+        for rpc_url in _rpc_endpoints():
+            try:
+                status = Client(rpc_url).get_signature_statuses([sig])
+                tx_s   = status.value[0] if status.value else None
+                if tx_s is not None and not tx_s.err:
+                    with usdc_lock:
+                        usdc_locked += usdc_out
+                    log("ok", f"JUP locked ${usdc_out:.4f} USDC confirmed | Total: ${usdc_locked:.4f} | solscan.io/tx/{sig}", "USDC")
+                    return
+                if tx_s is not None and tx_s.err:
+                    log("warn", f"USDC lock tx reverted on-chain: {tx_s.err} — ${profit_usd:.2f} back in pending", "USDC")
+                    with usdc_lock:
+                        _pending_lock_usd += profit_usd
+                    return
+                break  # pending — wait for next attempt
+            except Exception:
+                continue
+    # Status inconclusive after both attempts — real USDC balance is ground truth
+    bal = _check_token_balance(USDC_MINT)
+    if bal and bal > 0:
+        with usdc_lock:
+            usdc_locked += usdc_out
+        log("ok", f"JUP locked ${usdc_out:.4f} USDC confirmed via balance | Total: ${usdc_locked:.4f}", "USDC")
+    else:
+        log("warn", f"USDC lock unconfirmed after retries — ${profit_usd:.2f} back in pending", "USDC")
+        with usdc_lock:
+            _pending_lock_usd += profit_usd
 
 # ── POOL DETECTION + BUY HELPER ──────────────────────────────────
 def _detect_pool(mint, symbol=""):
