@@ -71,8 +71,14 @@ def redis_load(key):
 # ── CONFIG ──────────────────────────────────────────────────────
 WALLET             = os.environ.get("WALLET", "")
 WALLET_PRIVATE_KEY = os.environ.get("WALLET_PRIVATE_KEY", "")
+_PAPER_ENV_SET     = "PAPER_MODE" in os.environ   # explicit Railway var always wins over any dashboard toggle
 _PAPER_ENV         = os.environ.get("PAPER_MODE", "true").lower()
 PAPER_MODE         = _PAPER_ENV == "true" or not WALLET or not WALLET_PRIVATE_KEY
+# NOTE: the /admin/paper-mode dashboard toggle flips this at runtime but was never
+# persisted — every redeploy (i.e. every code push) silently reset it back to the
+# env var default, wiping out any "go live" toggle. Fixed below: the toggle now
+# persists to Redis and is restored on boot, UNLESS PAPER_MODE is explicitly set
+# in Railway, which always takes precedence as the operator's hard override.
 PROFIT_GOAL       = float(os.environ.get("PROFIT_GOAL", "25000"))
 RISK_LEVEL        = os.environ.get("RISK_LEVEL", "standard").lower()  # conservative / standard / aggressive
 BOT_NAME          = os.environ.get("BOT_NAME", "Boogey's Treasure Chest")
@@ -503,6 +509,7 @@ def _save_daily_state():
         "sold_mints":     sold_snapshot,
         "watchlist":      wl_snapshot,
         "usdc_locked":    usdc_snap,
+        "paper_mode":     PAPER_MODE,
         "pending_lock":   pending_snap,
         "strategy_version": "steady_v1",
     }
@@ -519,7 +526,7 @@ def _save_daily_state():
 def _load_daily_state():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses
     global _pause_until, capital, _week_start_date, _week_day_logs, completed_trades
-    global _day_start_cap, TUNE_PAUSED_UNTIL, usdc_locked, _pending_lock_usd
+    global _day_start_cap, TUNE_PAUSED_UNTIL, usdc_locked, _pending_lock_usd, PAPER_MODE
     global BOND_ENTRY_MIN, BOND_ENTRY_MAX, BOND_TP_PCT, BOND_SL_PCT
     global BOND_STALE_SECS, BOND_MAX_SECS, SPIKE_TP_PCT, TRENCH_TP_PCT
     # Compute the same @HH day key used by _save_daily_state so the date comparison matches
@@ -558,6 +565,15 @@ def _load_daily_state():
                 usdc_locked = float(s["usdc_locked"])
             if "pending_lock" in s:
                 _pending_lock_usd = float(s["pending_lock"])
+            # Restore a dashboard-toggled paper/live mode across restarts — UNLESS
+            # Railway's PAPER_MODE env var is explicitly set, which always wins as
+            # the operator's hard override (prevents a stale toggle fighting an
+            # intentional env var change).
+            if "paper_mode" in s and not _PAPER_ENV_SET and WALLET and WALLET_PRIVATE_KEY:
+                restored_pm = bool(s["paper_mode"])
+                if restored_pm != PAPER_MODE:
+                    PAPER_MODE = restored_pm
+                    log("ok", f"Restored mode: {'PAPER' if PAPER_MODE else 'LIVE'} (from previous session)", "BOOT")
             _week_start_date = s.get("week_start", "")
             _week_day_logs   = s.get("week_logs",  [])
             if s.get("day_start_cap", 0) > 0:
@@ -5499,6 +5515,9 @@ async function togglePaperMode(){{
       btn.style.color=p?'#f5c542':'#ff3355';
       btn.style.borderColor=p?'#f5c542':'#ff3355';
       showToast(p?'📄 PAPER MODE ON — no real trades':'🔴 LIVE MODE — real funds active');
+    }} else {{
+      alert(d.error || 'Toggle failed');
+      btn.textContent=isLive?'📄 PAPER':'🔴 GO PAPER';
     }}
   }}catch(e){{alert('Error: '+e);}}
   btn.disabled=false;
@@ -6662,10 +6681,18 @@ def admin_set_paper_mode():
     global PAPER_MODE
     denied = _auth_required()
     if denied: return denied
+    if _PAPER_ENV_SET:
+        # Railway's PAPER_MODE var is an explicit operator override — don't let a
+        # dashboard click silently fight it and then vanish on the next redeploy.
+        state = "PAPER" if PAPER_MODE else "LIVE"
+        return jsonify({"ok": False, "paper_mode": PAPER_MODE, "mode": state,
+                         "error": f"PAPER_MODE is explicitly set in Railway — currently {state}. "
+                                  f"Change the Railway env var (and redeploy) to switch modes."}), 409
     data = request.get_json(silent=True) or {}
     PAPER_MODE = bool(data.get("enabled", True))
     state = "PAPER" if PAPER_MODE else "LIVE"
-    log("warn" if not PAPER_MODE else "ok", f"Mode switched to {state} via admin", "ADMIN")
+    _save_daily_state()  # persist — a redeploy must not silently undo this toggle
+    log("warn" if not PAPER_MODE else "ok", f"Mode switched to {state} via admin (persisted)", "ADMIN")
     return jsonify({"ok": True, "paper_mode": PAPER_MODE, "mode": state})
 
 @app.route("/admin/force-sell/<mint>", methods=["POST"])
