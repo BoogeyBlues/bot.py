@@ -8706,7 +8706,7 @@ canvas#arena{display:block;width:100%;height:auto;image-rendering:pixelated;imag
   </div>
 </div>
 
-<div class="foot">HP regens over time &middot; barriers block one hit &middot; crown follows whoever's winning</div>
+<div class="foot">HP regens over time &middot; shields are cosmetic &middot; crown follows whoever's winning</div>
 
 </div>
 
