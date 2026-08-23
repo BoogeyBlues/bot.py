@@ -212,6 +212,36 @@ PINNED_WALLET_NAMES = {
     "Ha4zQAGVvmvjxAogMhenwYK9HCdfpNs82LTZ4MKTpump":  "Saof",
 }
 _wallet_activity = {}   # addr -> {"detections": int, "entries": int, "last_seen": ts} — per-wallet copy-trade activity
+
+# ── DYNAMIC WALLET ROSTER (Wallet Arena add/remove) ──────────────
+# PINNED_WALLETS above is now only the first-boot seed. From then on the roster
+# lives in Redis so it can be edited live from /arena without a redeploy.
+_SOL_ADDR_RE  = re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')  # base58, excludes 0/O/I/l
+_wallets_lock = threading.Lock()
+_dynamic_wallets = {}   # addr -> {"name": str, "added_at": float}
+
+def _load_wallets():
+    global _dynamic_wallets
+    saved = redis_load("bot_wallets")
+    if saved:
+        with _wallets_lock:
+            _dynamic_wallets = {w["address"]: {"name": w["name"], "added_at": w.get("added_at", 0)} for w in saved}
+    else:
+        # First boot ever (or Redis not configured) — seed from the hardcoded list
+        with _wallets_lock:
+            _dynamic_wallets = {addr: {"name": PINNED_WALLET_NAMES.get(addr, addr[:8] + "..."), "added_at": time.time()}
+                                 for addr in PINNED_WALLETS}
+        _save_wallets()
+
+def _save_wallets():
+    with _wallets_lock:
+        data = [{"address": a, "name": v["name"], "added_at": v["added_at"]} for a, v in _dynamic_wallets.items()]
+    redis_save("bot_wallets", data)
+
+def _tracked_wallet_list():
+    """Current dynamic roster as [{'address':..., 'name':...}, ...]."""
+    with _wallets_lock:
+        return [{"address": a, "name": v["name"]} for a, v in _dynamic_wallets.items()]
 COPY_TP_PCT       = float(os.environ.get("COPY_TP_PCT",  "12"))  # slow-and-steady: 12% TP
 COPY_SL_PCT       = float(os.environ.get("COPY_SL_PCT",   "6"))  # 6% SL — matches bond runner
 COPY_MAX_SECS     = int(os.environ.get("COPY_MAX_SECS",  "240"))
@@ -3278,7 +3308,8 @@ def _helius_wallet_buys(addr):
 def _all_tracked_addrs():
     """Return set of all wallet addresses currently being tracked for copy trading."""
     addrs = set(TRACKED_WALLETS)
-    addrs.update(PINNED_WALLETS)
+    with _wallets_lock:
+        addrs.update(_dynamic_wallets.keys())
     return addrs
 
 def _register_helius_webhook():
@@ -3468,12 +3499,13 @@ def copy_trade_loop():
             if drained:
                 log("info", f"Drained {drained} webhook event(s)", "PUSH")
 
-            # ── Poll TRACKED_WALLETS and PINNED_WALLETS ──
-            wallets = []
+            # ── Poll TRACKED_WALLETS (env var) and the dynamic roster ──
+            wallets = [{"address": w["address"], "winrate": 100.0, "pinned": True} for w in _tracked_wallet_list()]
+            _seen = {w["address"] for w in wallets}
             for addr in TRACKED_WALLETS:
-                wallets.append({"address": addr, "winrate": 100.0})
-            for addr in PINNED_WALLETS:
-                wallets.append({"address": addr, "winrate": 100.0, "pinned": True})
+                if addr not in _seen:
+                    wallets.append({"address": addr, "winrate": 100.0})
+                    _seen.add(addr)
 
             if not wallets:
                 time.sleep(60)
@@ -4565,6 +4597,7 @@ def _home_inner():
   <nav>
     <a href="/live">⚡ Live Feed</a>
     <a href="/positions">📍 Positions</a>
+    <a href="/arena">🏆 Wallet Arena</a>
     <a href="/trades">📋 All Trades</a>
     <a href="/status">📊 Status</a>
     <a href="/watchlist">👁 Watchlist</a>
@@ -6347,8 +6380,8 @@ def helius_webhook():
         addr_map = {}
         for addr in TRACKED_WALLETS:
             addr_map.setdefault(addr.lower(), {"address": addr, "winrate": 100.0})
-        for addr in PINNED_WALLETS:
-            addr_map.setdefault(addr.lower(), {"address": addr, "winrate": 100.0, "pinned": True})
+        for w in _tracked_wallet_list():
+            addr_map.setdefault(w["address"].lower(), {"address": w["address"], "winrate": 100.0, "pinned": True})
 
         enqueued = 0
         for tx in payload:
@@ -8432,14 +8465,16 @@ async function testTelegram() {{
 @app.route("/wallets", methods=["GET"])
 def wallets_status():
     """Shows which wallets are being tracked — use this to confirm TRACKED_WALLETS is set correctly."""
-    all_addrs = list(TRACKED_WALLETS) + list(PINNED_WALLETS)
+    roster = _tracked_wallet_list()
+    roster_addrs = {w["address"] for w in roster}
     activity = []
-    for addr in all_addrs:
+    for w in roster:
+        addr = w["address"]
         rec = _wallet_activity.get(addr, {"detections": 0, "entries": 0, "last_seen": 0.0})
         activity.append({
             "address":       addr,
-            "name":          PINNED_WALLET_NAMES.get(addr, addr[:8] + "..."),
-            "pinned":        addr in PINNED_WALLETS,
+            "name":          w["name"],
+            "pinned":        True,
             "detections":    rec["detections"],   # buy activity seen on-chain, regardless of whether it passed our gates
             "copy_entries":  rec["entries"],       # actually attempted as a trade
             "last_seen":     time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(rec["last_seen"])) if rec["last_seen"] else None,
@@ -8453,13 +8488,532 @@ def wallets_status():
             "hint":      "Set TRACKED_WALLETS=addr1,addr2,addr3 in Railway env vars for THIS service (sniper bot)",
         },
         "pinned_wallets": {
-            "count":     len(PINNED_WALLETS),
-            "addresses": PINNED_WALLETS,
+            "count":     len(roster),
+            "addresses": list(roster_addrs),
         },
-        "total_watching": len(TRACKED_WALLETS) + len(PINNED_WALLETS),
+        "total_watching": len(set(TRACKED_WALLETS) | roster_addrs),
         "copy_trade_on":  COPY_TRADE,
         "activity_most_active_first": activity,
     })
+
+@app.route("/wallets/add", methods=["POST"])
+def wallets_add():
+    denied = _auth_required()
+    if denied: return denied
+    data = request.get_json(silent=True) or {}
+    addr = (data.get("address") or "").strip()
+    name = (data.get("name") or "").strip()[:24]
+    if not name:
+        return jsonify({"ok": False, "error": "Name required"}), 400
+    if not _SOL_ADDR_RE.match(addr):
+        return jsonify({"ok": False, "error": "Invalid Solana address"}), 400
+    with _wallets_lock:
+        if addr in _dynamic_wallets:
+            return jsonify({"ok": False, "error": "Already tracked"}), 409
+        _dynamic_wallets[addr] = {"name": name, "added_at": time.time()}
+    _save_wallets()
+    log("ok", f"Wallet added: {name} ({addr[:8]}...) via /wallets/add", "ADMIN")
+    return jsonify({"ok": True, "address": addr, "name": name})
+
+@app.route("/wallets/remove", methods=["POST"])
+def wallets_remove():
+    denied = _auth_required()
+    if denied: return denied
+    data = request.get_json(silent=True) or {}
+    addr = (data.get("address") or "").strip()
+    with _wallets_lock:
+        removed = _dynamic_wallets.pop(addr, None)
+    if not removed:
+        return jsonify({"ok": False, "error": "Not tracked"}), 404
+    _save_wallets()
+    log("ok", f"Wallet removed: {removed['name']} ({addr[:8]}...) via /wallets/remove", "ADMIN")
+    return jsonify({"ok": True, "address": addr})
+
+@app.route("/arena", methods=["GET"])
+def arena():
+    html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Wallet Arena — __BOT_NAME__</title>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --dbg:#0d0a1a;--glow-pink:#c23a6b;--gold:#f5c542;--gold2:#e8a800;--cyan:#00e5ff;
+  --hud-bg:#faf6ec;--hud-border:#1a1030;--text:#e8e8f0;--muted:#8a86a8;--surface:#10101a;--border:#ffffff0d;
+}
+body{background:var(--dbg);color:var(--text);font-family:'VT323',monospace;font-size:18px;min-height:100vh;overflow-x:hidden}
+.wrap{max-width:480px;margin:0 auto;padding-bottom:40px}
+
+.topbar{display:flex;justify-content:space-between;align-items:center;padding:14px 16px 0}
+.back-link{font-family:'Press Start 2P',monospace;font-size:9px;color:var(--muted);text-decoration:none;letter-spacing:.5px}
+.back-link:hover{color:var(--gold)}
+.copy-status{font-size:13px;color:var(--muted)}
+.copy-status.off{color:#f87171}
+
+header{text-align:center;padding:10px 16px 14px}
+h1{font-family:'Press Start 2P',monospace;font-size:1.1rem;letter-spacing:1px;
+  background:linear-gradient(135deg,var(--gold),#fff 50%,var(--gold2));
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
+  text-shadow:0 0 24px #f5c54233}
+.tagline{color:var(--muted);font-size:15px;margin-top:8px;letter-spacing:.03em;text-transform:uppercase}
+
+.scene-wrap{margin:4px 16px 10px;border-radius:10px;overflow:hidden;position:relative;
+  border:2px solid #2a1f4a;box-shadow:0 0 30px #00000066,inset 0 0 40px #00000066}
+canvas#arena{display:block;width:100%;height:auto;image-rendering:pixelated;image-rendering:crisp-edges}
+.scanlines{position:absolute;inset:0;pointer-events:none;
+  background:repeating-linear-gradient(180deg,rgba(0,0,0,.18) 0px,rgba(0,0,0,.18) 1px,transparent 1px,transparent 3px);
+  mix-blend-mode:multiply;opacity:.5}
+.ticker{margin:0 16px 18px;background:var(--surface);border:1px solid var(--border);border-radius:6px;
+  padding:7px 12px;font-size:15px;color:var(--muted);min-height:16px;text-align:center;letter-spacing:.02em}
+.ticker b{color:var(--gold)}
+
+.hud{margin:0 16px;background:var(--hud-bg);border:3px solid var(--hud-border);border-radius:4px;
+  box-shadow:0 0 0 1px #0d0a1a44, 0 6px 0 #0d0a1a33;color:#1a1030;overflow:hidden}
+.hud-hdr{background:var(--hud-border);color:var(--gold);font-family:'Press Start 2P',monospace;
+  font-size:10px;padding:9px 12px;letter-spacing:1px;display:flex;justify-content:space-between;align-items:center}
+.hud-hdr a{color:var(--gold);text-decoration:none;font-size:14px;border:1px solid #f5c54255;padding:2px 8px;border-radius:3px}
+.hud-row{display:flex;align-items:center;gap:10px;padding:10px 12px;border-top:2px dashed #1a103022}
+.hud-rank{font-family:'Press Start 2P',monospace;font-size:11px;width:22px;flex-shrink:0}
+.hud-rank.r1{color:#a8760a}
+.hud-swatch{width:14px;height:14px;border-radius:3px;flex-shrink:0;border:1px solid #1a103033}
+.hud-main{flex:1;min-width:0}
+.hud-name-row{display:flex;justify-content:space-between;align-items:baseline;font-size:19px;font-weight:700}
+.hud-badges{display:flex;gap:4px}
+.hud-badge{font-size:12px;padding:1px 6px;border-radius:8px;border:1px solid}
+.hud-badge.pinned{color:#1d5fa8;border-color:#1d5fa855;background:#1d5fa814}
+.hud-badge.cooldown{color:#a8760a;border-color:#a8760a55;background:#a8760a14}
+.hud-stats{font-size:15px;color:#4a4468;display:flex;justify-content:space-between;margin-top:2px}
+.hud-stats b{color:#1a1030}
+.hud-combat{font-size:14px;color:#8a2a2a;margin-top:2px}
+
+.foot{text-align:center;font-size:14px;color:var(--muted);padding:14px 16px 0}
+
+.roster-row{display:flex;align-items:center;gap:10px;padding:9px 12px;border-top:2px dashed #1a103022}
+.roster-name{font-size:17px;font-weight:700;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.roster-btn{font-family:'VT323',monospace;font-size:14px;padding:4px 10px;border-radius:4px;border:2px solid;cursor:pointer;background:transparent;letter-spacing:.03em}
+.roster-btn.remove{color:#a83030;border-color:#a8303055}
+.roster-btn.remove:hover{background:#a8303014}
+.roster-btn.add{color:#a8760a;border-color:#a8760a55;width:100%;margin-top:4px;padding:8px;font-weight:700}
+.roster-btn.add:hover{background:#f5c54214}
+.roster-btn.add:disabled{opacity:.5;cursor:default}
+.roster-add{padding:10px 12px;border-top:2px dashed #1a103022}
+.roster-input{width:100%;font-family:'VT323',monospace;font-size:16px;padding:7px 10px;margin-bottom:6px;
+  border:2px solid #1a103033;border-radius:4px;background:#fff;color:#1a1030}
+.roster-input::placeholder{color:#9a96b8}
+.roster-empty{padding:14px 12px;font-size:15px;color:#9a96b8;text-align:center}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="topbar">
+  <a href="/" class="back-link">&larr; BASE</a>
+  <div class="copy-status" id="copyStatus">&nbsp;</div>
+</div>
+
+<header>
+  <h1>WALLET ARENA</h1>
+  <div class="tagline">every copy trade is an attack</div>
+</header>
+
+<div class="scene-wrap">
+  <canvas id="arena" width="320" height="180"></canvas>
+  <div class="scanlines"></div>
+</div>
+<div class="ticker" id="ticker">Watching for copy trades&hellip;</div>
+
+<div class="hud">
+  <div class="hud-hdr"><span>STANDINGS</span><a href="/wallets">RAW DATA</a></div>
+  <div id="hudRows"><div class="roster-empty">Loading roster&hellip;</div></div>
+</div>
+
+<div class="hud" style="margin-top:14px">
+  <div class="hud-hdr"><span>MANAGE ROSTER</span></div>
+  <div id="rosterRows"></div>
+  <div class="roster-add">
+    <input id="rName" class="roster-input" placeholder="Name (e.g. Ansem)" maxlength="24">
+    <input id="rAddr" class="roster-input" placeholder="Solana wallet address">
+    <button id="rAddBtn" class="roster-btn add">+ ADD TO ARENA</button>
+  </div>
+</div>
+
+<div class="foot">HP regens over time &middot; barriers block one hit &middot; crown follows whoever's winning</div>
+
+</div>
+
+<script>
+var cv = document.getElementById('arena');
+var ctx = cv.getContext('2d');
+var W = cv.width, H = cv.height;
+var FLOOR_Y = H*0.5;
+var BOUNDS = {xMin:26, xMax:W-26, yMin:FLOOR_Y+18, yMax:H-16};
+
+function rect(x,y,w,h,c,alpha){
+  ctx.globalAlpha = alpha===undefined?1:alpha;
+  ctx.fillStyle=c; ctx.fillRect(Math.round(x),Math.round(y),Math.round(w),Math.round(h));
+  ctx.globalAlpha=1;
+}
+
+var AGENTS = [];
+var PROJECTILES = [];
+var POPUPS = [];
+var SPARKS = [];
+var leaderId = null, crownX=160, crownY=90;
+var PALETTE = ['#f5c542','#00e5ff','#4ade80','#ff6b9d','#a78bfa','#fb923c'];
+var colorCursor = 0;
+var lastSeenEntries = {}; // address -> copy_entries at last poll, to detect new hits
+
+function nextColor(){ return PALETTE[(colorCursor++) % PALETTE.length]; }
+
+function pickTarget(a){
+  a.tx = BOUNDS.xMin + Math.random()*(BOUNDS.xMax-BOUNDS.xMin);
+  a.ty = BOUNDS.yMin + Math.random()*(BOUNDS.yMax-BOUNDS.yMin);
+}
+
+function makeAgent(address, name){
+  var x = BOUNDS.xMin + Math.random()*(BOUNDS.xMax-BOUNDS.xMin);
+  var y = BOUNDS.yMin + Math.random()*(BOUNDS.yMax-BOUNDS.yMin);
+  return {id:address, name:name, color:nextColor(), x:x, y:y, tx:x, ty:y, hp:100, maxHp:100,
+    hitsLanded:0, hitsTaken:0, barrier:0, nextMove:0, nextBarrier:3+Math.random()*5, flash:0, facing:1};
+}
+
+function drawBackground(){
+  rect(0,0,W,H,'#150f28');
+  rect(0,FLOOR_Y,W,H-FLOOR_Y,'#191233');
+  for(var x=0;x<W;x+=16){
+    for(var y=FLOOR_Y;y<H;y+=16){
+      if(((x/16+((y-FLOOR_Y)/16))%2)===0) rect(x,y,16,16,'#1d1638');
+    }
+  }
+  rect(0,0,W,FLOOR_Y,'#120c22');
+  var gw=100, gx=(W-gw)/2, gy=10, gh=FLOOR_Y-22;
+  var grad=ctx.createLinearGradient(0,gy,0,gy+gh);
+  grad.addColorStop(0,'#c23a6b'); grad.addColorStop(1,'#5a1f45');
+  rect(gx,gy,gw,gh,'#2a1f4a');
+  rect(gx+4,gy+4,gw-8,gh-8,'#3a2a5a');
+  ctx.fillStyle=grad; ctx.globalAlpha=.85; ctx.fillRect(gx+8,gy+8,gw-16,gh-16); ctx.globalAlpha=1;
+  rect(0,FLOOR_Y-3,W,3,'#0d0818');
+}
+
+function drawBarrier(a){
+  if(a.barrier<=0) return;
+  var bx = a.x + a.facing*16, by=a.y;
+  var alpha = a.barrier>1 ? 1 : a.barrier;
+  rect(bx-6,by-20,12,20,'#5a4a2a',alpha*0.95);
+  rect(bx-6,by-20,12,3,'#8a723a',alpha*0.95);
+  ctx.save(); ctx.shadowColor='#f5c542'; ctx.shadowBlur=6;
+  rect(bx-5,by-13,10,2,'#f5c542',alpha*0.7);
+  ctx.restore();
+}
+
+function drawAgent(a){
+  var x=a.x, y=a.y;
+  var groundGrad=ctx.createRadialGradient(x,y+2,1,x,y+2,18);
+  groundGrad.addColorStop(0, a.color+'55');
+  groundGrad.addColorStop(1, a.color+'00');
+  ctx.fillStyle=groundGrad; ctx.beginPath(); ctx.ellipse(x,y+2,18,5,0,0,Math.PI*2); ctx.fill();
+
+  var flashOn = a.flash>0 && Math.floor(a.flash*20)%2===0;
+  var bodyTint = flashOn ? '#ff5555' : '#3a2f5c';
+  var headTint = flashOn ? '#ffb3b3' : '#e4e0f5';
+
+  rect(x-1,y-40,2,6,'#cfc9e6');
+  rect(x-2,y-43,4,4,flashOn?'#ff8080':'#cfc9e6');
+  rect(x-7,y-36,14,12,headTint);
+  rect(x-7,y-36,14,2,'#c9c2e8');
+  ctx.save(); ctx.shadowColor=a.color; ctx.shadowBlur=8;
+  rect(x-5,y-31,10,4,a.color);
+  ctx.restore();
+  rect(x-9,y-24,18,16,bodyTint);
+  rect(x-9,y-24,18,3,'#4a3d70');
+  rect(x-2,y-19,4,4,a.color);
+  rect(x-12,y-22,3,10,'#2e2450');
+  rect(x+9,y-22,3,10,'#2e2450');
+  rect(x-6,y-8,5,9,'#241c3f');
+  rect(x+1,y-8,5,9,'#241c3f');
+
+  var bw=26, bh=4, bx=x-bw/2, by=y-52;
+  rect(bx-1,by-1,bw+2,bh+2,'#0d0a1a',.9);
+  var pct=Math.max(0,a.hp/a.maxHp);
+  var hpColor = pct>.5?'#4ade80':(pct>.25?'#f5c542':'#f87171');
+  rect(bx,by,bw*pct,bh,hpColor);
+
+  ctx.font="8px 'Press Start 2P'";
+  ctx.textAlign='center';
+  ctx.fillStyle = a.id===leaderId ? '#f5c542' : '#cfc9e6';
+  ctx.fillText(a.name, x, by-6);
+  ctx.textAlign='left';
+}
+
+function drawCrown(x,y){
+  rect(x-7,y-14,14,4,'#f5c542');
+  rect(x-7,y-18,3,5,'#f5c542');
+  rect(x-1.5,y-20,3,7,'#f5c542');
+  rect(x+4,y-18,3,5,'#f5c542');
+}
+
+function fireAttack(attacker){
+  var others = AGENTS.filter(function(a){return a.id!==attacker.id;});
+  others.forEach(function(target){
+    PROJECTILES.push({
+      fx:attacker.x, fy:attacker.y-26, tx:target.x, ty:target.y-20,
+      t:0, dur:.4, color:attacker.color, targetId:target.id, attackerId:attacker.id, dmg:9+Math.random()*6
+    });
+  });
+  if(others.length){
+    setTicker('<b>'+attacker.name.toUpperCase()+'</b> copy trade hit &mdash; firing at '+others.map(function(o){return o.name;}).join(', '));
+  }
+}
+
+function resolveHit(p){
+  var target = AGENTS.find(function(a){return a.id===p.targetId;});
+  var attacker = AGENTS.find(function(a){return a.id===p.attackerId;});
+  if(!target) return;
+  if(target.barrier>0){
+    target.barrier=0;
+    SPARKS.push({x:target.x,y:target.y-26,t:0,color:'#f5c542'});
+    POPUPS.push({x:target.x,y:target.y-40,text:'BLOCKED',t:0,color:'#f5c542'});
+    return;
+  }
+  target.hp = Math.max(0, target.hp - p.dmg);
+  target.flash = 0.35;
+  if(attacker) attacker.hitsLanded++;
+  target.hitsTaken++;
+  POPUPS.push({x:target.x,y:target.y-40,text:'-'+Math.round(p.dmg),t:0,color:'#f87171'});
+  SPARKS.push({x:target.x,y:target.y-26,t:0,color:'#f87171'});
+}
+
+function setTicker(html){
+  document.getElementById('ticker').innerHTML = html;
+}
+
+function renderHud(){
+  if(!AGENTS.length){
+    document.getElementById('hudRows').innerHTML = '<div class="roster-empty">No wallets in the arena &mdash; add one below</div>';
+    return;
+  }
+  var sorted = AGENTS.slice().sort(function(a,b){return b.hp-a.hp || b.hitsLanded-a.hitsLanded;});
+  var rows = sorted.map(function(a,i){
+    var badges = (a.barrier>0?'<span class="hud-badge cooldown">SHIELDED</span>':'');
+    return '<div class="hud-row">'
+      +'<div class="hud-rank'+(i===0?' r1':'')+'">0'+(i+1)+'</div>'
+      +'<div class="hud-swatch" style="background:'+a.color+'"></div>'
+      +'<div class="hud-main">'
+        +'<div class="hud-name-row"><span>'+a.name+'</span><span class="hud-badges">'+badges+'</span></div>'
+        +'<div class="hud-stats"><span>HP <b>'+Math.round(a.hp)+'</b>/100</span><span>&#9876; '+a.hitsLanded+' hits landed</span></div>'
+        +'<div class="hud-combat">took '+a.hitsTaken+' hits</div>'
+      +'</div>'
+    +'</div>';
+  }).join('');
+  document.getElementById('hudRows').innerHTML = rows;
+}
+
+function renderRoster(){
+  var wrap = document.getElementById('rosterRows');
+  if(!AGENTS.length){
+    wrap.innerHTML = '<div class="roster-empty">Roster is empty</div>';
+    return;
+  }
+  wrap.innerHTML = AGENTS.map(function(a){
+    return '<div class="roster-row">'
+      +'<div class="hud-swatch" style="background:'+a.color+'"></div>'
+      +'<div class="roster-name">'+a.name+'</div>'
+      +'<button class="roster-btn remove" data-id="'+a.id+'">REMOVE</button>'
+    +'</div>';
+  }).join('');
+  wrap.querySelectorAll('.roster-btn.remove').forEach(function(btn){
+    btn.addEventListener('click', function(){ removeAgent(btn.getAttribute('data-id')); });
+  });
+}
+
+var lastT = performance.now();
+function loop(now){
+  var dt = Math.min(.05,(now-lastT)/1000);
+  lastT = now;
+
+  AGENTS.forEach(function(a){
+    a.nextMove -= dt;
+    if(a.nextMove<=0){ pickTarget(a); a.nextMove = 2+Math.random()*2.5; }
+    var dx=a.tx-a.x, dy=a.ty-a.y, d=Math.hypot(dx,dy);
+    if(d>2){
+      var sp=22;
+      a.x += (dx/d)*sp*dt; a.y += (dy/d)*sp*dt;
+      a.facing = dx>=0?1:-1;
+    }
+    a.hp = Math.min(a.maxHp, a.hp + 2.2*dt);
+    if(a.flash>0) a.flash = Math.max(0,a.flash-dt);
+    a.nextBarrier -= dt;
+    if(a.barrier>0){ a.barrier -= dt; if(a.barrier<0) a.barrier=0; }
+    else if(a.nextBarrier<=0){ a.barrier=6; a.nextBarrier = 9+Math.random()*6; }
+  });
+
+  if(AGENTS.length){
+    var lead = AGENTS.slice().sort(function(a,b){return b.hp-a.hp || b.hitsLanded-a.hitsLanded;})[0];
+    leaderId = lead.id;
+    crownX += (lead.x-crownX)*Math.min(1,dt*4);
+    crownY += ((lead.y-58)-crownY)*Math.min(1,dt*4);
+  } else {
+    leaderId = null;
+  }
+
+  for(var i=PROJECTILES.length-1;i>=0;i--){
+    var p=PROJECTILES[i];
+    p.t += dt/p.dur;
+    if(p.t>=1){ resolveHit(p); PROJECTILES.splice(i,1); }
+  }
+  for(i=POPUPS.length-1;i>=0;i--){ POPUPS[i].t+=dt; if(POPUPS[i].t>1) POPUPS.splice(i,1); }
+  for(i=SPARKS.length-1;i>=0;i--){ SPARKS[i].t+=dt; if(SPARKS[i].t>.3) SPARKS.splice(i,1); }
+
+  drawBackground();
+  AGENTS.forEach(drawBarrier);
+  AGENTS.slice().sort(function(a,b){return a.y-b.y;}).forEach(drawAgent);
+  if(AGENTS.length) drawCrown(crownX,crownY);
+
+  PROJECTILES.forEach(function(p){
+    var x=p.fx+(p.tx-p.fx)*p.t, y=p.fy+(p.ty-p.fy)*p.t;
+    ctx.save(); ctx.shadowColor=p.color; ctx.shadowBlur=8;
+    rect(x-2,y-2,4,4,p.color);
+    ctx.restore();
+    rect(p.fx+(x-p.fx)*.5-1,p.fy+(y-p.fy)*.5-1,2,2,p.color,.4);
+  });
+  SPARKS.forEach(function(s){
+    var r=6+s.t*18, a=1-s.t/.3;
+    ctx.globalAlpha=Math.max(0,a); ctx.strokeStyle=s.color; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.arc(s.x,s.y,r,0,Math.PI*2); ctx.stroke(); ctx.globalAlpha=1;
+  });
+  POPUPS.forEach(function(p){
+    ctx.globalAlpha=Math.max(0,1-p.t);
+    ctx.font="9px 'Press Start 2P'"; ctx.fillStyle=p.color; ctx.textAlign='center';
+    ctx.fillText(p.text, p.x, p.y-p.t*18);
+    ctx.textAlign='left'; ctx.globalAlpha=1;
+  });
+
+  renderHud();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+// ── REAL DATA: poll /arena/api, sync roster, fire attacks on real copy-trade hits ──
+function syncFromServer(data){
+  var serverAddrs = data.wallets.map(function(w){return w.address;});
+
+  // remove agents no longer tracked server-side
+  AGENTS = AGENTS.filter(function(a){ return serverAddrs.indexOf(a.id)!==-1; });
+
+  data.wallets.forEach(function(w){
+    var existing = AGENTS.find(function(a){return a.id===w.address;});
+    if(!existing){
+      AGENTS.push(makeAgent(w.address, w.name));
+      lastSeenEntries[w.address] = w.copy_entries;
+      return;
+    }
+    var prevEntries = lastSeenEntries[w.address];
+    if(prevEntries!==undefined && w.copy_entries>prevEntries){
+      fireAttack(existing);
+    }
+    lastSeenEntries[w.address] = w.copy_entries;
+  });
+
+  renderRoster();
+
+  var statusEl = document.getElementById('copyStatus');
+  if(!data.copy_trade_on){
+    statusEl.textContent='COPY TRADE OFF';
+    statusEl.className='copy-status off';
+  } else {
+    statusEl.textContent='';
+    statusEl.className='copy-status';
+  }
+}
+
+function pollArena(){
+  fetch('/arena/api').then(function(r){return r.json();}).then(syncFromServer).catch(function(){});
+}
+pollArena();
+setInterval(pollArena, 3000);
+
+// ── ADD / REMOVE ROSTER — hits real backend, persists across redeploys ──
+async function _arenaAdminPost(url,body){
+  var s=localStorage.getItem('api_secret')||'';
+  var hdrs={'Content-Type':'application/json'};
+  if(s) hdrs['X-API-Key']=s;
+  var r=await fetch(url,{method:'POST',headers:hdrs,body:JSON.stringify(body)});
+  if(r.status===401){
+    var k=prompt('API secret required:');
+    if(!k)return null;
+    localStorage.setItem('api_secret',k);
+    return _arenaAdminPost(url,body);
+  }
+  return r.json();
+}
+
+function removeAgent(id){
+  _arenaAdminPost('/wallets/remove', {address:id}).then(function(d){
+    if(d && d.ok){
+      var idx = AGENTS.findIndex(function(a){return a.id===id;});
+      if(idx!==-1){
+        var removed=AGENTS[idx];
+        AGENTS.splice(idx,1);
+        PROJECTILES = PROJECTILES.filter(function(p){return p.attackerId!==id && p.targetId!==id;});
+        setTicker('<b>'+removed.name.toUpperCase()+'</b> removed from the arena');
+        renderRoster();
+      }
+    } else if(d){
+      alert(d.error||'Failed to remove wallet');
+    }
+  });
+}
+
+function addAgent(){
+  var nameEl=document.getElementById('rName'), addrEl=document.getElementById('rAddr'), btn=document.getElementById('rAddBtn');
+  var name=nameEl.value.trim(), addr=addrEl.value.trim();
+  if(!name){ alert('Enter a wallet name'); return; }
+  if(addr.length<32 || addr.length>44){ alert('Enter a valid Solana wallet address (32-44 characters)'); return; }
+  btn.disabled=true;
+  _arenaAdminPost('/wallets/add', {address:addr, name:name}).then(function(d){
+    btn.disabled=false;
+    if(d && d.ok){
+      AGENTS.push(makeAgent(d.address, d.name));
+      lastSeenEntries[d.address]=0;
+      nameEl.value=''; addrEl.value='';
+      setTicker('<b>'+d.name.toUpperCase()+'</b> entered the arena');
+      renderRoster();
+    } else if(d){
+      alert(d.error||'Failed to add wallet');
+    }
+  });
+}
+document.getElementById('rAddBtn').addEventListener('click', addAgent);
+renderRoster();
+</script>
+</body>
+</html>"""
+    html = html.replace("__BOT_NAME__", BOT_NAME)
+    return html, 200
+
+@app.route("/arena/api", methods=["GET"])
+def arena_api():
+    """Lean polling endpoint for the Wallet Arena page — raw unix last_seen so the
+    client can diff copy_entries locally and trigger an attack animation on change."""
+    roster = _tracked_wallet_list()
+    now = time.time()
+    out = []
+    for w in roster:
+        addr = w["address"]
+        rec = _wallet_activity.get(addr, {"detections": 0, "entries": 0, "last_seen": 0.0})
+        out.append({
+            "address":      addr,
+            "name":         w["name"],
+            "detections":   rec["detections"],
+            "copy_entries": rec["entries"],
+            "last_seen":    rec["last_seen"],
+            "backoff":      addr in _helius_backoff and _helius_backoff[addr]["until"] > now,
+        })
+    out.sort(key=lambda r: r["detections"], reverse=True)
+    return jsonify({"wallets": out, "copy_trade_on": COPY_TRADE})
 
 @app.route("/blacklist/<mint>", methods=["GET"])
 def blacklist_route(mint):
@@ -9959,6 +10513,7 @@ if __name__ == "__main__":
         log("warn", "WALLET/WALLET_PRIVATE_KEY not set — PAPER mode")
 
     _load_daily_state()
+    _load_wallets()
     _load_pause()
     # Restore webhook ID so we update rather than create a duplicate on restart
     _saved_wh_id = redis_load("helius_wh_id")
