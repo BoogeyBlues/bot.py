@@ -85,11 +85,8 @@ BOT_NAME          = os.environ.get("BOT_NAME", "Boogey's Treasure Chest")
 BOT_PAUSED        = os.environ.get("BOT_PAUSED", "false").lower() == "true"  # set true in Railway to halt all trading
 
 # Position sizing — capital-tiered (protects small accounts)
-MIN_TRADE         = float(os.environ.get("MIN_TRADE",   "8"))
-MIN_TOKENS_BUY    = float(os.environ.get("MIN_TOKENS_BUY", "250000"))   # only enter if trade size buys ≥250K tokens (~$50K mcap ceiling at $12 trades) — early but past the rug gauntlet (0 = off)
-EST_FEE_USD       = float(os.environ.get("EST_FEE_USD", "0.15"))        # est. round-trip cost: priority fees + AMM fees; profit targets shift up to clear this
-EARLY_CUT_PCT     = float(os.environ.get("EARLY_CUT_PCT", "5"))         # young trade (≤2 min) down this % = bad entry, cut before the full 8% SL
-RIDE_MAX_SECS     = int(os.environ.get("RIDE_MAX_SECS", "1200"))        # safety valve: even an "armed" (real-momentum) trade force-closes after this long if it just plateaus, so the one slot isn't blocked forever
+MIN_TRADE         = float(os.environ.get("MIN_TRADE",   "3"))           # reverted to the Aug 8 "Momentum mode" profile
+MIN_TOKENS_BUY    = float(os.environ.get("MIN_TOKENS_BUY", "0"))        # early-entry gate didn't exist in the Aug 8 profile — off (0 = off)
 RECONCILE_SECS    = int(os.environ.get("RECONCILE_SECS", "600"))        # sync capital counter to real wallet balance every N secs (live, no open trades)
 MAX_TRADE         = float(os.environ.get("MAX_TRADE",   "500"))
 FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "0"))   # 0 = use tiered % sizing
@@ -115,7 +112,7 @@ ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # kept for ref
 BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "57"))  # 57%+ = confirmed momentum zone — coin has survived the early rug window
 BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "73"))
 BOND_TP_PCT     = float(os.environ.get("BOND_TP_PCT",    "10"))  # 10% TP — always take 10, compound fast
-BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "8"))
+BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "6"))
 BOND_GRAD_BOND  = float(os.environ.get("BOND_GRAD_BOND", "90"))  # graduation imminent — tighten TSL
 BOND_GRAD_TSL   = float(os.environ.get("BOND_GRAD_TSL",  "3"))   # tight TSL % near graduation
 BOND_MAX_SECS       = int(os.environ.get("BOND_MAX_SECS",       "240"))  # 4 min max — don't babysit slow coins
@@ -150,13 +147,13 @@ SLIP_DROP_TO   = float(os.environ.get("SLIP_DROP_TO",  "85"))
 SLIP_WAIT_SECS = int(os.environ.get("SLIP_WAIT_SECS",  "6"))
 
 # Trailing stop loss — activates once trade is up TSL_ACTIVATE_PCT, then trails BOND_SL_PCT below peak
-TSL_ACTIVATE_PCT = float(os.environ.get("TSL_ACTIVATE_PCT", "4"))   # peak gain needed to "arm" a trade — armed trades exit only via TSL, never the flat timeout (was 7; lowered so real-but-modest moves aren't punished by the clock)
+TSL_ACTIVATE_PCT = float(os.environ.get("TSL_ACTIVATE_PCT", "7"))   # TSL kicks in at +7% — protects against rug pumps (Aug 8 profile)
 SHARP_DROP_PCT = float(os.environ.get("SHARP_DROP_PCT", "4"))
 
 # Partial take-profit — scale out to lock gains without killing the run
 # TP1: +7% → sell 30%; TP2: +10% → sell 30% of remaining; final ~49% rides to BOND_TP at +12%
-PARTIAL_TP1_PCT  = float(os.environ.get("PARTIAL_TP1_PCT",  "5"))   # sell 50% at net +5% — lock early profit
-PARTIAL_TP2_PCT  = float(os.environ.get("PARTIAL_TP2_PCT",  "8"))   # sell 30% more at net +8% — remainder rides the TSL
+PARTIAL_TP1_PCT  = float(os.environ.get("PARTIAL_TP1_PCT",  "99"))  # disabled — clean 10% exit, no early partials (Aug 8 profile)
+PARTIAL_TP2_PCT  = float(os.environ.get("PARTIAL_TP2_PCT",  "99"))
 
 # Bundle mode: "avoid" or "ride"
 BUNDLE_MODE       = os.environ.get("BUNDLE_MODE", "avoid").lower()
@@ -314,16 +311,16 @@ NTFY_TOPIC       = os.environ.get("NTFY_TOPIC", "")
 
 # Social / quality gates
 MIN_REPLIES      = int(os.environ.get("MIN_REPLIES",      "2"))   # 2+ replies = some engagement; bond % (57%+) is the real momentum proof
-MIN_SOCIALS      = int(os.environ.get("MIN_SOCIALS",       "0"))   # no social requirement — bond % is the quality gate
+MIN_SOCIALS      = int(os.environ.get("MIN_SOCIALS",       "2"))   # need Twitter + Telegram minimum (Aug 8 profile)
 MIN_LIQ          = float(os.environ.get("MIN_LIQ",        "500"))
-MIN_VOL_5M       = float(os.environ.get("MIN_VOL_5M",      "250"))  # 5-min volume gate; lowered to catch early momentum entries
-MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "1"))     # ≥1 confirmation (smart money / boost / trending) — filters unconfirmed pumps
+MIN_VOL_5M       = float(os.environ.get("MIN_VOL_5M",      "500"))  # 5-min volume gate (Aug 8 profile)
+MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "2"))     # ≥2 signal points (Aug 8 profile)
 MAX_RUG_SCORE    = int(os.environ.get("MAX_RUG_SCORE",    "400"))   # rugcheck score ceiling (higher = riskier)
 
 # General
 MAX_OPEN      = int(os.environ.get("MAX_OPEN",      "1"))   # 1 at a time — full focus, compound cleanly
 SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "2"))
-RSI_ENTRY_MAX = float(os.environ.get("RSI_ENTRY_MAX", "80"))  # skip if 5m RSI above this (80 = overbought but still riding)
+RSI_ENTRY_MAX = float(os.environ.get("RSI_ENTRY_MAX", "70"))  # skip if 5m RSI above this — was hardcoded 70 in the Aug 8 profile
 
 SOL_RPC         = os.environ.get("SOL_RPC", "https://api.mainnet-beta.solana.com")
 HELIUS_API_KEY        = os.environ.get("HELIUS_API_KEY", "")
@@ -2018,7 +2015,7 @@ def _refresh_dsc_signals():
                         continue
                     pc5  = float((pair.get("priceChange") or {}).get("m5", 0) or 0)
                     vol5 = float((pair.get("volume") or {}).get("m5", 0) or 0)
-                    if pc5 > 3 and vol5 > 1000:
+                    if pc5 > 3 and vol5 > 5000:
                         addr = (pair.get("baseToken") or {}).get("address", "")
                         if addr:
                             organic.add(addr)
@@ -3143,126 +3140,107 @@ def _check_one_position(mint):
 
         move_pct     = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
         partial_done = trade.get("partial_tp_done", 0)
-        # Fee-aware targets: shift profit triggers up by the round-trip fee cost as a %
-        # of this trade's size, so a "win" is a net win after priority + AMM fees.
-        fee_pct = (EST_FEE_USD / max(trade.get("amount", MIN_TRADE), 0.01)) * 100
 
-        if partial_done == 0 and move_pct >= PARTIAL_TP1_PCT + fee_pct:
-            _partial_exit(mint, price, 0.50, "PARTIAL_TP1")
+        if partial_done == 0 and move_pct >= PARTIAL_TP1_PCT:
+            _partial_exit(mint, price, 0.30, "PARTIAL_TP1")
             with trades_lock:
                 if mint not in open_trades or open_trades[mint].get("_exiting"):
                     return
                 trade = dict(open_trades[mint])
             partial_done = 1
 
-        if partial_done == 1 and move_pct >= PARTIAL_TP2_PCT + fee_pct:
+        if partial_done == 1 and move_pct >= PARTIAL_TP2_PCT:
             _partial_exit(mint, price, 0.30, "PARTIAL_TP2")
             with trades_lock:
                 if mint not in open_trades or open_trades[mint].get("_exiting"):
                     return
                 trade = dict(open_trades[mint])
 
-        # Early loser cut: a trade ≤2 min old already down EARLY_CUT_PCT never had
-        # momentum — cut it before the full SL. Winners shed 80% early; this keeps
-        # losers from holding the full bag to -8% (fixes the size asymmetry).
-        if EARLY_CUT_PCT > 0 and 20 <= elapsed <= 120 and move_pct <= -EARLY_CUT_PCT:
-            exit_trade(mint, price, "EARLY_CUT", bond); return
-
-        # "Armed" = this trade has, at some point, actually shown real momentum
-        # (peaked at TSL_ACTIVATE_PCT). Once armed, the trailing stop is the exit —
-        # never the clock. This is the fix: previously the time-cutoff compared
-        # CURRENT move against a ~net-12% bar, so almost nothing escaped it inside
-        # 5 minutes and the clock was closing trades that had already moved, not
-        # just the genuinely dead ones. Now the clock only catches trades that
-        # never showed momentum at all; armed trades ride until the TSL breaks,
-        # with RIDE_MAX_SECS as a plateau safety valve so the slot can't lock up.
-        armed = entry_gain_pct >= TSL_ACTIVATE_PCT
-
         if strategy == "bond":
-            # No hard TP — partials lock 80% by net +8%; the rest rides the TSL
-            # while momentum holds (trail = momentum gate: 8% off peak = broken)
+            move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
+            if move >= BOND_TP_PCT:
+                exit_trade(mint, price, "BOND_TP", bond); return
             if bond >= BOND_GRAD_BOND and entry_gain_pct >= 3:
                 tight_tsl = price_high * (1 - BOND_GRAD_TSL / 100)
                 if price <= tight_tsl:
                     exit_trade(mint, price, "BOND_GRAD_TSL", bond); return
             if price <= tsl_price:
-                exit_trade(mint, price, "BOND_TSL" if armed else "BOND_SL", bond); return
-            if not armed and elapsed >= BOND_MAX_SECS:
+                exit_trade(mint, price, "BOND_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "BOND_SL", bond); return
+            if elapsed >= BOND_MAX_SECS:
                 exit_trade(mint, price, "BOND_TIME", bond); return
-            if armed and elapsed >= RIDE_MAX_SECS:
-                exit_trade(mint, price, "BOND_RIDE_CAP", bond); return
 
         elif strategy == "spike":
+            move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
+            if move >= SPIKE_TP_PCT:
+                exit_trade(mint, price, "SPIKE_TP", bond); return
             if price <= tsl_price:
-                exit_trade(mint, price, "SPIKE_TSL" if armed else "SPIKE_SL", bond); return
-            if not armed and elapsed >= SPIKE_MAX_SECS:
+                exit_trade(mint, price, "SPIKE_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "SPIKE_SL", bond); return
+            if elapsed >= SPIKE_MAX_SECS:
                 exit_trade(mint, price, "SPIKE_TIME", bond); return
-            if armed and elapsed >= RIDE_MAX_SECS:
-                exit_trade(mint, price, "SPIKE_RIDE_CAP", bond); return
 
         elif strategy == "copy":
             # Bond-based exits — same as bond runner; price feed unreliable for new tokens
+            move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
+            if move >= BOND_TP_PCT:
+                exit_trade(mint, price, "COPY_TP", bond); return
             if bond >= BOND_GRAD_BOND and entry_gain_pct >= 3:
                 tight_tsl = price_high * (1 - BOND_GRAD_TSL / 100)
                 if price <= tight_tsl:
                     exit_trade(mint, price, "COPY_GRAD_TSL", bond); return
             if price <= tsl_price:
-                exit_trade(mint, price, "COPY_TSL" if armed else "COPY_SL", bond); return
-            if not armed and elapsed >= BOND_MAX_SECS:
+                exit_trade(mint, price, "COPY_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "COPY_SL", bond); return
+            if elapsed >= BOND_MAX_SECS:
                 exit_trade(mint, price, "COPY_TIME", bond); return
-            if armed and elapsed >= RIDE_MAX_SECS:
-                exit_trade(mint, price, "COPY_RIDE_CAP", bond); return
 
         elif strategy == "fast":
-            if price <= tsl_price:
-                exit_trade(mint, price, "FAST_TSL" if armed else "FAST_SL", bond); return
-            if not armed and elapsed >= FAST_MAX_SECS:
+            move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
+            if move >= FAST_TP_PCT:
+                exit_trade(mint, price, "FAST_TP", bond); return
+            if price <= trade["entry"] * (1 - FAST_SL_PCT / 100):
+                exit_trade(mint, price, "FAST_SL", bond); return
+            if elapsed >= FAST_MAX_SECS:
                 exit_trade(mint, price, "FAST_TIME", bond); return
-            if armed and elapsed >= RIDE_MAX_SECS:
-                exit_trade(mint, price, "FAST_RIDE_CAP", bond); return
 
         elif strategy == "trench":
+            move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
             if bond >= 99:
                 exit_trade(mint, price, "TRENCH_GRAD", bond); return
+            if move >= TRENCH_TP_PCT:
+                exit_trade(mint, price, "TRENCH_TP", bond); return
             if price <= tsl_price:
-                exit_trade(mint, price, "TRENCH_TSL" if armed else "TRENCH_SL", bond); return
-            if not armed and elapsed >= TRENCH_MAX_SECS:
+                exit_trade(mint, price, "TRENCH_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "TRENCH_SL", bond); return
+            if elapsed >= TRENCH_MAX_SECS:
                 exit_trade(mint, price, "TRENCH_TIME", bond); return
-            if armed and elapsed >= RIDE_MAX_SECS:
-                exit_trade(mint, price, "TRENCH_RIDE_CAP", bond); return
 
         elif strategy == "migrate":
             migrate_elapsed = time.time() - trade.get("grad_opened_at", trade["opened_at"])
+            move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
+            if move >= MIGRATE_TP_PCT:
+                exit_trade(mint, price, "MIGRATE_TP", bond); return
             if price <= tsl_price:
-                exit_trade(mint, price, "MIGRATE_TSL" if armed else "MIGRATE_SL", bond); return
-            if not armed and migrate_elapsed >= MIGRATE_MAX_SECS:
+                exit_trade(mint, price, "MIGRATE_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else "MIGRATE_SL", bond); return
+            if migrate_elapsed >= MIGRATE_MAX_SECS:
                 exit_trade(mint, price, "MIGRATE_TIME", bond); return
-            if armed and migrate_elapsed >= RIDE_MAX_SECS:
-                exit_trade(mint, price, "MIGRATE_RIDE_CAP", bond); return
 
         elif strategy in ("birdeye", "dsc_organic", "gmgn_signal", "dsc_signal", "jup_signal"):
-            # Momentum trades: partials already lock 80% by net +8%; the remainder
-            # rides the trailing stop for as long as it holds — no profit bar to
-            # clear to escape the clock, just "did it ever really move."
-            if price <= tsl_price:
-                exit_trade(mint, price,
-                           f"{strategy.upper()}_TSL" if armed else f"{strategy.upper()}_SL",
-                           bond); return
-            if not armed and elapsed >= 300:
-                # Quick in and out: 5-min limit on trades that never showed momentum
+            # Momentum trades: clean 10% take-profit, 5% stop, 10-min time limit —
+            # the Aug 8 "Momentum mode" profile this was reverted back to.
+            move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
+            if move >= 10:
+                exit_trade(mint, price, f"{strategy.upper()}_TP", bond); return
+            if price <= trade["entry"] * 0.95:
+                exit_trade(mint, price, f"{strategy.upper()}_SL", bond); return
+            if elapsed >= 600:
                 exit_trade(mint, price, f"{strategy.upper()}_TIME", bond); return
-            if armed and elapsed >= RIDE_MAX_SECS:
-                exit_trade(mint, price, f"{strategy.upper()}_RIDE_CAP", bond); return
 
         else:
             # Generic fallback for any strategy without a dedicated block (bundle, legacy,
             # future) — guarantees every open position has a working SL/TSL and time limit
+            move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
             if price <= tsl_price:
-                exit_trade(mint, price, f"{strategy.upper()}_TSL" if armed else f"{strategy.upper()}_SL", bond); return
-            if not armed and elapsed >= BOND_MAX_SECS:
+                exit_trade(mint, price, f"{strategy.upper()}_TSL" if entry_gain_pct >= TSL_ACTIVATE_PCT else f"{strategy.upper()}_SL", bond); return
+            if elapsed >= BOND_MAX_SECS and move < BOND_TP_PCT:
                 exit_trade(mint, price, f"{strategy.upper()}_TIME", bond); return
-            if armed and elapsed >= RIDE_MAX_SECS:
-                exit_trade(mint, price, f"{strategy.upper()}_RIDE_CAP", bond); return
 
         pct = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
         tsl_info = f" TSL@{tsl_price:.6f}" if entry_gain_pct >= TSL_ACTIVATE_PCT else ""
