@@ -6567,32 +6567,33 @@ def admin_reset_daily():
 
 @app.route("/admin/reset-capital", methods=["POST"])
 def admin_reset_capital():
+    """Resets ONLY capital and today's session — never touches trade history.
+    All-time win rate, PnL, and the trade log survive this every time. If you
+    genuinely want a full wipe including history, that's /admin/reset-all."""
     denied = _auth_required()
     if denied: return denied
     global capital, scan_active, BOT_PAUSED
     global _day_start_cap, _daily_cap_notified, _consecutive_losses
+    global _daily_trades, _daily_wins, _daily_losses
     with capital_lock:
         capital = STARTING_CAPITAL
-    with trades_lock:
-        completed_trades.clear()
-    # usdc_locked is deliberately NOT touched here — it's supposed to be secured,
-    # protected profit. Zeroing it on a capital reset meant the bot's own tracking
-    # of already-locked money silently vanished every time this was called, even
-    # though the real USDC (in live mode) never left the wallet. Use /clear-usdc
-    # if you actually want to zero the locked-profit counter.
+    # completed_trades, usdc_locked, and open_trades are deliberately NOT touched —
+    # this is a capital + today's-session reset, not a history wipe. Trade history,
+    # secured USDC profit, and open positions all carry forward untouched.
     with _daily_lock:
-        _day_start_cap      = STARTING_CAPITAL  # stale baseline would trip the daily-loss guard
+        _day_start_cap      = STARTING_CAPITAL  # today's loss-guard baseline
         _daily_cap_notified = False
         _consecutive_losses = 0
+        _daily_trades       = 0
+        _daily_wins          = 0
+        _daily_losses        = 0
     # Revive trading — a capital halt or pause must not survive an explicit reset
     scan_active = True
     BOT_PAUSED  = False
     _persist_pause(0.0)
-    _redis_cmd("DEL", "bot_trades")
-    redis_save("bot_trades", [])
     _save_daily_state()
-    log("ok", f"Capital reset to ${STARTING_CAPITAL:.2f} via /admin/reset-capital — scanner revived")
-    return jsonify({"ok": True, "msg": f"Capital reset to ${STARTING_CAPITAL:.2f}, win rate cleared, scanner running"})
+    log("ok", f"Capital + session reset to ${STARTING_CAPITAL:.2f} via /admin/reset-capital — history untouched, scanner revived")
+    return jsonify({"ok": True, "msg": f"Capital reset to ${STARTING_CAPITAL:.2f} — trade history kept, scanner running"})
 
 @app.route("/set-capital/<float:amount>")
 def set_capital_get(amount):
