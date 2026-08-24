@@ -374,6 +374,8 @@ MILESTONES = [100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000]
 # ── STATE ────────────────────────────────────────────────────────
 capital           = float(os.environ.get("STARTING_CAPITAL", "100"))
 STARTING_CAPITAL  = capital  # snapshot of configured start, for UI display
+_capital_epoch_start = 0.0   # unix ts of the last explicit capital reset/set — see _epoch_stats()
+_capital_epoch_start_value = capital  # capital AT that reset/set — "Started at $X" tracks this, not the fixed constant
 SOL_ALLOCATED     = float(os.environ.get("SOL_ALLOCATED",     "19.67"))  # SOL wallet funded for trading
 capital_lock      = threading.Lock()
 open_trades       = {}
@@ -592,6 +594,8 @@ def _save_daily_state():
         "usdc_locked":    usdc_snap,
         "paper_mode":     PAPER_MODE,
         "pending_lock":   pending_snap,
+        "capital_epoch_start":       _capital_epoch_start,
+        "capital_epoch_start_value": _capital_epoch_start_value,
         "wallet_activity": activity_snap,
         "combat_events":   events_snap,
         "strategy_version": "steady_v1",
@@ -609,6 +613,7 @@ def _save_daily_state():
 def _load_daily_state():
     global _daily_date, _daily_trades, _daily_wins, _daily_losses
     global _pause_until, capital, _week_start_date, _week_day_logs, completed_trades
+    global _capital_epoch_start, _capital_epoch_start_value
     global _day_start_cap, TUNE_PAUSED_UNTIL, usdc_locked, _pending_lock_usd, PAPER_MODE
     global _wallet_activity, _combat_events
     global BOND_ENTRY_MIN, BOND_ENTRY_MAX, BOND_TP_PCT, BOND_SL_PCT
@@ -649,6 +654,10 @@ def _load_daily_state():
                 usdc_locked = float(s["usdc_locked"])
             if "pending_lock" in s:
                 _pending_lock_usd = float(s["pending_lock"])
+            if "capital_epoch_start" in s:
+                _capital_epoch_start = float(s["capital_epoch_start"] or 0)
+            if "capital_epoch_start_value" in s:
+                _capital_epoch_start_value = float(s["capital_epoch_start_value"] or STARTING_CAPITAL)
             # Wallet Arena combat state — HP/hits/detections accumulate across restarts
             if "wallet_activity" in s:
                 with _activity_lock:
@@ -1161,6 +1170,28 @@ def _archive_stats():
     }
     _archive_stats_cache = (time.time(), stats)
     return stats
+
+def _epoch_stats():
+    """Total/wins/win_rate/pnl since the LAST explicit capital reset/set — this is
+    what the home page's headline PnL/Win Rate must use. Capital itself resets on
+    those actions but trade history never does (by design — nothing wipes memory
+    now), so an all-time PnL next to a just-reset capital number will almost never
+    arithmetically add up (Capital != Started + PnL) and reads as "the numbers are
+    off" even though nothing is actually broken. Scoping PnL to the same window as
+    capital keeps the headline numbers self-consistent. True all-time totals are
+    still available, unscoped, via _archive_stats() / GET /trades/archive."""
+    archive = redis_load("bot_trades_archive") or []
+    since = archive if _capital_epoch_start <= 0 else [
+        t for t in archive if t.get("closed_ts", 0) >= _capital_epoch_start
+    ]
+    wins = sum(1 for t in since if t.get("pnl", 0) > 0)
+    total = len(since)
+    return {
+        "total": total,
+        "wins": wins,
+        "win_rate": round(wins / max(total, 1) * 100, 1),
+        "pnl": sum(t.get("pnl", 0) for t in since),
+    }
 
 def record_trade(trade_data):
     try:
@@ -4495,10 +4526,13 @@ def _home_inner():
         open_list = list(open_trades.values())
     with usdc_lock:
         locked = usdc_locked
-    # "ALL TIME" stats must come from the permanent archive, not completed_trades —
-    # that working view is capped at 200 and gets wiped by /admin/reset-capital and
-    # /admin/reset-all, so it was silently lying about being "all time."
-    _astats = _archive_stats()
+    # Headline PnL/Win Rate are scoped to SINCE THE LAST CAPITAL RESET, matching
+    # what Capital itself is scoped to — resets never delete history (nothing does
+    # anymore), but Capital does restart at STARTING_CAPITAL, so an unscoped
+    # all-time PnL next to it would almost never add up (Capital != Started + PnL)
+    # and reads as broken even though nothing is. True all-time totals are still
+    # available, unscoped, via GET /trades/archive.
+    _astats = _epoch_stats()
     total = _astats["total"]
     wr    = _astats["win_rate"]
     pnl   = _astats["pnl"]
@@ -4730,15 +4764,15 @@ def _home_inner():
     <div class="card gold-card glow">
       <div class="lbl">Capital</div>
       <div id="h-cap" class="val gold">${cap:.2f}</div>
-      <div class="sub">Started at ${STARTING_CAPITAL:.2f}</div>
+      <div class="sub">Started at ${_capital_epoch_start_value:.2f}</div>
     </div>
     <div class="card">
       <div class="lbl">Total PnL</div>
-      <div id="h-pnl" class="val {'green' if pnl>=0 else 'red'}">{'+' if pnl>=0 else ''}${pnl:.2f}</div>
+      <div id="h-pnl" class="val {'green' if pnl>=0 else 'red'}">{'+' if pnl>=0 else ''}${abs(pnl):.2f}</div>
       <div id="h-pnl-sub" class="sub">{total} trades closed</div>
     </div>
     <div class="card">
-      <div class="lbl">Win Rate <span style="font-size:.6rem;letter-spacing:.06em;color:var(--muted);font-weight:500">ALL TIME</span></div>
+      <div class="lbl">Win Rate <span style="font-size:.6rem;letter-spacing:.06em;color:var(--muted);font-weight:500">SINCE RESET</span></div>
       <div id="h-wr" class="val {'green' if wr>=50 else 'red'}">{wr}%</div>
       <div id="h-wr-sub" class="sub">{_astats["wins"]}W &nbsp;/&nbsp; {total-_astats["wins"]}L</div>
     </div>
@@ -4988,19 +5022,19 @@ async function pollStats(){{
     if(capEl) capEl.textContent='$'+d.capital.toFixed(2);
     const pnlEl=document.getElementById('h-pnl');
     if(pnlEl){{
-      const sign=d.all_time_pnl>=0?'+':'';
-      pnlEl.textContent=sign+'$'+Math.abs(d.all_time_pnl).toFixed(2);
-      pnlEl.style.color=d.all_time_pnl>=0?'#4ade80':'#f87171';
+      const sign=d.run_pnl>=0?'+':'';
+      pnlEl.textContent=sign+'$'+Math.abs(d.run_pnl).toFixed(2);
+      pnlEl.style.color=d.run_pnl>=0?'#4ade80':'#f87171';
     }}
     const pnlSub=document.getElementById('h-pnl-sub');
-    if(pnlSub) pnlSub.textContent=d.all_time_trades+' trades closed';
+    if(pnlSub) pnlSub.textContent=d.run_trades+' trades closed';
     const wrEl=document.getElementById('h-wr');
     if(wrEl){{
-      wrEl.textContent=d.all_time_win_rate+'%';
-      wrEl.style.color=d.all_time_win_rate>=50?'#4ade80':'#f87171';
+      wrEl.textContent=d.run_win_rate+'%';
+      wrEl.style.color=d.run_win_rate>=50?'#4ade80':'#f87171';
     }}
     const wrSub=document.getElementById('h-wr-sub');
-    if(wrSub) wrSub.innerHTML=d.all_time_wins+'W &nbsp;/&nbsp; '+d.all_time_losses+'L';
+    if(wrSub) wrSub.innerHTML=d.run_wins+'W &nbsp;/&nbsp; '+d.run_losses+'L';
     const sizeEl=document.getElementById('h-size');
     if(sizeEl) sizeEl.textContent='$'+d.trade_size.toFixed(2);
     const sizeSubEl=document.getElementById('h-size-sub');
@@ -5218,12 +5252,12 @@ def _home_punk(cap, open_list, locked, wins_count, total, wr, pnl, mode,
   <div class="hero">
     <div class="hero-lbl">Current Capital</div>
     <div id="pk-cap" class="hero-cap">${cap:.2f}</div>
-    <div id="pk-pnl" class="hero-pnl">{sign}${pnl:.2f} total PnL</div>
-    <div id="pk-hero-sub" class="hero-sub">Started ${STARTING_CAPITAL:.2f} &nbsp;·&nbsp; {total} trades closed</div>
+    <div id="pk-pnl" class="hero-pnl">{sign}${abs(pnl):.2f} total PnL</div>
+    <div id="pk-hero-sub" class="hero-sub">Started ${_capital_epoch_start_value:.2f} &nbsp;·&nbsp; {total} trades closed</div>
   </div>
   <div class="grid">
     <div class="stat">
-      <div class="lbl">Win Rate <span style="font-size:.6rem;opacity:.5;letter-spacing:.05em">ALL TIME</span></div>
+      <div class="lbl">Win Rate <span style="font-size:.6rem;opacity:.5;letter-spacing:.05em">SINCE RESET</span></div>
       <div id="pk-wr" class="val" style="color:{wr_color}">{wr}%</div>
       <div id="pk-wr-sub" class="sub">{wins_count}W / {total-wins_count}L</div>
     </div>
@@ -5317,19 +5351,19 @@ async function pollPunk(){{
     if(capEl) capEl.textContent='$'+d.capital.toFixed(2);
     const pnlEl=document.getElementById('pk-pnl');
     if(pnlEl){{
-      const sign=d.all_time_pnl>=0?'+':'';
-      pnlEl.textContent=sign+'$'+Math.abs(d.all_time_pnl).toFixed(2)+' total PnL';
-      pnlEl.style.color=d.all_time_pnl>=0?'#39ff14':'#ff006e';
+      const sign=d.run_pnl>=0?'+':'';
+      pnlEl.textContent=sign+'$'+Math.abs(d.run_pnl).toFixed(2)+' total PnL';
+      pnlEl.style.color=d.run_pnl>=0?'#39ff14':'#ff006e';
     }}
     const subEl=document.getElementById('pk-hero-sub');
-    if(subEl) subEl.innerHTML='Started ${STARTING_CAPITAL:.2f} &nbsp;·&nbsp; '+d.all_time_trades+' trades closed';
+    if(subEl) subEl.innerHTML='Started $'+d.run_started_at.toFixed(2)+' &nbsp;·&nbsp; '+d.run_trades+' trades closed';
     const wrEl=document.getElementById('pk-wr');
     if(wrEl){{
-      wrEl.textContent=d.all_time_win_rate+'%';
-      wrEl.style.color=d.all_time_win_rate>=50?'#39ff14':'#ff006e';
+      wrEl.textContent=d.run_win_rate+'%';
+      wrEl.style.color=d.run_win_rate>=50?'#39ff14':'#ff006e';
     }}
     const wrSub=document.getElementById('pk-wr-sub');
-    if(wrSub) wrSub.textContent=d.all_time_wins+'W / '+d.all_time_losses+'L';
+    if(wrSub) wrSub.textContent=d.run_wins+'W / '+d.run_losses+'L';
     const sizeEl=document.getElementById('pk-size');
     if(sizeEl) sizeEl.textContent='$'+d.trade_size.toFixed(2);
     const pkSizeSub=document.getElementById('pk-size-sub');
@@ -5351,14 +5385,18 @@ setInterval(pollPunk,5000);
 
 @app.route("/status/api", methods=["GET"])
 def status_api():
-    # total_trades/wins/losses/win_rate/total_pnl below are the CURRENT WORKING
-    # WINDOW (completed_trades) — useful for judging the strategy since the last
-    # reset, but NOT all-time (reset-capital/reset-all clear this). The all_time_*
-    # fields are sourced from the permanent archive and are genuinely all-time —
-    # the home page's "ALL TIME" labels must read from those, not the window ones.
+    # total_trades/wins/losses/win_rate/total_pnl: recent working view
+    # (completed_trades, capped ~200) — no reset clears this anymore either, it's
+    # just a smaller recent slice, not scoped to anything in particular.
+    # run_*: scoped to since the last capital reset/set — THIS is what the home
+    # page's headline cards use, so Capital and PnL stay arithmetically consistent
+    # (Capital == Started + run_pnl). Labeled "SINCE RESET", not "ALL TIME".
+    # career_*: the true permanent, unscoped totals from the whole archive —
+    # nothing is ever hidden, it's just not the headline number anymore.
     wins  = [t for t in completed_trades if t.get("pnl", 0) > 0]
     total = len(completed_trades)
     pnl   = sum(t.get("pnl", 0) for t in completed_trades)
+    _estats = _epoch_stats()
     _astats = _archive_stats()
     with capital_lock:
         cap = capital
@@ -5383,11 +5421,17 @@ def status_api():
         "losses":       total - len(wins),
         "win_rate":     round(len(wins) / max(total, 1) * 100, 1),
         "total_pnl":    round(pnl, 4),
-        "all_time_trades":   _astats["total"],
-        "all_time_wins":     _astats["wins"],
-        "all_time_losses":   _astats["total"] - _astats["wins"],
-        "all_time_win_rate": _astats["win_rate"],
-        "all_time_pnl":      round(_astats["pnl"], 4),
+        "run_trades":    _estats["total"],
+        "run_wins":      _estats["wins"],
+        "run_losses":    _estats["total"] - _estats["wins"],
+        "run_win_rate":  _estats["win_rate"],
+        "run_pnl":       round(_estats["pnl"], 4),
+        "run_started_at": round(_capital_epoch_start_value, 2),
+        "career_trades":   _astats["total"],
+        "career_wins":     _astats["wins"],
+        "career_losses":   _astats["total"] - _astats["wins"],
+        "career_win_rate": _astats["win_rate"],
+        "career_pnl":      round(_astats["pnl"], 4),
         "trade_size":   round(trade_size(), 2),
         "usdc_locked":  round(locked, 2),
         "sol_price":    round(sol_price, 2) if sol_price else None,
@@ -6572,11 +6616,13 @@ def admin_reset_capital():
     genuinely want a full wipe including history, that's /admin/reset-all."""
     denied = _auth_required()
     if denied: return denied
-    global capital, scan_active, BOT_PAUSED
+    global capital, scan_active, BOT_PAUSED, _capital_epoch_start, _capital_epoch_start_value
     global _day_start_cap, _daily_cap_notified, _consecutive_losses
     global _daily_trades, _daily_wins, _daily_losses
     with capital_lock:
         capital = STARTING_CAPITAL
+    _capital_epoch_start       = time.time()  # headline PnL/win-rate now scope to from here
+    _capital_epoch_start_value = STARTING_CAPITAL
     # completed_trades, usdc_locked, and open_trades are deliberately NOT touched —
     # this is a capital + today's-session reset, not a history wipe. Trade history,
     # secured USDC profit, and open positions all carry forward untouched.
@@ -6598,7 +6644,7 @@ def admin_reset_capital():
 @app.route("/set-capital/<float:amount>")
 def set_capital_get(amount):
     """Manually set capital to a specific value. Clears ghost open positions. Keeps trade history."""
-    global capital, _day_start_cap, _daily_cap_notified
+    global capital, _day_start_cap, _daily_cap_notified, _capital_epoch_start, _capital_epoch_start_value
     if amount <= 0 or amount > 100000:
         return "Invalid amount", 400
     cleared = []
@@ -6609,6 +6655,8 @@ def set_capital_get(amount):
         redis_save("bot_open_trades", [])
     with capital_lock:
         capital = float(amount)
+    _capital_epoch_start       = time.time()
+    _capital_epoch_start_value = float(amount)
     with _daily_lock:
         _day_start_cap      = float(amount)
         _daily_cap_notified = False
@@ -6625,7 +6673,7 @@ def admin_sync_capital():
     """Read SOL + USDC balance from wallet and sync bot capital."""
     denied = _auth_required()
     if denied: return denied
-    global capital, _day_start_cap, _daily_cap_notified
+    global capital, _day_start_cap, _daily_cap_notified, _capital_epoch_start, _capital_epoch_start_value
     if not WALLET or not _SOLANA_AVAILABLE:
         return jsonify({"error": "No wallet configured"}), 400
     sol_price = get_sol_price() or 0
@@ -6660,6 +6708,8 @@ def admin_sync_capital():
                 old = capital
                 with capital_lock:
                     capital = usd
+                _capital_epoch_start       = time.time()
+                _capital_epoch_start_value = usd
                 with _daily_lock:
                     _day_start_cap      = usd
                     _daily_cap_notified = False
@@ -6697,9 +6747,11 @@ def admin_set_capital():
         redis_save("bot_open_trades", [])
 
     # Set capital and reset loss guard baseline
-    global _day_start_cap, _daily_cap_notified
+    global _day_start_cap, _daily_cap_notified, _capital_epoch_start, _capital_epoch_start_value
     with capital_lock:
         capital = float(amount)
+    _capital_epoch_start       = time.time()
+    _capital_epoch_start_value = float(amount)
     with _daily_lock:
         _day_start_cap      = float(amount)
         _daily_cap_notified = False
@@ -6767,12 +6819,14 @@ def admin_reset_all():
     reset-capital doesn't is force-clear open positions (use this if one's stuck)."""
     denied = _auth_required()
     if denied: return denied
-    global capital, scan_active, BOT_PAUSED
+    global capital, scan_active, BOT_PAUSED, _capital_epoch_start, _capital_epoch_start_value
     global _daily_trades, _daily_wins, _daily_losses, _daily_cap_notified
     global _day_start_cap, _consecutive_losses
 
     with capital_lock:
         capital = STARTING_CAPITAL
+    _capital_epoch_start       = time.time()
+    _capital_epoch_start_value = STARTING_CAPITAL
     with trades_lock:
         open_trades.clear()
     # completed_trades, usdc_locked, _wallet_activity, _combat_events: never
