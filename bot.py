@@ -866,6 +866,28 @@ def daily_limit_reached():
                     f"Done for today. Auto-resumes at midnight."
                 )
             return True
+
+        # Daily loss circuit breaker — MAX_DAILY_LOSS_PCT was defined and displayed
+        # on /status as an active safeguard ("Max 40%") but nothing ever actually
+        # checked it. A real capital crash from $100 to $15.67 in a single day
+        # (84% loss, more than double the supposed limit) proved this was pure
+        # decoration. This is the actual enforcement: once today's drawdown from
+        # _day_start_cap hits MAX_DAILY_LOSS_PCT, no new entries until tomorrow —
+        # open positions still exit normally via their own SL/TP/time logic.
+        if _day_start_cap > 0:
+            with capital_lock:
+                cap_now = capital
+            loss_pct = (_day_start_cap - cap_now) / _day_start_cap * 100
+            if loss_pct >= MAX_DAILY_LOSS_PCT:
+                log("warn", f"Daily loss guard: down {loss_pct:.0f}% (limit {MAX_DAILY_LOSS_PCT:.0f}%) — no new entries until tomorrow")
+                if not _daily_cap_notified:
+                    _daily_cap_notified = True
+                    notify(
+                        "🛑 Daily Loss Limit Hit",
+                        f"Down {loss_pct:.0f}% today (${_day_start_cap:,.2f} → ${cap_now:,.2f})\n"
+                        f"No new entries until tomorrow. Open positions still exit normally."
+                    )
+                return True
         return False
 
 def record_daily_trade(won):
