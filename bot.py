@@ -6761,9 +6761,13 @@ def clear_ghosts_get():
 
 @app.route("/admin/reset-all", methods=["POST"])
 def admin_reset_all():
+    """Capital + today's session + clears any stuck/open positions. Never wipes
+    memory: trade history, USDC locked, wallet activity, and combat stats all
+    survive this, same as /admin/reset-capital. The only thing this does that
+    reset-capital doesn't is force-clear open positions (use this if one's stuck)."""
     denied = _auth_required()
     if denied: return denied
-    global capital, usdc_locked, scan_active, BOT_PAUSED
+    global capital, scan_active, BOT_PAUSED
     global _daily_trades, _daily_wins, _daily_losses, _daily_cap_notified
     global _day_start_cap, _consecutive_losses
 
@@ -6771,9 +6775,8 @@ def admin_reset_all():
         capital = STARTING_CAPITAL
     with trades_lock:
         open_trades.clear()
-        completed_trades.clear()
-    with usdc_lock:
-        usdc_locked = 0.0
+    # completed_trades, usdc_locked, _wallet_activity, _combat_events: never
+    # touched by any reset now — no memory is ever wiped, by design.
     with _daily_lock:
         _daily_trades       = 0
         _daily_wins         = 0
@@ -6782,17 +6785,16 @@ def admin_reset_all():
         _day_start_cap      = STARTING_CAPITAL
         _consecutive_losses = 0
 
-    # Revive trading — halts and pauses must not survive an explicit full reset
+    # Revive trading — halts and pauses must not survive an explicit reset
     scan_active = True
     BOT_PAUSED  = False
     _persist_pause(0.0)
 
     _save_daily_state()
-    redis_save("bot_trades", [])
     redis_save("bot_open_trades", [])
 
-    log("ok", f"FULL RESET — capital=${STARTING_CAPITAL:.2f}, all history wiped, scanner revived")
-    return jsonify({"ok": True, "msg": f"Full reset — capital restored to ${STARTING_CAPITAL:.2f}, scanner running. Reload the page."})
+    log("ok", f"Capital + session reset to ${STARTING_CAPITAL:.2f} via /admin/reset-all — history untouched, open positions cleared, scanner revived")
+    return jsonify({"ok": True, "msg": f"Capital reset to ${STARTING_CAPITAL:.2f}, open positions cleared — trade history kept, scanner running"})
 
 def _persist_pause(until_ts: float):
     """Write pause timestamp to Redis so it survives restarts and daily resets."""
