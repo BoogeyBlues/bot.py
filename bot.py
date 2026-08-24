@@ -669,14 +669,15 @@ def _load_daily_state():
             _week_day_logs   = s.get("week_logs",  [])
             if s.get("day_start_cap", 0) > 0:
                 _day_start_cap = float(s["day_start_cap"])
-                # If saved baseline is >2x current capital the account was synced / partially
-                # funded after last restart — reset baseline so the daily loss guard doesn't
-                # permanently block trading.
-                with capital_lock:
-                    _cur = capital
-                if _cur > 0 and _day_start_cap > _cur * 2:
-                    _day_start_cap = _cur
-                    log("warn", f"day_start_cap reset to ${_cur:.2f} (was {_day_start_cap:.2f}) — capital changed since last run")
+                # NOTE: this used to "correct" _day_start_cap back down to current
+                # capital whenever it looked stale (>2x current). That ran on every
+                # restart regardless of whether it was actually a new trading day —
+                # meaning a real in-day drawdown got silently erased by any redeploy
+                # that happened to land mid-crash, defeating the daily loss guard.
+                # Every capital-changing endpoint (set-capital, sync-capital,
+                # reset-capital, reset-all) already updates _day_start_cap itself as
+                # part of that same call, so this safety net was solving a problem
+                # that no longer exists and only introduced a bigger one. Removed.
             TUNE_PAUSED_UNTIL = float(s.get("tune_paused_until", _next_monday_7am()))
             # Restore tuner parameters — env vars are initial defaults only; Redis wins
             if "bond_entry_min"  in s: BOND_ENTRY_MIN  = float(s["bond_entry_min"])
