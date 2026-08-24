@@ -1116,6 +1116,29 @@ def _archive_trade(trade_data):
     except Exception as e:
         log("warn", f"Trade archive write failed: {e}", "ARCHIVE")
 
+_archive_stats_cache = (0.0, None)  # (fetched_at, stats_dict) — short TTL, archive can be large
+
+def _archive_stats():
+    """Total/wins/win_rate/pnl computed from the PERMANENT archive, not the resettable
+    completed_trades working view. Anything on-screen labeled "ALL TIME" should use
+    this — completed_trades gets wiped by /admin/reset-capital and /admin/reset-all,
+    so a stat sourced from it is not actually all-time despite the label."""
+    global _archive_stats_cache
+    fetched_at, cached = _archive_stats_cache
+    if cached is not None and time.time() - fetched_at < 10:
+        return cached
+    archive = redis_load("bot_trades_archive") or []
+    wins = sum(1 for t in archive if t.get("pnl", 0) > 0)
+    total = len(archive)
+    stats = {
+        "total": total,
+        "wins": wins,
+        "win_rate": round(wins / max(total, 1) * 100, 1),
+        "pnl": sum(t.get("pnl", 0) for t in archive),
+    }
+    _archive_stats_cache = (time.time(), stats)
+    return stats
+
 def record_trade(trade_data):
     try:
         # Caller already appended to completed_trades — read from in-memory list,
@@ -4449,10 +4472,13 @@ def _home_inner():
         open_list = list(open_trades.values())
     with usdc_lock:
         locked = usdc_locked
-    wins  = [t for t in completed_trades if t.get("pnl", 0) > 0]
-    total = len(completed_trades)
-    wr    = round(len(wins) / max(total, 1) * 100, 1)
-    pnl   = sum(t.get("pnl", 0) for t in completed_trades)
+    # "ALL TIME" stats must come from the permanent archive, not completed_trades —
+    # that working view is capped at 200 and gets wiped by /admin/reset-capital and
+    # /admin/reset-all, so it was silently lying about being "all time."
+    _astats = _archive_stats()
+    total = _astats["total"]
+    wr    = _astats["win_rate"]
+    pnl   = _astats["pnl"]
     mode  = "PAPER" if PAPER_MODE else "LIVE"
     pct, limit = _cap_tier(cap)
     next_m = next((m for m in MILESTONES if m > cap), None)
@@ -4491,7 +4517,7 @@ def _home_inner():
                       f'</tr>')
 
     if theme == "punk":
-        return _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
+        return _home_punk(cap, open_list, locked, _astats["wins"], total, wr, pnl, mode,
                           pct, limit, next_m, progress_pct, cap_json, rows, open_rows)
 
     html = f"""<!DOCTYPE html>
@@ -4691,7 +4717,7 @@ def _home_inner():
     <div class="card">
       <div class="lbl">Win Rate <span style="font-size:.6rem;letter-spacing:.06em;color:var(--muted);font-weight:500">ALL TIME</span></div>
       <div id="h-wr" class="val {'green' if wr>=50 else 'red'}">{wr}%</div>
-      <div id="h-wr-sub" class="sub">{len(wins)}W &nbsp;/&nbsp; {total-len(wins)}L</div>
+      <div id="h-wr-sub" class="sub">{_astats["wins"]}W &nbsp;/&nbsp; {total-_astats["wins"]}L</div>
     </div>
     <div class="card">
       <div class="lbl">Trade Size <span style="font-size:.6rem;letter-spacing:.06em;color:var(--muted);font-weight:500">TODAY</span></div>
@@ -4939,19 +4965,19 @@ async function pollStats(){{
     if(capEl) capEl.textContent='$'+d.capital.toFixed(2);
     const pnlEl=document.getElementById('h-pnl');
     if(pnlEl){{
-      const sign=d.total_pnl>=0?'+':'';
-      pnlEl.textContent=sign+'$'+Math.abs(d.total_pnl).toFixed(2);
-      pnlEl.style.color=d.total_pnl>=0?'#4ade80':'#f87171';
+      const sign=d.all_time_pnl>=0?'+':'';
+      pnlEl.textContent=sign+'$'+Math.abs(d.all_time_pnl).toFixed(2);
+      pnlEl.style.color=d.all_time_pnl>=0?'#4ade80':'#f87171';
     }}
     const pnlSub=document.getElementById('h-pnl-sub');
-    if(pnlSub) pnlSub.textContent=d.total_trades+' trades closed';
+    if(pnlSub) pnlSub.textContent=d.all_time_trades+' trades closed';
     const wrEl=document.getElementById('h-wr');
     if(wrEl){{
-      wrEl.textContent=d.win_rate+'%';
-      wrEl.style.color=d.win_rate>=50?'#4ade80':'#f87171';
+      wrEl.textContent=d.all_time_win_rate+'%';
+      wrEl.style.color=d.all_time_win_rate>=50?'#4ade80':'#f87171';
     }}
     const wrSub=document.getElementById('h-wr-sub');
-    if(wrSub) wrSub.innerHTML=d.wins+'W &nbsp;/&nbsp; '+d.losses+'L';
+    if(wrSub) wrSub.innerHTML=d.all_time_wins+'W &nbsp;/&nbsp; '+d.all_time_losses+'L';
     const sizeEl=document.getElementById('h-size');
     if(sizeEl) sizeEl.textContent='$'+d.trade_size.toFixed(2);
     const sizeSubEl=document.getElementById('h-size-sub');
@@ -5051,7 +5077,7 @@ async function togglePause(){{
     return html, 200
 
 
-def _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
+def _home_punk(cap, open_list, locked, wins_count, total, wr, pnl, mode,
                pct, limit, next_m, progress_pct, cap_json, rows, open_rows):
     sign      = "+" if pnl >= 0 else ""
     pnl_color = "#39ff14" if pnl >= 0 else "#ff006e"
@@ -5176,7 +5202,7 @@ def _home_punk(cap, open_list, locked, wins, total, wr, pnl, mode,
     <div class="stat">
       <div class="lbl">Win Rate <span style="font-size:.6rem;opacity:.5;letter-spacing:.05em">ALL TIME</span></div>
       <div id="pk-wr" class="val" style="color:{wr_color}">{wr}%</div>
-      <div id="pk-wr-sub" class="sub">{len(wins)}W / {total-len(wins)}L</div>
+      <div id="pk-wr-sub" class="sub">{wins_count}W / {total-wins_count}L</div>
     </div>
     <div class="stat">
       <div class="lbl">Trade Size <span style="font-size:.6rem;opacity:.5;letter-spacing:.05em">TODAY</span></div>
@@ -5268,19 +5294,19 @@ async function pollPunk(){{
     if(capEl) capEl.textContent='$'+d.capital.toFixed(2);
     const pnlEl=document.getElementById('pk-pnl');
     if(pnlEl){{
-      const sign=d.total_pnl>=0?'+':'';
-      pnlEl.textContent=sign+'$'+Math.abs(d.total_pnl).toFixed(2)+' total PnL';
-      pnlEl.style.color=d.total_pnl>=0?'#39ff14':'#ff006e';
+      const sign=d.all_time_pnl>=0?'+':'';
+      pnlEl.textContent=sign+'$'+Math.abs(d.all_time_pnl).toFixed(2)+' total PnL';
+      pnlEl.style.color=d.all_time_pnl>=0?'#39ff14':'#ff006e';
     }}
     const subEl=document.getElementById('pk-hero-sub');
-    if(subEl) subEl.innerHTML='Started ${STARTING_CAPITAL:.2f} &nbsp;·&nbsp; '+d.total_trades+' trades closed';
+    if(subEl) subEl.innerHTML='Started ${STARTING_CAPITAL:.2f} &nbsp;·&nbsp; '+d.all_time_trades+' trades closed';
     const wrEl=document.getElementById('pk-wr');
     if(wrEl){{
-      wrEl.textContent=d.win_rate+'%';
-      wrEl.style.color=d.win_rate>=50?'#39ff14':'#ff006e';
+      wrEl.textContent=d.all_time_win_rate+'%';
+      wrEl.style.color=d.all_time_win_rate>=50?'#39ff14':'#ff006e';
     }}
     const wrSub=document.getElementById('pk-wr-sub');
-    if(wrSub) wrSub.textContent=d.wins+'W / '+d.losses+'L';
+    if(wrSub) wrSub.textContent=d.all_time_wins+'W / '+d.all_time_losses+'L';
     const sizeEl=document.getElementById('pk-size');
     if(sizeEl) sizeEl.textContent='$'+d.trade_size.toFixed(2);
     const pkSizeSub=document.getElementById('pk-size-sub');
@@ -5302,9 +5328,15 @@ setInterval(pollPunk,5000);
 
 @app.route("/status/api", methods=["GET"])
 def status_api():
+    # total_trades/wins/losses/win_rate/total_pnl below are the CURRENT WORKING
+    # WINDOW (completed_trades) — useful for judging the strategy since the last
+    # reset, but NOT all-time (reset-capital/reset-all clear this). The all_time_*
+    # fields are sourced from the permanent archive and are genuinely all-time —
+    # the home page's "ALL TIME" labels must read from those, not the window ones.
     wins  = [t for t in completed_trades if t.get("pnl", 0) > 0]
     total = len(completed_trades)
     pnl   = sum(t.get("pnl", 0) for t in completed_trades)
+    _astats = _archive_stats()
     with capital_lock:
         cap = capital
     sol_price = get_sol_price()
@@ -5328,6 +5360,11 @@ def status_api():
         "losses":       total - len(wins),
         "win_rate":     round(len(wins) / max(total, 1) * 100, 1),
         "total_pnl":    round(pnl, 4),
+        "all_time_trades":   _astats["total"],
+        "all_time_wins":     _astats["wins"],
+        "all_time_losses":   _astats["total"] - _astats["wins"],
+        "all_time_win_rate": _astats["win_rate"],
+        "all_time_pnl":      round(_astats["pnl"], 4),
         "trade_size":   round(trade_size(), 2),
         "usdc_locked":  round(locked, 2),
         "sol_price":    round(sol_price, 2) if sol_price else None,
