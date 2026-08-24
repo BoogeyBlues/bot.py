@@ -6568,14 +6568,17 @@ def admin_reset_daily():
 def admin_reset_capital():
     denied = _auth_required()
     if denied: return denied
-    global capital, usdc_locked, scan_active, BOT_PAUSED
+    global capital, scan_active, BOT_PAUSED
     global _day_start_cap, _daily_cap_notified, _consecutive_losses
     with capital_lock:
         capital = STARTING_CAPITAL
     with trades_lock:
         completed_trades.clear()
-    with usdc_lock:
-        usdc_locked = 0.0
+    # usdc_locked is deliberately NOT touched here — it's supposed to be secured,
+    # protected profit. Zeroing it on a capital reset meant the bot's own tracking
+    # of already-locked money silently vanished every time this was called, even
+    # though the real USDC (in live mode) never left the wallet. Use /clear-usdc
+    # if you actually want to zero the locked-profit counter.
     with _daily_lock:
         _day_start_cap      = STARTING_CAPITAL  # stale baseline would trip the daily-loss guard
         _daily_cap_notified = False
@@ -6607,9 +6610,9 @@ def set_capital_get(amount):
     with _daily_lock:
         _day_start_cap      = float(amount)
         _daily_cap_notified = False
-    with usdc_lock:
-        global usdc_locked
-        usdc_locked = 0.0
+    # usdc_locked intentionally untouched — this endpoint's own docstring promises
+    # "keeps trade history," and secured profit shouldn't disappear just because
+    # the trading-capital counter got manually adjusted.
     _save_daily_state()
     ghost_msg = f" Cleared {len(cleared)} ghost(s): {', '.join(cleared)}." if cleared else ""
     log("ok", f"Capital manually set to ${amount:.2f}.{ghost_msg}")
@@ -6674,7 +6677,7 @@ def admin_sync_capital():
 def admin_set_capital():
     denied = _auth_required()
     if denied: return denied
-    global capital, usdc_locked, _daily_trades, _daily_wins, _daily_losses
+    global capital, _daily_trades, _daily_wins, _daily_losses
     body = request.json or {}
     try:
         amount = float(body.get("amount", 0))
@@ -6698,8 +6701,7 @@ def admin_set_capital():
     with _daily_lock:
         _day_start_cap      = float(amount)
         _daily_cap_notified = False
-    with usdc_lock:
-        usdc_locked = 0.0
+    # usdc_locked intentionally untouched — see /admin/reset-capital for why.
 
     # Remove ghost completed trades if target_pnl provided
     removed_trade = None
