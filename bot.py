@@ -88,6 +88,14 @@ BOT_PAUSED        = os.environ.get("BOT_PAUSED", "false").lower() == "true"  # s
 MIN_TRADE         = float(os.environ.get("MIN_TRADE",   "3"))           # reverted to the Aug 8 "Momentum mode" profile
 MIN_TOKENS_BUY    = float(os.environ.get("MIN_TOKENS_BUY", "0"))        # early-entry gate didn't exist in the Aug 8 profile — off (0 = off)
 RECONCILE_SECS    = int(os.environ.get("RECONCILE_SECS", "600"))        # sync capital counter to real wallet balance every N secs (live, no open trades)
+
+# Momentum "hop in, ride to a double, bank half, let half run" strategy — the
+# target is a PERCENTAGE of the position, not a fixed dollar figure, so it scales
+# automatically with capital/trade size the way trade_size() already scales entries.
+MOMENTUM_DOUBLE_PCT  = float(os.environ.get("MOMENTUM_DOUBLE_PCT",  "100"))  # position must double before any profit is taken
+MOMENTUM_BANK_FRAC   = float(os.environ.get("MOMENTUM_BANK_FRAC",   "0.5")) # fraction sold at the double — 0.5 recovers exactly the original cost basis
+MOMENTUM_DEV_SECS    = int(os.environ.get("MOMENTUM_DEV_SECS",      "900")) # time allowed to reach the double before giving up on it
+RIDE_MAX_SECS        = int(os.environ.get("RIDE_MAX_SECS",         "1800")) # safety valve: even a banked/riding position force-closes after this long if it plateaus, so the one slot isn't blocked forever
 MAX_TRADE         = float(os.environ.get("MAX_TRADE",   "500"))
 FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "0"))   # 0 = use tiered % sizing
 
@@ -3217,8 +3225,13 @@ def _check_one_position(mint):
 
         move_pct     = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
         partial_done = trade.get("partial_tp_done", 0)
+        # Momentum strategies run their own dedicated double-then-bank-half logic
+        # below — this generic ladder must not also fire for them (it used to sit
+        # at 99%/99%, just 1 point under the momentum double trigger, so it would
+        # have banked 30% at the wrong threshold before the real logic ever ran).
+        _is_momentum = strategy in ("birdeye", "dsc_organic", "gmgn_signal", "dsc_signal", "jup_signal")
 
-        if partial_done == 0 and move_pct >= PARTIAL_TP1_PCT:
+        if not _is_momentum and partial_done == 0 and move_pct >= PARTIAL_TP1_PCT:
             _partial_exit(mint, price, 0.30, "PARTIAL_TP1")
             with trades_lock:
                 if mint not in open_trades or open_trades[mint].get("_exiting"):
@@ -3226,7 +3239,7 @@ def _check_one_position(mint):
                 trade = dict(open_trades[mint])
             partial_done = 1
 
-        if partial_done == 1 and move_pct >= PARTIAL_TP2_PCT:
+        if not _is_momentum and partial_done == 1 and move_pct >= PARTIAL_TP2_PCT:
             _partial_exit(mint, price, 0.30, "PARTIAL_TP2")
             with trades_lock:
                 if mint not in open_trades or open_trades[mint].get("_exiting"):
@@ -3300,15 +3313,31 @@ def _check_one_position(mint):
                 exit_trade(mint, price, "MIGRATE_TIME", bond); return
 
         elif strategy in ("birdeye", "dsc_organic", "gmgn_signal", "dsc_signal", "jup_signal"):
-            # Momentum trades: clean 10% take-profit, 5% stop, 10-min time limit —
-            # the Aug 8 "Momentum mode" profile this was reverted back to.
+            # Momentum: hop in, ride to a double, bank half (recovers the original
+            # cost basis exactly), let the other half keep riding on a trailing
+            # stop for further upside. MOMENTUM_DOUBLE_PCT is a percentage, so this
+            # scales with capital/trade size automatically — a $7 trade and a $50
+            # trade both target the same relative move, just different dollar amounts.
             move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
-            if move >= 10:
-                exit_trade(mint, price, f"{strategy.upper()}_TP", bond); return
-            if price <= trade["entry"] * 0.95:
-                exit_trade(mint, price, f"{strategy.upper()}_SL", bond); return
-            if elapsed >= 600:
-                exit_trade(mint, price, f"{strategy.upper()}_TIME", bond); return
+            mom_banked = trade.get("partial_tp_done", 0) > 0
+
+            if not mom_banked:
+                # Hasn't doubled yet — protect against it never developing
+                if price <= trade["entry"] * (1 - BOND_SL_PCT / 100):
+                    exit_trade(mint, price, f"{strategy.upper()}_SL", bond); return
+                if move >= MOMENTUM_DOUBLE_PCT:
+                    _partial_exit(mint, price, MOMENTUM_BANK_FRAC, f"{strategy.upper()}_DOUBLE")
+                    return  # re-evaluate next tick — now in the "ride the rest" phase
+                if elapsed >= MOMENTUM_DEV_SECS:
+                    exit_trade(mint, price, f"{strategy.upper()}_TIME", bond); return
+            else:
+                # Principal already recovered — remainder is riding on the trailing
+                # stop (armed once peak gain crosses TSL_ACTIVATE_PCT, which it will
+                # already have well past a double) until the trend actually breaks.
+                if price <= tsl_price:
+                    exit_trade(mint, price, f"{strategy.upper()}_RIDE_TSL", bond); return
+                if elapsed >= RIDE_MAX_SECS:
+                    exit_trade(mint, price, f"{strategy.upper()}_RIDE_CAP", bond); return
 
         else:
             # Generic fallback for any strategy without a dedicated block (bundle, legacy,
