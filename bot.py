@@ -10083,7 +10083,6 @@ def _pos_price(trade):
             return entry * (1 + (bond_h - bond_e) / 100)
     return trade.get("price_high", trade["entry"])
 
-@app.route("/positions/api", methods=["GET"])
 def _position_display_targets(strategy):
     """What this position's exit plan actually is, for accurate dashboard display.
     Was hardcoded to PARTIAL_TP1_PCT (99, globally disabled) for every strategy
@@ -10107,6 +10106,7 @@ def _position_display_targets(strategy):
         return {"sl_pct": BOND_SL_PCT, "tp_pct": BOND_TP_PCT, "tp_note": "hard TP"}
     return {"sl_pct": BOND_SL_PCT, "tp_pct": BOND_TP_PCT, "tp_note": "generic fallback"}
 
+@app.route("/positions/api", methods=["GET"])
 def positions_api():
     with trades_lock:
         rows = []
