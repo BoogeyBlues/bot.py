@@ -118,27 +118,17 @@ caught, each time discovered from a live screenshot, not from reading the code.
 - The momentum "double" strategy needs a real sample before anyone trusts it
 - `paper_mode` has been `true` for this entire session — nothing here has been proven
   under real execution conditions (slippage, fills, latency)
-- **`exit_trade()`'s pnl/capital math uses the SL/TP *trigger* price (from the market-data
-  feed), not the actual Jupiter swap fill price.** `_verify_sell_and_retry()` only
-  corrects capital when a sell fails outright (tokens stuck) — it never reconciles a
-  *successful* sell that filled worse than the trigger price due to slippage. Root-caused
-  but NOT fixed — touching the capital-crediting formula itself needs explicit sign-off
-  before going live, this is flagged here so it isn't rediscovered as a surprise once
-  `paper_mode` is turned off and real slippage starts showing up as PnL that doesn't match
-  the wallet.
-- **USDC Locked vs. lifetime PnL can show a large positive locked balance next to a
-  negative all-time PnL** — this is a real design question (is "locked" profit still
-  counted against career PnL once swept to USDC, or is it separate?), not something to
-  silently decide in code. Needs user input before changing.
-- Daily-loss-guard (`MAX_DAILY_LOSS_PCT`) baselines to `_day_start_cap`, which every
-  capital-reset endpoint updates — so resetting capital frequently during iteration also
-  resets how much room the guard thinks is left today. Acceptable/expected today (paper
-  mode, active iteration) but worth remembering once live: frequent manual resets = the
-  daily guard effectively never trips.
 - Long-held momentum "ride" positions (`RIDE_MAX_SECS` up to 30 min) go a while between
   reconciler passes — a wide-enough Redis/state gap during that window and the position
   reconciler could disagree with the in-memory `open_trades` state briefly. Flagged, not
   reproduced.
+- Partial exits (`_partial_exit`, the momentum "bank half at the double" step) still credit
+  capital from the SL/TP trigger price like full exits used to — they were left out of the
+  slippage-reconciliation fix below (smaller, separate follow-up if it matters in practice).
+- `execute_sell`'s PumpPortal/pump-swap/raydium path (bond/spike/trench/copy/fast — all
+  low/zero-volume strategies per the dsc_signal-dominance finding above) has no equivalent
+  slippage reconciliation — only the Jupiter path does. Not fixed, since Jupiter covers
+  ~94%+ of real trade volume and PumpPortal doesn't return quote data the same way.
 
 ## Fixed this pass (see commit history on `main` for exact diffs)
 - Bond TP auto-tune floor formula (`PARTIAL_TP2_PCT+2` → `BOND_SL_PCT+2`) that was
@@ -163,3 +153,28 @@ caught, each time discovered from a live screenshot, not from reading the code.
   actual source of wallets sitting permanently in 429 backoff. Polling now only runs as a
   5-minute safety-net sweep once the webhook is confirmed live; falls back to full-speed
   polling if the webhook was never registered (no public domain / key).
+- **`capital` was never decremented when profit got swept to `usdc_locked`** — real SOL
+  left the wallet to become USDC but the internal capital counter kept counting it as
+  still-tradeable, silently overstating buying power by everything ever locked. Fixed in
+  both the paper-mode path and the live Jupiter-swap path (including its refund/failure
+  branches). **User decision:** USDC Locked and career PnL should be "netted together" —
+  added a `Net Worth` figure (`capital + usdc_locked`, vs. `STARTING_CAPITAL`) to Home,
+  Status, and `/status/api` as the reconciled all-time number. Kept `_archive_stats()`'s
+  true all-time trade-sum PnL as the separate headline (reset-immune — see the epoch-stats
+  history above for why that's load-bearing); relabeled `USDC Locked` to make clear it's a
+  cumulative secured-profit counter that doesn't drop on later losses, since that (not an
+  actual conflict) is why it could look bigger than net PnL.
+- **User decision:** the daily-loss-guard baseline (`_day_start_cap`) should only move at
+  the real day-boundary rollover, not on manual capital resets. Decoupled from
+  `/admin/reset-capital`, `/set-capital`, `/admin/sync-capital`, `/admin/set-capital`, and
+  `/admin/reset-all` — none of them touch it now. Left `/admin/reset-daily` alone since
+  forcing a fresh day is literally its purpose. Known tradeoff the user accepted: a large
+  manual capital correction (e.g. fixing a bad number) can now look like a sudden loss and
+  briefly trip the guard, since the baseline won't have moved with it.
+- **User decision: build the real fix, not just visibility, for trigger-price-vs-actual-fill
+  slippage.** Jupiter sells now capture what the swap's own quote promised at submit time;
+  once `_verify_sell_and_retry` confirms the sell landed, it reconciles capital and the
+  already-recorded trade (working view + permanent archive) against that quote via
+  `_apply_slippage_correction`, sanity-clamped to the estimate's own size. Only covers the
+  Jupiter path (dsc_signal + other Jupiter-routed strategies, ~94%+ of real volume) — see
+  Known unresolved above for what's still out of scope (partial exits, PumpPortal sells).
