@@ -4555,13 +4555,14 @@ def _home_inner():
         open_list = list(open_trades.values())
     with usdc_lock:
         locked = usdc_locked
-    # Headline PnL/Win Rate are scoped to SINCE THE LAST CAPITAL RESET, matching
-    # what Capital itself is scoped to — resets never delete history (nothing does
-    # anymore), but Capital does restart at STARTING_CAPITAL, so an unscoped
-    # all-time PnL next to it would almost never add up (Capital != Started + PnL)
-    # and reads as broken even though nothing is. True all-time totals are still
-    # available, unscoped, via GET /trades/archive.
-    _astats = _epoch_stats()
+    # Headline PnL/Win Rate are the TRUE all-time track record (the permanent
+    # archive) — not scoped to since-the-last-reset. That was tried and reverted:
+    # resets happen often during iteration, so a since-reset PnL was almost always
+    # near-empty and never accumulated a sample large enough to mean anything —
+    # exactly when the number matters most (deciding whether to trust the bot with
+    # real money). Capital is allowed to not arithmetically reconcile with this;
+    # they're two different, honestly-labeled things now, not one derived number.
+    _astats = _archive_stats()
     total = _astats["total"]
     wr    = _astats["win_rate"]
     pnl   = _astats["pnl"]
@@ -4801,7 +4802,7 @@ def _home_inner():
       <div id="h-pnl-sub" class="sub">{total} trades closed</div>
     </div>
     <div class="card">
-      <div class="lbl">Win Rate <span style="font-size:.6rem;letter-spacing:.06em;color:var(--muted);font-weight:500">SINCE RESET</span></div>
+      <div class="lbl">Win Rate <span style="font-size:.6rem;letter-spacing:.06em;color:var(--muted);font-weight:500">ALL TIME</span></div>
       <div id="h-wr" class="val {'green' if wr>=50 else 'red'}">{wr}%</div>
       <div id="h-wr-sub" class="sub">{_astats["wins"]}W &nbsp;/&nbsp; {total-_astats["wins"]}L</div>
     </div>
@@ -5051,19 +5052,19 @@ async function pollStats(){{
     if(capEl) capEl.textContent='$'+d.capital.toFixed(2);
     const pnlEl=document.getElementById('h-pnl');
     if(pnlEl){{
-      const sign=d.run_pnl>=0?'+':'';
-      pnlEl.textContent=sign+'$'+Math.abs(d.run_pnl).toFixed(2);
-      pnlEl.style.color=d.run_pnl>=0?'#4ade80':'#f87171';
+      const sign=d.career_pnl>=0?'+':'';
+      pnlEl.textContent=sign+'$'+Math.abs(d.career_pnl).toFixed(2);
+      pnlEl.style.color=d.career_pnl>=0?'#4ade80':'#f87171';
     }}
     const pnlSub=document.getElementById('h-pnl-sub');
-    if(pnlSub) pnlSub.textContent=d.run_trades+' trades closed';
+    if(pnlSub) pnlSub.textContent=d.career_trades+' trades closed';
     const wrEl=document.getElementById('h-wr');
     if(wrEl){{
-      wrEl.textContent=d.run_win_rate+'%';
-      wrEl.style.color=d.run_win_rate>=50?'#4ade80':'#f87171';
+      wrEl.textContent=d.career_win_rate+'%';
+      wrEl.style.color=d.career_win_rate>=50?'#4ade80':'#f87171';
     }}
     const wrSub=document.getElementById('h-wr-sub');
-    if(wrSub) wrSub.innerHTML=d.run_wins+'W &nbsp;/&nbsp; '+d.run_losses+'L';
+    if(wrSub) wrSub.innerHTML=d.career_wins+'W &nbsp;/&nbsp; '+d.career_losses+'L';
     const sizeEl=document.getElementById('h-size');
     if(sizeEl) sizeEl.textContent='$'+d.trade_size.toFixed(2);
     const sizeSubEl=document.getElementById('h-size-sub');
@@ -5286,7 +5287,7 @@ def _home_punk(cap, open_list, locked, wins_count, total, wr, pnl, mode,
   </div>
   <div class="grid">
     <div class="stat">
-      <div class="lbl">Win Rate <span style="font-size:.6rem;opacity:.5;letter-spacing:.05em">SINCE RESET</span></div>
+      <div class="lbl">Win Rate <span style="font-size:.6rem;opacity:.5;letter-spacing:.05em">ALL TIME</span></div>
       <div id="pk-wr" class="val" style="color:{wr_color}">{wr}%</div>
       <div id="pk-wr-sub" class="sub">{wins_count}W / {total-wins_count}L</div>
     </div>
@@ -5380,19 +5381,19 @@ async function pollPunk(){{
     if(capEl) capEl.textContent='$'+d.capital.toFixed(2);
     const pnlEl=document.getElementById('pk-pnl');
     if(pnlEl){{
-      const sign=d.run_pnl>=0?'+':'';
-      pnlEl.textContent=sign+'$'+Math.abs(d.run_pnl).toFixed(2)+' total PnL';
-      pnlEl.style.color=d.run_pnl>=0?'#39ff14':'#ff006e';
+      const sign=d.career_pnl>=0?'+':'';
+      pnlEl.textContent=sign+'$'+Math.abs(d.career_pnl).toFixed(2)+' total PnL';
+      pnlEl.style.color=d.career_pnl>=0?'#39ff14':'#ff006e';
     }}
     const subEl=document.getElementById('pk-hero-sub');
-    if(subEl) subEl.innerHTML='Started $'+d.run_started_at.toFixed(2)+' &nbsp;·&nbsp; '+d.run_trades+' trades closed';
+    if(subEl) subEl.innerHTML='Started $'+d.run_started_at.toFixed(2)+' &nbsp;·&nbsp; '+d.career_trades+' trades closed';
     const wrEl=document.getElementById('pk-wr');
     if(wrEl){{
-      wrEl.textContent=d.run_win_rate+'%';
-      wrEl.style.color=d.run_win_rate>=50?'#39ff14':'#ff006e';
+      wrEl.textContent=d.career_win_rate+'%';
+      wrEl.style.color=d.career_win_rate>=50?'#39ff14':'#ff006e';
     }}
     const wrSub=document.getElementById('pk-wr-sub');
-    if(wrSub) wrSub.textContent=d.run_wins+'W / '+d.run_losses+'L';
+    if(wrSub) wrSub.textContent=d.career_wins+'W / '+d.career_losses+'L';
     const sizeEl=document.getElementById('pk-size');
     if(sizeEl) sizeEl.textContent='$'+d.trade_size.toFixed(2);
     const pkSizeSub=document.getElementById('pk-size-sub');
@@ -5417,11 +5418,15 @@ def status_api():
     # total_trades/wins/losses/win_rate/total_pnl: recent working view
     # (completed_trades, capped ~200) — no reset clears this anymore either, it's
     # just a smaller recent slice, not scoped to anything in particular.
-    # run_*: scoped to since the last capital reset/set — THIS is what the home
-    # page's headline cards use, so Capital and PnL stay arithmetically consistent
-    # (Capital == Started + run_pnl). Labeled "SINCE RESET", not "ALL TIME".
-    # career_*: the true permanent, unscoped totals from the whole archive —
-    # nothing is ever hidden, it's just not the headline number anymore.
+    # career_*: the TRUE all-time track record (permanent archive, never reset) —
+    # this is what the home page headline uses. It intentionally does NOT try to
+    # arithmetically reconcile with Capital anymore (that was tried: since-reset
+    # PnL was almost always near-empty because resets happen constantly during
+    # iteration, so the number that matters most — "is this worth trusting with
+    # real money" — never had a real sample. Capital and PnL are two honestly
+    # separate things now, not one derived number.)
+    # run_*: still available, scoped to since the last capital reset/set, for
+    # anyone who specifically wants "how has it done since I last reset."
     wins  = [t for t in completed_trades if t.get("pnl", 0) > 0]
     total = len(completed_trades)
     pnl   = sum(t.get("pnl", 0) for t in completed_trades)
