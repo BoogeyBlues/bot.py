@@ -322,7 +322,7 @@ MIN_REPLIES      = int(os.environ.get("MIN_REPLIES",      "2"))   # 2+ replies =
 MIN_SOCIALS      = int(os.environ.get("MIN_SOCIALS",       "2"))   # need Twitter + Telegram minimum (Aug 8 profile)
 MIN_LIQ          = float(os.environ.get("MIN_LIQ",        "500"))
 MIN_VOL_5M       = float(os.environ.get("MIN_VOL_5M",      "500"))  # 5-min volume gate (Aug 8 profile)
-MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "2"))     # ≥2 signal points (Aug 8 profile)
+MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "1"))     # bond/trench/etc were producing ZERO trades at 2 — GMGN's signal pool reads empty (see /status/api "pools"), so sig_score rarely exceeds 1 no matter how good the coin is. This is the same "bond runner gets zero trades" bug from earlier this session, reintroduced by the Aug 8 revert.
 MAX_RUG_SCORE    = int(os.environ.get("MAX_RUG_SCORE",    "400"))   # rugcheck score ceiling (higher = riskier)
 
 # General
@@ -1178,6 +1178,52 @@ def _archive_stats():
     }
     _archive_stats_cache = (time.time(), stats)
     return stats
+
+# ── ADAPTIVE SIGNAL LEARNING ──────────────────────────────────────
+# The bot's actual trial-and-error loop: dsc_signal is ~94% of everything it
+# trades, but until now nothing looked back at its OWN closed trades to tell
+# boosted/ads/meta/top/takeover apart. This does — it explores every sub-type
+# with no bias until each has a real sample, then the entry gate below (see
+# dsc_signal_type_avoid()) stops feeding capital into whichever ones its own
+# history shows are actually losing. That's the "learn from its own trades and
+# develop a personality" mechanism, grounded in real outcomes, not a guess.
+DSC_LEARN_MIN_SAMPLE = int(os.environ.get("DSC_LEARN_MIN_SAMPLE", "15"))   # trades needed before a sub-type's win rate is trusted
+DSC_LEARN_AVOID_WR   = float(os.environ.get("DSC_LEARN_AVOID_WR", "30"))  # below this win rate (%), with enough sample, stop entering that sub-type
+_dsc_signal_stats_cache = (0.0, None)  # (fetched_at, {tag: {...}}) — short TTL, don't hit Redis every coin
+
+def dsc_signal_type_stats():
+    """Win rate/pnl per DSC sub-signal type (BOOST/ADS/META/TOP/TAKEOVER), computed
+    from the permanent archive — the bot's own real track record per approach."""
+    global _dsc_signal_stats_cache
+    fetched_at, cached = _dsc_signal_stats_cache
+    if cached is not None and time.time() - fetched_at < 300:
+        return cached
+    archive = redis_load("bot_trades_archive") or []
+    by_tag = {}
+    for t in archive:
+        if t.get("strategy") != "dsc_signal":
+            continue
+        tag = t.get("signal_tag") or "UNKNOWN"
+        s = by_tag.setdefault(tag, {"trades": 0, "wins": 0, "pnl": 0.0})
+        s["trades"] += 1
+        if t.get("pnl", 0) > 0:
+            s["wins"] += 1
+        s["pnl"] += t.get("pnl", 0)
+    for s in by_tag.values():
+        s["win_rate"] = round(s["wins"] / max(s["trades"], 1) * 100, 1)
+        s["pnl"] = round(s["pnl"], 2)
+    _dsc_signal_stats_cache = (time.time(), by_tag)
+    return by_tag
+
+def dsc_signal_type_avoid(tag: str) -> bool:
+    """True if this DSC sub-type has a large-enough sample and a demonstrated
+    losing track record — the bot should stop feeding it capital. No opinion is
+    formed until DSC_LEARN_MIN_SAMPLE trades exist for that tag; every sub-type
+    gets a fair, unbiased shot before any of them get cut off."""
+    stats = dsc_signal_type_stats().get(tag)
+    if not stats or stats["trades"] < DSC_LEARN_MIN_SAMPLE:
+        return False
+    return stats["win_rate"] < DSC_LEARN_AVOID_WR
 
 def _epoch_stats():
     """Total/wins/win_rate/pnl since the LAST explicit capital reset/set — this is
@@ -2861,7 +2907,7 @@ def _cleanup_ghost(mint, amount, symbol):
             notify(f"⚠️ Ghost Cleared {symbol}", f"TX failed on-chain. ${amount:.2f} refunded.")
 
 # ── ENTER / EXIT ─────────────────────────────────────────────────
-def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, replies=0, pump_swap=False, raydium=False, use_jupiter=False):
+def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, replies=0, pump_swap=False, raydium=False, use_jupiter=False, signal_tag=""):
     global capital, _daily_trades
     if BOT_PAUSED or _pause_until > time.time():
         return False
@@ -2938,6 +2984,7 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
             "pump_swap":         pump_swap,
             "raydium":           raydium,
             "use_jupiter":       use_jupiter,
+            "signal_tag":        signal_tag,  # e.g. dsc_signal's BOOST/ADS/META/TOP/TAKEOVER — which specific signal triggered this entry, for outcome-by-signal-type learning
             "partial_tp_done":   0,
             "partial_proceeds":  0.0,
             "tx":                tx if tx not in (None, "PAPER_TX") else "",
@@ -3065,6 +3112,7 @@ def exit_trade(mint, price, reason, bond=0):
         "symbol":     trade["symbol"],
         "mint":       mint,
         "strategy":   trade["strategy"],
+        "signal_tag": trade.get("signal_tag", ""),
         "entry":      trade["entry"],
         "exit":       price,
         "peak":       round(trade.get("price_high", trade["entry"]), 8),
@@ -4448,10 +4496,13 @@ def scanner_loop():
                             "ADS"   if dsc_mint in _dsc_ad_mints       else
                             "META"  if dsc_mint in _dsc_meta_mints      else
                             "TOP"   if dsc_mint in _dsc_top_mints       else "TAKEOVER")
+                if dsc_signal_type_avoid(_why):
+                    log("info", f"DSC SKIP: {_why} has a losing track record ({dsc_signal_type_stats()[_why]['win_rate']}% WR over {dsc_signal_type_stats()[_why]['trades']} trades) — learned to avoid it", dsc_sym)
+                    continue
                 log("ok", f"DSC {_why} | liq=${market['liq']:.0f} 5m={market.get('change5m',0):+.1f}% | sig={sig_score}", dsc_sym)
                 notify(f"📊 DSC {_why} {dsc_sym}",
                        f"DexScreener signal entry\nLiq: ${market['liq']:.0f}\nSig: {sig_score}\nAmount: ${amt:.2f}")
-                enter_trade(dsc_mint, dsc_sym, market["price"], amt, "dsc_signal", 0, 0, use_jupiter=True)
+                enter_trade(dsc_mint, dsc_sym, market["price"], amt, "dsc_signal", 0, 0, use_jupiter=True, signal_tag=_why)
                 n_dsc_entered += 1
                 time.sleep(0.5)
             if n_dsc_entered:
@@ -5466,6 +5517,10 @@ def status_api():
         "career_losses":   _astats["total"] - _astats["wins"],
         "career_win_rate": _astats["win_rate"],
         "career_pnl":      round(_astats["pnl"], 4),
+        "dsc_signal_learning": {
+            tag: {**s, "avoiding": dsc_signal_type_avoid(tag)}
+            for tag, s in dsc_signal_type_stats().items()
+        },
         "trade_size":   round(trade_size(), 2),
         "usdc_locked":  round(locked, 2),
         "sol_price":    round(sol_price, 2) if sol_price else None,
