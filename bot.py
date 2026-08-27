@@ -696,10 +696,16 @@ def _load_daily_state():
                 # part of that same call, so this safety net was solving a problem
                 # that no longer exists and only introduced a bigger one. Removed.
             TUNE_PAUSED_UNTIL = float(s.get("tune_paused_until", _next_monday_7am()))
-            # Restore tuner parameters — env vars are initial defaults only; Redis wins
+            # Restore tuner parameters — env vars are initial defaults only; Redis wins.
+            # Sanity-clamped: a stale/broken auto-tune formula can persist an absurd
+            # value forever (this is exactly how BOND_TP_PCT got stuck at 101% — a
+            # floor formula broke, and since bond had zero trades to recompute from,
+            # nothing would have ever self-corrected it). Trust Redis, but not blindly.
             if "bond_entry_min"  in s: BOND_ENTRY_MIN  = float(s["bond_entry_min"])
             if "bond_entry_max"  in s: BOND_ENTRY_MAX  = float(s["bond_entry_max"])
-            if "bond_tp_pct"     in s: BOND_TP_PCT     = float(s["bond_tp_pct"])
+            if "bond_tp_pct"     in s:
+                _restored_tp = float(s["bond_tp_pct"])
+                BOND_TP_PCT = _restored_tp if 5 <= _restored_tp <= 50 else 10.0
             if "bond_sl_pct"     in s: BOND_SL_PCT     = float(s["bond_sl_pct"])
             if "bond_stale_secs" in s: BOND_STALE_SECS = int(s["bond_stale_secs"])
             if "bond_max_secs"   in s: BOND_MAX_SECS   = int(s["bond_max_secs"])
@@ -1305,12 +1311,16 @@ def auto_tune(history):
             BOND_SL_PCT = round(BOND_SL_PCT - 1, 1)  # tighten SL to cut losses faster
 
         # Tune BOND_TP_PCT toward where winners actually peaked.
-        # Must stay above PARTIAL_TP2_PCT so the partial scale-out cascade can run first.
         bond_tp_wins = [t for t in bond_wins if t.get("pnl", 0) > 0]
         if bond_tp_wins:
             avg_win_pnl_pct = sum((t["pnl"] / max(t["amount"], 0.01)) * 100 for t in bond_tp_wins) / len(bond_tp_wins)
-            # Floor = PARTIAL_TP2_PCT + 2 so partial exits always fire before full TP
-            _tp_floor = PARTIAL_TP2_PCT + 2
+            # Floor was PARTIAL_TP2_PCT + 2 — made sense when bond used partial scale-outs
+            # at a small percentage. Since the Aug-8 revert, PARTIAL_TP2_PCT is 99 (disabled
+            # globally), so that floor silently became 101% and force-set BOND_TP_PCT to an
+            # unreachable target every single auto-tune run, regardless of real trade data.
+            # Floor is now just "meaningfully above the stop-loss" — independent of the
+            # disabled partial-TP config, which has nothing to do with bond's TP anymore.
+            _tp_floor = BOND_SL_PCT + 2
             BOND_TP_PCT = round(max(_tp_floor, min(35, avg_win_pnl_pct * 0.85)), 1)
 
         # Spike tuning — keep within scalping range
@@ -5565,6 +5575,7 @@ def status():
     with capital_lock:
         cap = capital
     wr = round(len(wins) / max(total, 1) * 100, 1)
+    _astats = _archive_stats()  # true all-time — completed_trades above is only the recent ~200-trade window
     pct, limit = _cap_tier(cap)
     next_m = next((m for m in MILESTONES if m > cap), None)
     next_m_str = f"{next_m:,}" if next_m else "MAX"
@@ -5688,14 +5699,24 @@ def status():
       <div class="sub">Started ${STARTING_CAPITAL:.2f}</div>
     </div>
     <div class="stat">
-      <div class="lbl">Total PnL</div>
-      <div class="val" style="color:{pnl_c}">{'+' if pnl>=0 else ''}${pnl:.4f}</div>
-      <div class="sub">{total} trades closed</div>
+      <div class="lbl">All-Time PnL</div>
+      <div class="val" style="color:{'#4ade80' if _astats['pnl']>=0 else '#f87171'}">{'+' if _astats['pnl']>=0 else ''}${_astats['pnl']:.4f}</div>
+      <div class="sub">{_astats['total']} trades closed</div>
     </div>
     <div class="stat">
-      <div class="lbl">Win Rate</div>
+      <div class="lbl">All-Time Win Rate</div>
+      <div class="val" style="color:{'#4ade80' if _astats['win_rate']>=50 else ('#fbbf24' if _astats['win_rate']>=40 else '#f87171')}">{_astats['win_rate']}%</div>
+      <div class="sub">{_astats['wins']}W / {_astats['total']-_astats['wins']}L</div>
+    </div>
+    <div class="stat">
+      <div class="lbl">Recent PnL <span style="font-weight:400;color:#666">(last {total})</span></div>
+      <div class="val" style="color:{pnl_c}">{'+' if pnl>=0 else ''}${pnl:.4f}</div>
+      <div class="sub">{total} trades in window</div>
+    </div>
+    <div class="stat">
+      <div class="lbl">Recent Win Rate <span style="font-weight:400;color:#666">(last {total})</span></div>
       <div class="val" style="color:{wr_c}">{wr}%</div>
-      <div class="sub">{len(wins)}W / {len(losses)}L</div>
+      <div class="sub">{len(wins)}W / {len(losses)}L — used for health status below</div>
     </div>
     <div class="stat">
       <div class="lbl">Scanner</div>
@@ -5860,15 +5881,14 @@ def _trades_inner():
     with capital_lock:
         cap = capital
 
-    wins   = [t for t in completed_trades if t.get("pnl", 0) > 0]
-    losses = [t for t in completed_trades if t.get("pnl", 0) <= 0]
-    total  = len(completed_trades)
-    wr     = round(len(wins) / max(total, 1) * 100, 1)
-    total_pnl = round(sum(t.get("pnl", 0) for t in completed_trades), 4)
-    avg_win   = round(sum(t.get("pnl", 0) for t in wins)   / max(len(wins),   1), 4)
-    avg_loss  = round(sum(t.get("pnl", 0) for t in losses) / max(len(losses), 1), 4)
-    best      = max(completed_trades, key=lambda t: t.get("pnl", 0), default=None)
-    worst     = min(completed_trades, key=lambda t: t.get("pnl", 0), default=None)
+    # Header stats use the permanent archive (same source as Home) so this page's
+    # numbers always match Home's — completed_trades below is only the recent
+    # ~200-trade working window used to render the row-by-row table.
+    _astats   = _archive_stats()
+    total     = _astats["total"]
+    wr        = _astats["win_rate"]
+    total_pnl = round(_astats["pnl"], 4)
+    shown     = len(completed_trades)
 
     # Build table rows — newest first
     rows = ""
@@ -6000,7 +6020,7 @@ def _trades_inner():
       <div class="val" style="color:{'#39ff14' if total_pnl>=0 else '#ff006e'}">{'+' if total_pnl>=0 else ''}${total_pnl}</div>
     </div>
     <div class="stat">
-      <div class="lbl">Trades</div>
+      <div class="lbl">Trades (All-Time)</div>
       <div class="val">{total}</div>
     </div>
   </div>
@@ -6014,7 +6034,7 @@ def _trades_inner():
   </div>'''}
 
   <div class="section">
-    <div class="section-hdr">CLOSED TRADES — tap row for full breakdown</div>
+    <div class="section-hdr">CLOSED TRADES — most recent {shown} of {total} all-time · tap row for full breakdown</div>
     <div class="table-wrap"><table>
       <thead><tr>
         <th>#</th><th>Date / Time</th><th>Symbol</th><th>Strategy</th>
@@ -9373,7 +9393,10 @@ def telegram_setup():
 
 @app.route("/export/wins", methods=["GET"])
 def export_wins():
-    wins = [t for t in completed_trades if t.get("pnl", 0) > 0]
+    # Sourced from the permanent archive, not completed_trades (capped ~200) —
+    # the filename says "winning_trades", it should mean all of them, not a recent slice.
+    archive = redis_load("bot_trades_archive") or []
+    wins = [t for t in archive if t.get("pnl", 0) > 0]
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(["Date/Time", "Symbol", "Strategy", "Entry Price", "Exit Price",
@@ -9428,11 +9451,14 @@ def trades_archive():
 
 @app.route("/export/all", methods=["GET"])
 def export_all():
+    # Sourced from the permanent archive, not completed_trades (capped ~200) —
+    # "all trades" should mean the true all-time record, not just the recent window.
+    archive = redis_load("bot_trades_archive") or []
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(["Date/Time", "Symbol", "Strategy", "Entry Price", "Exit Price",
                      "PnL ($)", "Result", "Hold (min)", "Bond Entry %", "Replies"])
-    for t in completed_trades:
+    for t in archive:
         writer.writerow([
             t.get("time", ""),
             t.get("symbol", ""),
@@ -9837,6 +9863,29 @@ def _pos_price(trade):
     return trade.get("price_high", trade["entry"])
 
 @app.route("/positions/api", methods=["GET"])
+def _position_display_targets(strategy):
+    """What this position's exit plan actually is, for accurate dashboard display.
+    Was hardcoded to PARTIAL_TP1_PCT (99, globally disabled) for every strategy
+    regardless of what's actually governing the trade — e.g. dsc_signal positions
+    showed a 99% target that has nothing to do with the real 100%-double-then-ride
+    logic. Mirrors the real per-strategy branches in _check_one_position."""
+    if strategy in ("birdeye", "dsc_organic", "gmgn_signal", "dsc_signal", "jup_signal"):
+        return {"sl_pct": BOND_SL_PCT, "tp_pct": MOMENTUM_DOUBLE_PCT,
+                "tp_note": f"bank {int(MOMENTUM_BANK_FRAC*100)}% at the double, ride the rest"}
+    if strategy == "spike":
+        return {"sl_pct": SPIKE_SL_PCT, "tp_pct": SPIKE_TP_PCT, "tp_note": "hard TP"}
+    if strategy == "copy":
+        return {"sl_pct": COPY_SL_PCT, "tp_pct": BOND_TP_PCT, "tp_note": "hard TP"}
+    if strategy == "fast":
+        return {"sl_pct": FAST_SL_PCT, "tp_pct": FAST_TP_PCT, "tp_note": "hard TP"}
+    if strategy == "trench":
+        return {"sl_pct": TRENCH_SL_PCT, "tp_pct": TRENCH_TP_PCT, "tp_note": "hard TP"}
+    if strategy == "migrate":
+        return {"sl_pct": MIGRATE_SL_PCT, "tp_pct": MIGRATE_TP_PCT, "tp_note": "hard TP"}
+    if strategy == "bond":
+        return {"sl_pct": BOND_SL_PCT, "tp_pct": BOND_TP_PCT, "tp_note": "hard TP"}
+    return {"sl_pct": BOND_SL_PCT, "tp_pct": BOND_TP_PCT, "tp_note": "generic fallback"}
+
 def positions_api():
     with trades_lock:
         rows = []
@@ -9847,6 +9896,7 @@ def positions_api():
             partial = t.get("partial_proceeds", 0.0)
             final_v = tokens * price if price > 0 else 0
             pnl     = max(-amount, min((partial + final_v) - amount, amount * 5))
+            _targets = _position_display_targets(t["strategy"])
             rows.append({
                 "mint":           mint,
                 "symbol":         t["symbol"],
@@ -9858,8 +9908,9 @@ def positions_api():
                 "opened_at":      t["opened_at"],
                 "bond_entry":     t.get("bond_entry", 0),
                 "bond_high":      t.get("bond_high",  t.get("bond_entry", 0)),
-                "sl_pct":         BOND_SL_PCT,
-                "tp1_pct":        PARTIAL_TP1_PCT,
+                "sl_pct":         _targets["sl_pct"],
+                "tp_pct":         _targets["tp_pct"],
+                "tp_note":        _targets["tp_note"],
                 "partial_tp_done": t.get("partial_tp_done", 0),
                 "partial_proceeds": partial,
                 "pnl":            round(pnl, 4),
@@ -10356,7 +10407,7 @@ async function fetchPositions(){{
           amount:p.amount,partialProceeds:p.partial_proceeds,
           tpDone:p.partial_tp_done,remFrac:remFrac,
           bond:p.bond_high,bondEntry:p.bond_entry,
-          openedAt:p.opened_at,slPct:p.sl_pct,tp1Pct:p.tp1_pct,
+          openedAt:p.opened_at,slPct:p.sl_pct,tp1Pct:p.tp_pct,
           history:[],tpBadge:null
         }};
         // seed history from entry
