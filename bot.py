@@ -2420,9 +2420,11 @@ def lock_profit_to_usdc(profit_usd):
         return
 
     def _refund():
-        global _pending_lock_usd
+        global _pending_lock_usd, capital
         with usdc_lock:
             _pending_lock_usd += profit_usd
+        with capital_lock:
+            capital += profit_usd
         log("warn", f"USDC lock deferred — ${profit_usd:.2f} back in pending, retries on next win", "USDC")
 
     try:
@@ -2488,7 +2490,7 @@ def _verify_usdc_lock(sig, profit_usd, usdc_out):
     """Background: confirm the USDC-lock swap actually landed before crediting
     usdc_locked. Falls through to a real USDC balance check as ground truth if
     the signature status is inconclusive — mirrors _verify_sell_and_retry."""
-    global usdc_locked, _pending_lock_usd
+    global usdc_locked, _pending_lock_usd, capital
     for attempt, delay in [(1, 10), (2, 20)]:
         time.sleep(delay)
         for rpc_url in _rpc_endpoints():
@@ -2504,6 +2506,8 @@ def _verify_usdc_lock(sig, profit_usd, usdc_out):
                     log("warn", f"USDC lock tx reverted on-chain: {tx_s.err} — ${profit_usd:.2f} back in pending", "USDC")
                     with usdc_lock:
                         _pending_lock_usd += profit_usd
+                    with capital_lock:
+                        capital += profit_usd
                     return
                 break  # pending — wait for next attempt
             except Exception:
@@ -2518,6 +2522,8 @@ def _verify_usdc_lock(sig, profit_usd, usdc_out):
         log("warn", f"USDC lock unconfirmed after retries — ${profit_usd:.2f} back in pending", "USDC")
         with usdc_lock:
             _pending_lock_usd += profit_usd
+        with capital_lock:
+            capital += profit_usd
 
 # ── POOL DETECTION + BUY HELPER ──────────────────────────────────
 def _detect_pool(mint, symbol=""):
@@ -3164,6 +3170,13 @@ def exit_trade(mint, price, reason, bond=0):
         if pending >= lock_min:
             with usdc_lock:
                 _pending_lock_usd = 0.0
+            # This money is about to leave tradeable capital and become usdc_locked —
+            # take it out of capital now (optimistic, mirrors the sell-credit pattern
+            # above), refunded back to capital if the lock ultimately fails. Without
+            # this, capital never actually shrinks when profit gets swept to USDC, so
+            # "Capital" silently overstates real buying power by everything ever locked.
+            with capital_lock:
+                capital -= pending
             threading.Thread(target=lock_profit_to_usdc, args=(pending,), daemon=True).start()
         else:
             log("info", f"Profit pot: ${pending:.2f} pending (locks at ${lock_min:.2f})", "USDC")
@@ -4909,7 +4922,12 @@ def _home_inner():
     <div class="card">
       <div class="lbl">USDC Locked</div>
       <div id="h-locked" class="val blue">${locked:.2f}</div>
-      <div class="sub">Profit secured</div>
+      <div class="sub">Cumulative secured — doesn't drop on later losses</div>
+    </div>
+    <div class="card gold-card">
+      <div class="lbl">Net Worth <span style="font-size:.6rem;letter-spacing:.06em;color:var(--muted);font-weight:500">CAPITAL + LOCKED</span></div>
+      <div id="h-networth" class="val {'green' if (cap+locked-STARTING_CAPITAL)>=0 else 'red'}">${cap+locked:.2f}</div>
+      <div class="sub">{'+' if (cap+locked-STARTING_CAPITAL)>=0 else ''}{cap+locked-STARTING_CAPITAL:.2f} vs ${STARTING_CAPITAL:.2f} started</div>
     </div>
   </div>
 
@@ -5394,7 +5412,12 @@ def _home_punk(cap, open_list, locked, wins_count, total, wr, pnl, mode,
     <div class="stat">
       <div class="lbl">USDC Locked</div>
       <div id="pk-locked" class="val cyan">${locked:.2f}</div>
-      <div class="sub">Secured</div>
+      <div class="sub">Cumulative — doesn't drop on losses</div>
+    </div>
+    <div class="stat">
+      <div class="lbl">Net Worth</div>
+      <div id="pk-networth" class="val" style="color:{'#4ade80' if (cap+locked-STARTING_CAPITAL)>=0 else '#f87171'}">${cap+locked:.2f}</div>
+      <div class="sub">{'+' if (cap+locked-STARTING_CAPITAL)>=0 else ''}{cap+locked-STARTING_CAPITAL:.2f} vs ${STARTING_CAPITAL:.2f} started</div>
     </div>
     <div class="stat">
       <div class="lbl">Today</div>
@@ -5556,6 +5579,8 @@ def status_api():
         "career_losses":   _astats["total"] - _astats["wins"],
         "career_win_rate": _astats["win_rate"],
         "career_pnl":      round(_astats["pnl"], 4),
+        "net_worth":       round(cap + locked, 2),
+        "net_pnl_all_time": round(cap + locked - STARTING_CAPITAL, 4),
         "dsc_signal_learning": {
             tag: {**s, "avoiding": dsc_signal_type_avoid(tag)}
             for tag, s in dsc_signal_type_stats().items()
@@ -5603,6 +5628,8 @@ def status():
     pnl    = sum(t.get("pnl", 0) for t in completed_trades)
     with capital_lock:
         cap = capital
+    with usdc_lock:
+        locked = usdc_locked
     wr = round(len(wins) / max(total, 1) * 100, 1)
     _astats = _archive_stats()  # true all-time — completed_trades above is only the recent ~200-trade window
     pct, limit = _cap_tier(cap)
@@ -5726,6 +5753,11 @@ def status():
       <div class="lbl">Capital</div>
       <div class="val">${cap:.2f}</div>
       <div class="sub">Started ${STARTING_CAPITAL:.2f}</div>
+    </div>
+    <div class="stat">
+      <div class="lbl">Net Worth <span style="font-weight:400;color:#666">(cap + locked)</span></div>
+      <div class="val" style="color:{'#4ade80' if (cap+locked-STARTING_CAPITAL)>=0 else '#f87171'}">${cap+locked:.2f}</div>
+      <div class="sub">{'+' if (cap+locked-STARTING_CAPITAL)>=0 else ''}{cap+locked-STARTING_CAPITAL:.2f} vs ${STARTING_CAPITAL:.2f} started</div>
     </div>
     <div class="stat">
       <div class="lbl">All-Time PnL</div>
@@ -6755,7 +6787,7 @@ def admin_reset_capital():
     denied = _auth_required()
     if denied: return denied
     global capital, scan_active, BOT_PAUSED, _capital_epoch_start, _capital_epoch_start_value
-    global _day_start_cap, _daily_cap_notified, _consecutive_losses
+    global _daily_cap_notified, _consecutive_losses
     global _daily_trades, _daily_wins, _daily_losses
     with capital_lock:
         capital = STARTING_CAPITAL
@@ -6764,8 +6796,12 @@ def admin_reset_capital():
     # completed_trades, usdc_locked, and open_trades are deliberately NOT touched —
     # this is a capital + today's-session reset, not a history wipe. Trade history,
     # secured USDC profit, and open positions all carry forward untouched.
+    # _day_start_cap (the daily-loss-guard baseline) is deliberately NOT touched here
+    # either — it only moves at the real day-boundary rollover (_reset_daily_if_needed).
+    # Manual capital resets during iteration used to reset it too, which meant the
+    # guard's "how much can I still lose today" baseline kept jumping and the guard
+    # effectively never tripped — fixed by decoupling the two.
     with _daily_lock:
-        _day_start_cap      = STARTING_CAPITAL  # today's loss-guard baseline
         _daily_cap_notified = False
         _consecutive_losses = 0
         _daily_trades       = 0
@@ -6782,7 +6818,7 @@ def admin_reset_capital():
 @app.route("/set-capital/<float:amount>")
 def set_capital_get(amount):
     """Manually set capital to a specific value. Clears ghost open positions. Keeps trade history."""
-    global capital, _day_start_cap, _daily_cap_notified, _capital_epoch_start, _capital_epoch_start_value
+    global capital, _daily_cap_notified, _capital_epoch_start, _capital_epoch_start_value
     if amount <= 0 or amount > 100000:
         return "Invalid amount", 400
     cleared = []
@@ -6795,8 +6831,9 @@ def set_capital_get(amount):
         capital = float(amount)
     _capital_epoch_start       = time.time()
     _capital_epoch_start_value = float(amount)
+    # _day_start_cap intentionally untouched — see /admin/reset-capital for why;
+    # the daily-loss-guard baseline only moves at the real day-boundary rollover now.
     with _daily_lock:
-        _day_start_cap      = float(amount)
         _daily_cap_notified = False
     # usdc_locked intentionally untouched — this endpoint's own docstring promises
     # "keeps trade history," and secured profit shouldn't disappear just because
@@ -6811,7 +6848,7 @@ def admin_sync_capital():
     """Read SOL + USDC balance from wallet and sync bot capital."""
     denied = _auth_required()
     if denied: return denied
-    global capital, _day_start_cap, _daily_cap_notified, _capital_epoch_start, _capital_epoch_start_value
+    global capital, _daily_cap_notified, _capital_epoch_start, _capital_epoch_start_value
     if not WALLET or not _SOLANA_AVAILABLE:
         return jsonify({"error": "No wallet configured"}), 400
     sol_price = get_sol_price() or 0
@@ -6848,8 +6885,8 @@ def admin_sync_capital():
                     capital = usd
                 _capital_epoch_start       = time.time()
                 _capital_epoch_start_value = usd
+                # _day_start_cap intentionally untouched — see /admin/reset-capital.
                 with _daily_lock:
-                    _day_start_cap      = usd
                     _daily_cap_notified = False
                 _save_daily_state()
                 msg = (f"Synced to ${usd:.2f} "
@@ -6884,16 +6921,15 @@ def admin_set_capital():
             del open_trades[mint]
         redis_save("bot_open_trades", [])
 
-    # Set capital and reset loss guard baseline
-    global _day_start_cap, _daily_cap_notified, _capital_epoch_start, _capital_epoch_start_value
+    # Set capital
+    global _daily_cap_notified, _capital_epoch_start, _capital_epoch_start_value
     with capital_lock:
         capital = float(amount)
     _capital_epoch_start       = time.time()
     _capital_epoch_start_value = float(amount)
+    # usdc_locked and _day_start_cap intentionally untouched — see /admin/reset-capital.
     with _daily_lock:
-        _day_start_cap      = float(amount)
         _daily_cap_notified = False
-    # usdc_locked intentionally untouched — see /admin/reset-capital for why.
 
     # Remove ghost completed trades if target_pnl provided
     removed_trade = None
@@ -6959,7 +6995,7 @@ def admin_reset_all():
     if denied: return denied
     global capital, scan_active, BOT_PAUSED, _capital_epoch_start, _capital_epoch_start_value
     global _daily_trades, _daily_wins, _daily_losses, _daily_cap_notified
-    global _day_start_cap, _consecutive_losses
+    global _consecutive_losses
 
     with capital_lock:
         capital = STARTING_CAPITAL
@@ -6968,13 +7004,13 @@ def admin_reset_all():
     with trades_lock:
         open_trades.clear()
     # completed_trades, usdc_locked, _wallet_activity, _combat_events: never
-    # touched by any reset now — no memory is ever wiped, by design.
+    # touched by any reset now — no memory is ever wiped, by design. _day_start_cap
+    # (the daily-loss-guard baseline) is also left alone — see /admin/reset-capital.
     with _daily_lock:
         _daily_trades       = 0
         _daily_wins         = 0
         _daily_losses       = 0
         _daily_cap_notified = False
-        _day_start_cap      = STARTING_CAPITAL
         _consecutive_losses = 0
 
     # Revive trading — halts and pauses must not survive an explicit reset
