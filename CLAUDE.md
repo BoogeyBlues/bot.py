@@ -118,3 +118,48 @@ caught, each time discovered from a live screenshot, not from reading the code.
 - The momentum "double" strategy needs a real sample before anyone trusts it
 - `paper_mode` has been `true` for this entire session — nothing here has been proven
   under real execution conditions (slippage, fills, latency)
+- **`exit_trade()`'s pnl/capital math uses the SL/TP *trigger* price (from the market-data
+  feed), not the actual Jupiter swap fill price.** `_verify_sell_and_retry()` only
+  corrects capital when a sell fails outright (tokens stuck) — it never reconciles a
+  *successful* sell that filled worse than the trigger price due to slippage. Root-caused
+  but NOT fixed — touching the capital-crediting formula itself needs explicit sign-off
+  before going live, this is flagged here so it isn't rediscovered as a surprise once
+  `paper_mode` is turned off and real slippage starts showing up as PnL that doesn't match
+  the wallet.
+- **USDC Locked vs. lifetime PnL can show a large positive locked balance next to a
+  negative all-time PnL** — this is a real design question (is "locked" profit still
+  counted against career PnL once swept to USDC, or is it separate?), not something to
+  silently decide in code. Needs user input before changing.
+- Daily-loss-guard (`MAX_DAILY_LOSS_PCT`) baselines to `_day_start_cap`, which every
+  capital-reset endpoint updates — so resetting capital frequently during iteration also
+  resets how much room the guard thinks is left today. Acceptable/expected today (paper
+  mode, active iteration) but worth remembering once live: frequent manual resets = the
+  daily guard effectively never trips.
+- Long-held momentum "ride" positions (`RIDE_MAX_SECS` up to 30 min) go a while between
+  reconciler passes — a wide-enough Redis/state gap during that window and the position
+  reconciler could disagree with the in-memory `open_trades` state briefly. Flagged, not
+  reproduced.
+
+## Fixed this pass (see commit history on `main` for exact diffs)
+- Bond TP auto-tune floor formula (`PARTIAL_TP2_PCT+2` → `BOND_SL_PCT+2`) that was
+  computing 101% once partials got disabled; added restore-time sanity clamps for
+  `BOND_TP_PCT` (5–50%) and `BOND_ENTRY_MIN/MAX` (40–65% / 45–85%) so a broken formula
+  can't get stuck forever again.
+- `/positions/api` was showing the same hardcoded TP target for every open position
+  regardless of strategy — now per-strategy via `_position_display_targets()`.
+- `/trades` and `/status` computed win-rate/PnL from the recent ~200-trade window while
+  Home already used the permanent all-time archive — same bot, different numbers on
+  different pages. Both now show all-time figures (from `_archive_stats()`), with the
+  recent-window numbers kept and explicitly labeled as recent.
+- `/export/wins` and `/export/all` silently only exported the recent ~200-trade window
+  despite their names implying a complete export — now source from the permanent archive.
+- DSC signal tagging only recorded the highest-priority matching category
+  (BOOST > ADS > META > TOP > TAKEOVER) when a coin matched more than one — the adaptive
+  learning loop was silently losing that combo information. Now records every matching
+  category as a `+`-joined tag (e.g. `BOOST+ADS`) so combos are tracked as their own
+  bucket instead of collapsing into whichever category happened to be checked first.
+- Wallet copy-trade polling ran unconditionally every 15s per tracked wallet even after
+  the Helius push webhook was registered and successfully draining events — this was the
+  actual source of wallets sitting permanently in 429 backoff. Polling now only runs as a
+  5-minute safety-net sweep once the webhook is confirmed live; falls back to full-speed
+  polling if the webhook was never registered (no public domain / key).

@@ -426,6 +426,8 @@ _sold_mints       = {}   # mint -> timestamp, cooldown after selling to prevent 
 _webhook_queue    = deque(maxlen=500)  # Helius push events: (wallet_info_dict, act_dict)
 _helius_wh_id     = ""                 # registered Helius webhook ID (persisted to Redis)
 _helius_wh_lock   = threading.Lock()
+_last_full_poll   = 0.0                # unix ts — see copy_trade_loop's webhook-active throttle
+POLL_FALLBACK_INTERVAL_SECS = 300      # once the push webhook is live, only poll this often as a safety net
 _watchlist        = {}   # mint -> {"res": action_result, "added_at": float} — qualified but couldn't enter
 _watchlist_lock   = threading.Lock()
 WATCHLIST_TTL_SECS = int(os.environ.get("WATCHLIST_TTL_SECS", "300"))  # 5 min before watchlist entry expires
@@ -701,8 +703,12 @@ def _load_daily_state():
             # value forever (this is exactly how BOND_TP_PCT got stuck at 101% — a
             # floor formula broke, and since bond had zero trades to recompute from,
             # nothing would have ever self-corrected it). Trust Redis, but not blindly.
-            if "bond_entry_min"  in s: BOND_ENTRY_MIN  = float(s["bond_entry_min"])
-            if "bond_entry_max"  in s: BOND_ENTRY_MAX  = float(s["bond_entry_max"])
+            if "bond_entry_min"  in s:
+                _restored_min = float(s["bond_entry_min"])
+                BOND_ENTRY_MIN = _restored_min if 40 <= _restored_min <= 65 else 57.0
+            if "bond_entry_max"  in s:
+                _restored_max = float(s["bond_entry_max"])
+                BOND_ENTRY_MAX = _restored_max if 45 <= _restored_max <= 85 else 73.0
             if "bond_tp_pct"     in s:
                 _restored_tp = float(s["bond_tp_pct"])
                 BOND_TP_PCT = _restored_tp if 5 <= _restored_tp <= 50 else 10.0
@@ -1198,7 +1204,8 @@ DSC_LEARN_AVOID_WR   = float(os.environ.get("DSC_LEARN_AVOID_WR", "30"))  # belo
 _dsc_signal_stats_cache = (0.0, None)  # (fetched_at, {tag: {...}}) — short TTL, don't hit Redis every coin
 
 def dsc_signal_type_stats():
-    """Win rate/pnl per DSC sub-signal type (BOOST/ADS/META/TOP/TAKEOVER), computed
+    """Win rate/pnl per DSC sub-signal type (BOOST/ADS/META/TOP/TAKEOVER, or a
+    "+"-joined combo like BOOST+ADS when a coin matched more than one), computed
     from the permanent archive — the bot's own real track record per approach."""
     global _dsc_signal_stats_cache
     fetched_at, cached = _dsc_signal_stats_cache
@@ -3719,6 +3726,21 @@ def copy_trade_loop():
             if drained:
                 log("info", f"Drained {drained} webhook event(s)", "PUSH")
 
+            # Once the push webhook is registered, real-time detection comes from
+            # the drain above, not polling — the Enhanced Transactions API poll
+            # below was the actual source of the wallets sitting permanently in
+            # 429 backoff (every wallet, every 15s, forever, regardless of whether
+            # push was already covering them). Now it only runs as an infrequent
+            # safety net once push is confirmed live; falls back to full-speed
+            # polling if the webhook was never registered (e.g. no public domain).
+            global _last_full_poll
+            with _helius_wh_lock:
+                webhook_active = bool(_helius_wh_id)
+            if webhook_active and (now - _last_full_poll) < POLL_FALLBACK_INTERVAL_SECS:
+                time.sleep(15)
+                continue
+            _last_full_poll = now
+
             # ── Poll TRACKED_WALLETS (env var) and the dynamic roster ──
             wallets = [{"address": w["address"], "name": w["name"], "winrate": 100.0, "pinned": True} for w in _tracked_wallet_list()]
             _seen = {w["address"] for w in wallets}
@@ -4500,12 +4522,19 @@ def scanner_loop():
                     _copied_mints[dsc_mint] = time.time()
                 dsc_sym = dsc_mint[:8]
                 amt = trade_size()
-                # Label by which DSC signal triggered
+                # Label by which DSC signal(s) triggered — a coin can be boosted AND
+                # running ads AND trending in a meta at once; capture every matching
+                # category (not just the highest-priority one) so the per-tag learning
+                # loop can tell "BOOST alone" apart from "BOOST+ADS" instead of the
+                # combo silently losing its ADS/META/TOP/TAKEOVER signal on record.
                 with _dsc_lock:
-                    _why = ("BOOST" if dsc_mint in _dsc_boosted_mints else
-                            "ADS"   if dsc_mint in _dsc_ad_mints       else
-                            "META"  if dsc_mint in _dsc_meta_mints      else
-                            "TOP"   if dsc_mint in _dsc_top_mints       else "TAKEOVER")
+                    _hits = []
+                    if dsc_mint in _dsc_boosted_mints:   _hits.append("BOOST")
+                    if dsc_mint in _dsc_ad_mints:        _hits.append("ADS")
+                    if dsc_mint in _dsc_meta_mints:      _hits.append("META")
+                    if dsc_mint in _dsc_top_mints:       _hits.append("TOP")
+                    if dsc_mint in _dsc_takeover_mints:  _hits.append("TAKEOVER")
+                    _why = "+".join(_hits) if _hits else "TAKEOVER"
                 if dsc_signal_type_avoid(_why):
                     log("info", f"DSC SKIP: {_why} has a losing track record ({dsc_signal_type_stats()[_why]['win_rate']}% WR over {dsc_signal_type_stats()[_why]['trades']} trades) — learned to avoid it", dsc_sym)
                     continue
