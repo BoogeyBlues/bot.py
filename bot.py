@@ -194,6 +194,12 @@ JUPITER_QUOTE_URL      = "https://api.jup.ag/swap/v1/quote"
 JUPITER_SWAP_URL       = "https://api.jup.ag/swap/v1/swap"
 JUP_TOKENS_URL         = "https://api.jup.ag/tokens/v2"
 JUP_PRICE_V3_URL       = "https://api.jup.ag/price/v3/price"
+
+# sig -> real USD proceeds quoted by Jupiter for a live sell, so exit_trade's
+# optimistic pnl/capital credit (from the SL/TP trigger price) can be reconciled
+# against what the swap actually promised to deliver, once the sell is confirmed.
+_jup_sell_quotes      = {}
+_jup_sell_quotes_lock = threading.Lock()
 JUP_IMPACT_MAX_PCT     = float(os.environ.get("JUP_IMPACT_MAX_PCT",     "2.0"))  # tighter — only liquid entries
 JUP_SIGNAL_REFRESH_SECS= int(os.environ.get("JUP_SIGNAL_REFRESH_SECS", "120"))
 
@@ -2683,6 +2689,19 @@ def execute_sell_jupiter(mint, symbol, tokens_estimate):
         sig = _send_tx(bytes(tx), symbol)
         if sig:
             log("ok", f"JUP sold | solscan.io/tx/{sig}", symbol)
+            # Record what Jupiter's own quote promised this sell would deliver — the
+            # closest thing to the real fill price available without parsing on-chain
+            # balance deltas. _verify_sell_and_retry looks this up once the sell is
+            # confirmed, to reconcile pnl/capital against the actual proceeds instead
+            # of the earlier SL/TP trigger-price estimate.
+            try:
+                out_lamports = float(r.json().get("outAmount", 0) or 0)
+                sol_price    = get_sol_price()
+                if out_lamports > 0 and sol_price:
+                    with _jup_sell_quotes_lock:
+                        _jup_sell_quotes[sig] = (out_lamports / 1e9) * sol_price
+            except Exception:
+                pass
             return sig
         log("err", "JUP sell: tx broadcast failed", symbol)
         return None
@@ -2838,6 +2857,11 @@ def _partial_exit(mint, price, fraction, label):
 
     with capital_lock:
         capital += proceeds
+    # Partial exits don't run the full-close reconciliation exit_trade() does — drop
+    # any quote execute_sell_jupiter stored for this sig so it doesn't sit in
+    # _jup_sell_quotes forever.
+    with _jup_sell_quotes_lock:
+        _jup_sell_quotes.pop(sell_ok, None)
 
     move_pct = ((price - entry) / max(entry, 1e-12)) * 100
     pct_sold = int(fraction * 100)
@@ -3026,11 +3050,65 @@ def enter_trade(mint, symbol, entry_price, amount, strategy, bond_entry=0, repli
         threading.Thread(target=_verify_tx_landed, args=(tx, mint, symbol, amount), daemon=True).start()
     return True
 
-def _verify_sell_and_retry(sig, trade, mint, clamped_return, reason):
+def _apply_slippage_correction(trade_id, delta):
+    """exit_trade() credits capital/pnl optimistically from the SL/TP trigger price,
+    before the sell even executes. Once the real Jupiter fill is known (see
+    _jup_sell_quotes), this corrects both capital and the already-recorded trade —
+    in the working view and the permanent archive, so the correction survives a
+    redeploy instead of only living in the optimistic first-guess forever."""
+    if abs(delta) < 0.005:
+        return
+    global capital
+    with capital_lock:
+        capital += delta
+
+    def _patch(lst):
+        for t in lst:
+            if t.get("id") == trade_id:
+                t["pnl"] = round(t.get("pnl", 0) + delta, 4)
+                t["pnl_pct"] = round(t["pnl"] / max(t.get("amount", 1) or 1, 1e-12) * 100, 2)
+                t["slippage_corrected"] = round(delta, 4)
+                return True
+        return False
+
+    with trades_lock:
+        patched = _patch(completed_trades)
+    if patched:
+        redis_save("bot_trades", list(completed_trades))
+    try:
+        archive = redis_load("bot_trades_archive") or []
+        if _patch(archive):
+            redis_save("bot_trades_archive", archive)
+    except Exception as e:
+        log("warn", f"Slippage correction archive patch failed: {e}", "SLIP")
+
+    sign = "+" if delta >= 0 else ""
+    log("info" if delta >= 0 else "warn",
+        f"Slippage correction: {sign}${delta:.4f} vs. trigger-price estimate (trade #{trade_id}) — capital and PnL corrected to actual fill",
+        "SLIP")
+
+def _verify_sell_and_retry(sig, trade, mint, clamped_return, reason, trade_id=None, final_value=0.0):
     """Background: verify sell tx landed. Uses Helius first, balance check as ground truth."""
     if sig == "PAPER_TX":
         return  # paper mode — no on-chain tx to verify
     symbol = trade["symbol"]
+
+    def _reconcile_fill():
+        """Once a sell is confirmed landed, correct pnl/capital against the real
+        Jupiter fill if we captured a quote for this signature (Jupiter sells only —
+        PumpPortal/pump-swap/raydium sells don't return quote data, so this is a
+        no-op there and the trigger-price estimate stands, same as before)."""
+        if trade_id is None:
+            return
+        with _jup_sell_quotes_lock:
+            usd_out = _jup_sell_quotes.pop(sig, None)
+        if usd_out is None or final_value <= 0:
+            return
+        delta = usd_out - final_value
+        # Sanity clamp — never let a corrupt/outlier quote correction swing capital
+        # by more than the estimate itself was worth.
+        delta = max(-final_value, min(delta, final_value))
+        _apply_slippage_correction(trade_id, delta)
     for attempt, delay in [(1, 12), (2, 25)]:
         time.sleep(delay)
         for rpc_url in _rpc_endpoints():
@@ -3038,6 +3116,7 @@ def _verify_sell_and_retry(sig, trade, mint, clamped_return, reason):
                 status = Client(rpc_url).get_signature_statuses([sig])
                 tx_s   = status.value[0] if status.value else None
                 if tx_s is not None and not tx_s.err:
+                    _reconcile_fill()
                     return  # confirmed on-chain — done
                 if tx_s is not None and tx_s.err:
                     break  # explicitly failed — stop checking this attempt
@@ -3048,6 +3127,7 @@ def _verify_sell_and_retry(sig, trade, mint, clamped_return, reason):
     bal = _check_token_balance(mint)
     if bal == 0:
         log("ok", f"Sell confirmed via balance (tokens gone from wallet)", symbol)
+        _reconcile_fill()
         return  # tokens gone = sell worked even if status check uncertain
     # Tokens still in wallet — sell genuinely failed, retry once
     log("warn", f"Sell tx failed — {bal:.0f} tokens still in wallet — retrying", symbol)
@@ -3061,6 +3141,12 @@ def _verify_sell_and_retry(sig, trade, mint, clamped_return, reason):
         bal_after = _check_token_balance(mint)
         if bal_after == 0:
             log("ok", f"Sell retry confirmed — tokens gone", symbol)
+            if trade_id is not None and final_value > 0:
+                with _jup_sell_quotes_lock:
+                    usd_out = _jup_sell_quotes.pop(retry_sig, None)
+                if usd_out is not None:
+                    delta = max(-final_value, min(usd_out - final_value, final_value))
+                    _apply_slippage_correction(trade_id, delta)
             return  # retry landed on-chain
         log("err", f"Sell retry also failed on-chain — {bal_after:.0f} tokens still in wallet", symbol)
         # fall through to capital correction below
@@ -3070,6 +3156,11 @@ def _verify_sell_and_retry(sig, trade, mint, clamped_return, reason):
     global capital
     with capital_lock:
         capital -= clamped_return
+    # Both sells genuinely failed — nothing to reconcile against, drop any stored
+    # quotes so they don't sit in memory forever.
+    with _jup_sell_quotes_lock:
+        _jup_sell_quotes.pop(sig, None)
+        _jup_sell_quotes.pop(retry_sig, None)
     log("err", f"Sell failed — tokens stuck. Capital -${clamped_return:.2f}. Sell manually in Phantom.", symbol)
     notify(f"⚠️ STUCK {symbol}", f"Sell failed twice. Tokens still in wallet.\nSell manually in Phantom.\nCapital corrected -${clamped_return:.2f}")
 
@@ -3091,6 +3182,13 @@ def exit_trade(mint, price, reason, bond=0):
     pnl              = max(-amount, min(pnl, amount * 5))
     clamped_return   = max(0.0, amount - partial_proceeds + pnl)
 
+    # Allocated now (not after the sell) so the background verifier can reconcile
+    # this exact trade record once the real Jupiter fill is known.
+    global _trade_id_counter
+    with _trade_id_lock:
+        _trade_id_counter += 1
+        trade_id = _trade_id_counter
+
     # Fire sell immediately — do NOT block waiting for on-chain confirmation
     sell_sig = execute_sell(trade["tokens"], mint, trade["symbol"],
                             pump_swap=trade.get("pump_swap", False),
@@ -3108,9 +3206,13 @@ def exit_trade(mint, price, reason, bond=0):
     with capital_lock:
         capital += clamped_return
 
-    # Background verify — if it failed on-chain, retry once and correct capital
+    # Background verify — if it failed on-chain, retry once and correct capital.
+    # Also reconciles pnl/capital against the real Jupiter fill once confirmed
+    # (see _apply_slippage_correction) instead of leaving them at this trigger-price
+    # estimate forever.
     threading.Thread(target=_verify_sell_and_retry,
                      args=(sell_sig, trade, mint, clamped_return, reason),
+                     kwargs={"trade_id": trade_id, "final_value": final_value},
                      daemon=True).start()
 
     sign = "+" if pnl >= 0 else ""
@@ -3126,10 +3228,7 @@ def exit_trade(mint, price, reason, bond=0):
     record_daily_trade(won=(pnl > 0))
 
     pnl_pct = round(pnl / max(amount, 1e-12) * 100, 2)
-    global _trade_id_counter
-    with _trade_id_lock:
-        _trade_id_counter += 1
-        trade_id = _trade_id_counter
+    # trade_id was already allocated above, before the sell fired
     rec = {
         "id":         trade_id,
         "symbol":     trade["symbol"],
