@@ -6878,11 +6878,47 @@ def admin_reset_daily():
     log("ok", f"Daily state reset via /admin/reset-daily — loss guard baseline reset to ${cap_now:.2f}")
     return jsonify({"ok": True, "msg": "Daily counters reset — trade history untouched — bot will resume trading"})
 
+def _paper_fresh_start():
+    """Full wipe of trade history, USDC Locked, and derived learning stats — ONLY
+    called while PAPER_MODE is on. Paper-mode numbers aren't real trading history;
+    they're the output of whatever strategy edits happened to be live at the time,
+    and accumulating them forever across iterations pollutes the one number that's
+    supposed to answer "is this worth trusting with real money." So in paper mode,
+    Reset Capital / Reset All mean an actual fresh start, not "reset capital but
+    keep the old paper numbers." The moment paper_mode flips off, these same
+    buttons revert to the never-wipe-memory behavior below — this function is
+    simply never called once real capital is on the line.
+    DSC signal learning isn't a separate stored counter — dsc_signal_type_stats()
+    derives it live from the archive, so wiping the archive resets it for free."""
+    global usdc_locked, _pending_lock_usd, _trade_id_counter
+    global _week_day_logs, _week_start_date, _milestones_hit
+    global _archive_stats_cache, _dsc_signal_stats_cache
+    with trades_lock:
+        completed_trades.clear()
+    redis_save("bot_trades", [])
+    redis_save("bot_trades_archive", [])
+    with usdc_lock:
+        usdc_locked       = 0.0
+        _pending_lock_usd = 0.0
+    with _trade_id_lock:
+        _trade_id_counter = 0
+    with _daily_lock:
+        _week_day_logs   = []
+        _week_start_date = ""
+    with _milestone_lock:
+        _milestones_hit = set()
+    _archive_stats_cache    = (0.0, None)
+    _dsc_signal_stats_cache = (0.0, None)
+    log("warn", "PAPER MODE fresh start — trade history, USDC Locked, and derived learning stats wiped", "RESET")
+
 @app.route("/admin/reset-capital", methods=["POST"])
 def admin_reset_capital():
-    """Resets ONLY capital and today's session — never touches trade history.
-    All-time win rate, PnL, and the trade log survive this every time. If you
-    genuinely want a full wipe including history, that's /admin/reset-all."""
+    """Resets capital and today's session. In paper mode this is also a genuine
+    fresh start (trade history, USDC Locked, and derived learning stats wiped —
+    see _paper_fresh_start). Once live, it goes back to capital + session only —
+    all-time win rate, PnL, and the trade log survive every time. If you want a
+    full wipe in live mode too, that's not this endpoint — it's a deliberate
+    memory-preservation rule for real trading history."""
     denied = _auth_required()
     if denied: return denied
     global capital, scan_active, BOT_PAUSED, _capital_epoch_start, _capital_epoch_start_value
@@ -6892,9 +6928,14 @@ def admin_reset_capital():
         capital = STARTING_CAPITAL
     _capital_epoch_start       = time.time()  # headline PnL/win-rate now scope to from here
     _capital_epoch_start_value = STARTING_CAPITAL
-    # completed_trades, usdc_locked, and open_trades are deliberately NOT touched —
-    # this is a capital + today's-session reset, not a history wipe. Trade history,
-    # secured USDC profit, and open positions all carry forward untouched.
+    fresh = False
+    if PAPER_MODE:
+        _paper_fresh_start()
+        fresh = True
+    # completed_trades, usdc_locked, and open_trades are otherwise deliberately NOT
+    # touched — this is a capital + today's-session reset, not a history wipe, once
+    # live. Trade history, secured USDC profit, and open positions all carry forward
+    # untouched in that case.
     # _day_start_cap (the daily-loss-guard baseline) is deliberately NOT touched here
     # either — it only moves at the real day-boundary rollover (_reset_daily_if_needed).
     # Manual capital resets during iteration used to reset it too, which meant the
@@ -6911,8 +6952,12 @@ def admin_reset_capital():
     BOT_PAUSED  = False
     _persist_pause(0.0)
     _save_daily_state()
-    log("ok", f"Capital + session reset to ${STARTING_CAPITAL:.2f} via /admin/reset-capital — history untouched, scanner revived")
-    return jsonify({"ok": True, "msg": f"Capital reset to ${STARTING_CAPITAL:.2f} — trade history kept, scanner running"})
+    suffix = " — PAPER MODE fresh start (history + USDC Locked wiped)" if fresh else " — history untouched"
+    log("ok", f"Capital + session reset to ${STARTING_CAPITAL:.2f} via /admin/reset-capital{suffix}, scanner revived")
+    msg = (f"Capital reset to ${STARTING_CAPITAL:.2f} — fresh start (trade history + USDC Locked cleared), scanner running"
+           if fresh else
+           f"Capital reset to ${STARTING_CAPITAL:.2f} — trade history kept, scanner running")
+    return jsonify({"ok": True, "msg": msg})
 
 @app.route("/set-capital/<float:amount>")
 def set_capital_get(amount):
@@ -7086,10 +7131,13 @@ def clear_ghosts_get():
 
 @app.route("/admin/reset-all", methods=["POST"])
 def admin_reset_all():
-    """Capital + today's session + clears any stuck/open positions. Never wipes
-    memory: trade history, USDC locked, wallet activity, and combat stats all
-    survive this, same as /admin/reset-capital. The only thing this does that
-    reset-capital doesn't is force-clear open positions (use this if one's stuck)."""
+    """Capital + today's session + clears any stuck/open positions. In paper mode
+    this is also a genuine fresh start (trade history, USDC Locked, and derived
+    learning stats wiped — see _paper_fresh_start). Once live, it goes back to
+    never wiping memory: trade history, USDC locked, wallet activity, and combat
+    stats all survive, same as /admin/reset-capital — the only thing this does
+    that reset-capital doesn't is force-clear open positions (use this if one's
+    stuck)."""
     denied = _auth_required()
     if denied: return denied
     global capital, scan_active, BOT_PAUSED, _capital_epoch_start, _capital_epoch_start_value
@@ -7102,9 +7150,14 @@ def admin_reset_all():
     _capital_epoch_start_value = STARTING_CAPITAL
     with trades_lock:
         open_trades.clear()
-    # completed_trades, usdc_locked, _wallet_activity, _combat_events: never
-    # touched by any reset now — no memory is ever wiped, by design. _day_start_cap
-    # (the daily-loss-guard baseline) is also left alone — see /admin/reset-capital.
+    fresh = False
+    if PAPER_MODE:
+        _paper_fresh_start()
+        fresh = True
+    # completed_trades, usdc_locked, _wallet_activity, _combat_events: never touched
+    # by any reset once live — no memory is ever wiped in that case, by design.
+    # _day_start_cap (the daily-loss-guard baseline) is also left alone — see
+    # /admin/reset-capital.
     with _daily_lock:
         _daily_trades       = 0
         _daily_wins         = 0
@@ -7120,8 +7173,12 @@ def admin_reset_all():
     _save_daily_state()
     redis_save("bot_open_trades", [])
 
-    log("ok", f"Capital + session reset to ${STARTING_CAPITAL:.2f} via /admin/reset-all — history untouched, open positions cleared, scanner revived")
-    return jsonify({"ok": True, "msg": f"Capital reset to ${STARTING_CAPITAL:.2f}, open positions cleared — trade history kept, scanner running"})
+    suffix = " — PAPER MODE fresh start (history + USDC Locked wiped)" if fresh else " — history untouched"
+    log("ok", f"Capital + session reset to ${STARTING_CAPITAL:.2f} via /admin/reset-all{suffix}, open positions cleared, scanner revived")
+    msg = (f"Capital reset to ${STARTING_CAPITAL:.2f}, open positions cleared — fresh start (trade history + USDC Locked cleared), scanner running"
+           if fresh else
+           f"Capital reset to ${STARTING_CAPITAL:.2f}, open positions cleared — trade history kept, scanner running")
+    return jsonify({"ok": True, "msg": msg})
 
 def _persist_pause(until_ts: float):
     """Write pause timestamp to Redis so it survives restarts and daily resets."""

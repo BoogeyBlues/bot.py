@@ -101,14 +101,31 @@ unproven as of this writing; check `/trades/archive` `by_strategy` for real dsc_
 results since that deploy before trusting it.
 
 ## Reset behavior (do not regress this)
-No reset endpoint should ever delete trade history, USDC-locked tracking, wallet
-activity, or combat stats — this was audited and fixed across `/admin/reset-daily`,
-`/admin/reset-capital`, `/admin/reset-all`, `/set-capital`, `/admin/set-capital`. Only
-`/clear-usdc` (explicit, by name) and `/admin/reset-all`'s open-position clear are
-allowed to touch anything beyond capital + today's session counters. If a new
-reset/admin endpoint is ever added, it must not silently wipe anything beyond what its
-name promises — this exact mistake happened 4 separate times in one session before being
-caught, each time discovered from a live screenshot, not from reading the code.
+**LIVE mode (`PAPER_MODE=false`):** no reset endpoint should ever delete trade history,
+USDC-locked tracking, wallet activity, or combat stats — this was audited and fixed
+across `/admin/reset-daily`, `/admin/reset-capital`, `/admin/reset-all`, `/set-capital`,
+`/admin/set-capital`. Only `/clear-usdc` (explicit, by name) and `/admin/reset-all`'s
+open-position clear are allowed to touch anything beyond capital + today's session
+counters. If a new reset/admin endpoint is ever added, it must not silently wipe
+anything beyond what its name promises — this exact mistake happened 4 separate times in
+one session before being caught, each time discovered from a live screenshot, not from
+reading the code.
+
+**PAPER mode (`PAPER_MODE=true`), `/admin/reset-capital` and `/admin/reset-all` only:**
+deliberate exception, per explicit user request — paper-mode trade history isn't real
+trading history, and accumulating it forever across strategy iterations was polluting
+the one number meant to answer "is this worth trusting with real money" (screenshot:
+853 stale paper trades / 40.1% WR / $110.73 USDC Locked survived a reset the user
+expected to be a fresh start). While `PAPER_MODE` is on, both buttons call
+`_paper_fresh_start()`, which wipes `completed_trades`, the permanent
+`bot_trades_archive`, `usdc_locked`, `_pending_lock_usd`, `_week_day_logs`, and resets
+the trade-id counter and `_milestones_hit`. DSC signal learning isn't stored separately
+— it's derived live from the archive by `dsc_signal_type_stats()` — so wiping the
+archive resets it for free. The instant `PAPER_MODE` flips to `false`, these same two
+buttons silently revert to the live-mode never-wipe behavior above — `_paper_fresh_start`
+is gated on `if PAPER_MODE:` and is simply never called once real capital is on the
+line. Wallet activity/combat stats (the Wallet Arena feature) are NOT touched by this —
+that's a separate subsystem from trade PnL and wasn't part of what was asked.
 
 ## Known unresolved
 - `BIRDEYE_API_KEY` still not confirmed set in Railway — check `/status/api` boot log /
