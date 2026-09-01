@@ -128,6 +128,27 @@ line. Wallet activity/combat stats (the Wallet Arena feature) are NOT touched by
 that's a separate subsystem from trade PnL and wasn't part of what was asked.
 
 ## Known unresolved
+- **Copy-trade wallet tracking root cause found: the "wallets" were never wallets.**
+  Verified via direct Solana `getAccountInfo` (owner program check, not guesswork) that
+  `9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump` ("Ansem"), `CREDBHvVqREBCAxMihzr8D1nepHMr2gmQoZWpmgGmeta`
+  ("Cred"), `wQFd44Kh6nsrXn49vcu4bpjDCqe18iTGYzTgcWppump` ("Doom"), and
+  `Ha4zQAGVvmvjxAogMhenwYK9HCdfpNs82LTZ4MKTpump` ("Saof") are all pump.fun TOKEN MINTS
+  (owner = Token/Token-2022 program), not wallets — there was never any wallet activity
+  for Helius to find, regardless of how well the polling/webhook fixed earlier this
+  session worked. Replaced Ansem with his real wallet
+  (`GV6UUmNxz2RpKxmNAPadYKb7uQpszwqQAu3qLJxVdC52` — System-Program-owned, ~63 SOL,
+  corroborated by public sources listed below, but NOT independently verifiable as
+  definitely his beyond that — he's publicly disowned other wallets wrongly attributed
+  to him before, so treat this as "best available, not certain"). Dropped Cred/Doom/Saof
+  entirely rather than guess — couldn't find their real wallets via search, the names
+  are too generic/niche to disambiguate. `_load_wallets()` now self-migrates any
+  already-deployed instance's persisted Redis roster on next boot (no manual
+  authenticated `/wallets/remove` call needed) — see `_STALE_MINT_NOT_WALLET`.
+  **If real wallets for Cred/Doom/Saof are ever sourced, verify with `getAccountInfo`
+  first** (owner must be `11111111111111111111111111111111`, i.e. the System Program —
+  not a Token program) before adding them; this exact mistake is how the last four got
+  in. Sources checked for Ansem's wallet: mexc.com/crypto-pulse (Ansem article),
+  datawallet.com/crypto/who-is-ansem, ansemdash.com.
 - `BIRDEYE_API_KEY` still not confirmed set in Railway — check `/status/api` boot log /
   API key audit before assuming this is fixed
 - GMGN signal endpoints unreliable — no confirmed fix, just worked around via

@@ -210,17 +210,21 @@ COPY_MIN_WHALE_USD   = float(os.environ.get("COPY_MIN_WHALE_USD",  "100"))  # sk
 # Manually tracked wallets — comma-separated Solana addresses in Railway TRACKED_WALLETS env var
 TRACKED_WALLETS   = [w.strip() for w in os.environ.get("TRACKED_WALLETS", "").split(",") if w.strip()]
 # Pinned wallets — always monitored, mirror their exact USD trade size, use bot's own TP/SL/exits
+# 2026-09-01: verified on-chain via getAccountInfo that every address below EXCEPT Ansem's new
+# one was actually a pump.fun TOKEN MINT (owner program = Token/Token-2022), not a wallet — that's
+# why copy trading had detected zero activity from any of them the entire time it's existed; there
+# was never any wallet activity to find. Ansem's replaced with his real wallet (System-Program-owned,
+# ~63 SOL, corroborated by public sources — see CLAUDE.md). Cred/Doom/Saof's real wallets aren't
+# confirmed yet — don't re-add them from a guess; verify with getAccountInfo (owner must be
+# "11111111111111111111111111111111", not a Token program) before trusting any candidate address.
 PINNED_WALLETS = [
-    "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump",  # Ansem
-    "CREDBHvVqREBCAxMihzr8D1nepHMr2gmQoZWpmgGmeta",  # Cred
-    # "wQFd44Kh6nsrXn49vcu4bpjDCqe18iTGYzTgcWppump",   # Doom — dropped, cut to 2 wallets
-    # "Ha4zQAGVvmvjxAogMhenwYK9HCdfpNs82LTZ4MKTpump",  # Saof — dropped, cut to 2 wallets
+    "GV6UUmNxz2RpKxmNAPadYKb7uQpszwqQAu3qLJxVdC52",  # Ansem — verified real wallet, not the old ANSEM mint
+    # "CREDBHvVqREBCAxMihzr8D1nepHMr2gmQoZWpmgGmeta", # Cred — this was a token mint, not a wallet. Dropped.
+    # "wQFd44Kh6nsrXn49vcu4bpjDCqe18iTGYzTgcWppump",   # Doom — this was a token mint, not a wallet. Dropped.
+    # "Ha4zQAGVvmvjxAogMhenwYK9HCdfpNs82LTZ4MKTpump",  # Saof — this was a token mint, not a wallet. Dropped.
 ]
 PINNED_WALLET_NAMES = {
-    "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump": "Ansem",
-    "CREDBHvVqREBCAxMihzr8D1nepHMr2gmQoZWpmgGmeta": "Cred",
-    "wQFd44Kh6nsrXn49vcu4bpjDCqe18iTGYzTgcWppump":  "Doom",
-    "Ha4zQAGVvmvjxAogMhenwYK9HCdfpNs82LTZ4MKTpump":  "Saof",
+    "GV6UUmNxz2RpKxmNAPadYKb7uQpszwqQAu3qLJxVdC52": "Ansem",
 }
 _wallet_activity = {}   # addr -> {"detections","entries","last_seen","hp","hits_landed","hits_taken","hp_updated_at"}
 _activity_lock   = threading.Lock()
@@ -275,12 +279,37 @@ _SOL_ADDR_RE  = re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')  # base58, excludes
 _wallets_lock = threading.Lock()
 _dynamic_wallets = {}   # addr -> {"name": str, "added_at": float}
 
+# 2026-09-01: these four addresses were tracked as "wallets" (Ansem/Cred/Doom/Saof)
+# since before this session, but getAccountInfo confirms every one of them is a
+# pump.fun TOKEN MINT (owner = the Token/Token-2022 program), not a wallet — there
+# was never any wallet activity for Helius to find, which is the real reason copy
+# trading produced zero detections the entire time. One-time migration below purges
+# them from whatever's already persisted in Redis so this doesn't require a manual
+# authenticated /wallets/remove call on every already-deployed instance.
+_STALE_MINT_NOT_WALLET = {
+    "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump",  # old "Ansem" entry — actually the ANSEM token mint
+    "CREDBHvVqREBCAxMihzr8D1nepHMr2gmQoZWpmgGmeta",  # old "Cred" entry — a token mint
+    "wQFd44Kh6nsrXn49vcu4bpjDCqe18iTGYzTgcWppump",   # old "Doom" entry — the Doom token mint
+    "Ha4zQAGVvmvjxAogMhenwYK9HCdfpNs82LTZ4MKTpump",  # old "Saof" entry — the SAOF token mint
+}
+
 def _load_wallets():
     global _dynamic_wallets
     saved = redis_load("bot_wallets")
     if saved:
         with _wallets_lock:
-            _dynamic_wallets = {w["address"]: {"name": w["name"], "added_at": w.get("added_at", 0)} for w in saved}
+            _dynamic_wallets = {w["address"]: {"name": w["name"], "added_at": w.get("added_at", 0)}
+                                 for w in saved if w["address"] not in _STALE_MINT_NOT_WALLET}
+        changed = len(_dynamic_wallets) != len(saved)
+        # Migrate in the verified real wallet if it isn't already tracked
+        if PINNED_WALLETS and PINNED_WALLETS[0] not in _dynamic_wallets:
+            with _wallets_lock:
+                _dynamic_wallets[PINNED_WALLETS[0]] = {"name": PINNED_WALLET_NAMES.get(PINNED_WALLETS[0], "Ansem"),
+                                                        "added_at": time.time()}
+            changed = True
+        if changed:
+            _save_wallets()
+            log("warn", "Wallet roster migration: dropped token-mint addresses mistracked as wallets, added verified Ansem wallet", "WALLETS")
     else:
         # First boot ever (or Redis not configured) — seed from the hardcoded list
         with _wallets_lock:
