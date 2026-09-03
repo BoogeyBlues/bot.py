@@ -100,6 +100,23 @@ ride" momentum redesign was deployed on top of it (see `MOMENTUM_DOUBLE_PCT` etc
 unproven as of this writing; check `/trades/archive` `by_strategy` for real dsc_signal
 results since that deploy before trusting it.
 
+**Update, same session, after a fresh 730-trade sample post-reset:** capital fell from
+$100 to $3.82 (39.7% WR). Broke it down by exit reason instead of guessing at a fix —
+`DSC_SIGNAL_TIME` (372 trades, held to the ~15-min timeout without doubling) was
+**profitable**: 52.4% WR, +$13.57. `DSC_SIGNAL_SL` (110 trades) was, by definition, 0%
+WR, -$32.62 — but 74.5% of those SL hits closed within just 6-8% of entry (noise, not a
+real breakdown) while only 5.5% were genuine flash-crash/rug risk (beyond -20%, one as
+bad as -84.67% — confirmed the 1s monitor loop / 2s price-cache TTL are already tight
+enough that no SL width fixes that particular tail, it's a market-structure gap).
+**Widened `BOND_SL_PCT` 6% → 10%** (shared by the dsc_signal/momentum exit branch) via a
+`steady_v2` one-time migration, since the value was already persisted in Redis on the
+live instance and a code-default change alone wouldn't move it. This is a data-grounded
+hypothesis, not a guaranteed fix — **re-check `/trades/archive` by exit reason once a
+fresh sample accumulates under the wider stop** before assuming it worked. If SL exits
+are still the dominant loss driver at 10%, the next lever to check is entry filtering
+(liquidity/holder-concentration gates) to avoid the flash-crash-prone coins in the first
+place, not just widening the stop further.
+
 ## Reset behavior (do not regress this)
 **LIVE mode (`PAPER_MODE=false`):** no reset endpoint should ever delete trade history,
 USDC-locked tracking, wallet activity, or combat stats — this was audited and fixed
