@@ -944,9 +944,9 @@ def daily_limit_reached():
                 cap_now = capital
             loss_pct = (_day_start_cap - cap_now) / _day_start_cap * 100
             if loss_pct >= MAX_DAILY_LOSS_PCT:
-                log("warn", f"Daily loss guard: down {loss_pct:.0f}% (limit {MAX_DAILY_LOSS_PCT:.0f}%) — no new entries until tomorrow")
                 if not _daily_cap_notified:
                     _daily_cap_notified = True
+                    log("warn", f"Daily loss guard: down {loss_pct:.0f}% (limit {MAX_DAILY_LOSS_PCT:.0f}%) — no new entries until tomorrow")
                     notify(
                         "🛑 Daily Loss Limit Hit",
                         f"Down {loss_pct:.0f}% today (${_day_start_cap:,.2f} → ${cap_now:,.2f})\n"
@@ -5052,11 +5052,6 @@ def _home_inner():
       <div id="h-locked" class="val blue">${locked:.2f}</div>
       <div class="sub">Cumulative secured — doesn't drop on later losses</div>
     </div>
-    <div class="card gold-card">
-      <div class="lbl">Net Worth <span style="font-size:.6rem;letter-spacing:.06em;color:var(--muted);font-weight:500">CAPITAL + LOCKED</span></div>
-      <div id="h-networth" class="val {'green' if (cap+locked-STARTING_CAPITAL)>=0 else 'red'}">${cap+locked:.2f}</div>
-      <div class="sub">{'+' if (cap+locked-STARTING_CAPITAL)>=0 else ''}{cap+locked-STARTING_CAPITAL:.2f} vs ${STARTING_CAPITAL:.2f} started</div>
-    </div>
   </div>
 
   <div class="section">
@@ -5543,11 +5538,6 @@ def _home_punk(cap, open_list, locked, wins_count, total, wr, pnl, mode,
       <div class="sub">Cumulative — doesn't drop on losses</div>
     </div>
     <div class="stat">
-      <div class="lbl">Net Worth</div>
-      <div id="pk-networth" class="val" style="color:{'#4ade80' if (cap+locked-STARTING_CAPITAL)>=0 else '#f87171'}">${cap+locked:.2f}</div>
-      <div class="sub">{'+' if (cap+locked-STARTING_CAPITAL)>=0 else ''}{cap+locked-STARTING_CAPITAL:.2f} vs ${STARTING_CAPITAL:.2f} started</div>
-    </div>
-    <div class="stat">
       <div class="lbl">Today</div>
       <div class="val yellow">{_daily_trades}<span style="font-size:1.1rem;color:#888">/{limit}</span></div>
       <div class="sub">{_daily_wins}W {_daily_losses}L</div>
@@ -5881,11 +5871,6 @@ def status():
       <div class="lbl">Capital</div>
       <div class="val">${cap:.2f}</div>
       <div class="sub">Started ${STARTING_CAPITAL:.2f}</div>
-    </div>
-    <div class="stat">
-      <div class="lbl">Net Worth <span style="font-weight:400;color:#666">(cap + locked)</span></div>
-      <div class="val" style="color:{'#4ade80' if (cap+locked-STARTING_CAPITAL)>=0 else '#f87171'}">${cap+locked:.2f}</div>
-      <div class="sub">{'+' if (cap+locked-STARTING_CAPITAL)>=0 else ''}{cap+locked-STARTING_CAPITAL:.2f} vs ${STARTING_CAPITAL:.2f} started</div>
     </div>
     <div class="stat">
       <div class="lbl">All-Time PnL</div>
