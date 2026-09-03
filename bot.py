@@ -120,7 +120,7 @@ ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # kept for ref
 BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "57"))  # 57%+ = confirmed momentum zone — coin has survived the early rug window
 BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "73"))
 BOND_TP_PCT     = float(os.environ.get("BOND_TP_PCT",    "10"))  # 10% TP — always take 10, compound fast
-BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "6"))
+BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "10"))  # widened from 6% 2026-09-03 — see steady_v2 migration below for why
 BOND_GRAD_BOND  = float(os.environ.get("BOND_GRAD_BOND", "90"))  # graduation imminent — tighten TSL
 BOND_GRAD_TSL   = float(os.environ.get("BOND_GRAD_TSL",  "3"))   # tight TSL % near graduation
 BOND_MAX_SECS       = int(os.environ.get("BOND_MAX_SECS",       "240"))  # 4 min max — don't babysit slow coins
@@ -643,7 +643,7 @@ def _save_daily_state():
         "capital_epoch_start_value": _capital_epoch_start_value,
         "wallet_activity": activity_snap,
         "combat_events":   events_snap,
-        "strategy_version": "steady_v1",
+        "strategy_version": "steady_v2",
     }
     try:
         with open(STATE_FILE, "w") as f:
@@ -747,7 +747,9 @@ def _load_daily_state():
             if "bond_tp_pct"     in s:
                 _restored_tp = float(s["bond_tp_pct"])
                 BOND_TP_PCT = _restored_tp if 5 <= _restored_tp <= 50 else 10.0
-            if "bond_sl_pct"     in s: BOND_SL_PCT     = float(s["bond_sl_pct"])
+            if "bond_sl_pct"     in s:
+                _restored_sl = float(s["bond_sl_pct"])
+                BOND_SL_PCT = _restored_sl if 3 <= _restored_sl <= 30 else 10.0
             if "bond_stale_secs" in s: BOND_STALE_SECS = int(s["bond_stale_secs"])
             if "bond_max_secs"   in s: BOND_MAX_SECS   = int(s["bond_max_secs"])
             if "spike_tp_pct"    in s: SPIKE_TP_PCT    = float(s["spike_tp_pct"])
@@ -810,8 +812,11 @@ def _load_daily_state():
         BOND_ENTRY_MAX = round(min(mid + 16, 78), 1)
         log("warn", f"Bond range was too narrow ({old_min}-{old_max}%) — reset to {BOND_ENTRY_MIN}-{BOND_ENTRY_MAX}%", "TUNE")
 
-    # One-time migration: reset aggressive auto-tuned params to slow-and-steady profile
-    if s.get("strategy_version", "") != "steady_v1":
+    # One-time migration: reset aggressive auto-tuned params to slow-and-steady profile.
+    # Checks "not applied yet" rather than "!= steady_v1" — the latter would also misfire
+    # once strategy_version advances past steady_v1 (e.g. to steady_v2 below), re-clobbering
+    # BOND_SL_PCT back to this block's own default on every future boot. Caught in testing.
+    if s.get("strategy_version", "") not in ("steady_v1", "steady_v2"):
         global TSL_ACTIVATE_PCT, PARTIAL_TP1_PCT, PARTIAL_TP2_PCT
         BOND_TP_PCT      = float(os.environ.get("BOND_TP_PCT",     "10"))
         BOND_SL_PCT      = float(os.environ.get("BOND_SL_PCT",     "5"))
@@ -823,6 +828,25 @@ def _load_daily_state():
         log("ok", f"Slow-and-steady profile applied: TP={BOND_TP_PCT}% SL={BOND_SL_PCT}% "
                   f"stale={BOND_STALE_SECS}s max={BOND_MAX_SECS}s TSL@+{TSL_ACTIVATE_PCT}%", "TUNE")
 
+    # One-time migration: widen the SL that governs dsc_signal (94%+ of real trade
+    # volume, via the momentum branch in _check_one_position) from 6% to 10%.
+    # Root-caused from the live archive on 2026-09-03: of 110 DSC_SIGNAL_SL exits in
+    # a 500-trade sample, 74.5% closed within 6-8% of entry — essentially noise, not
+    # a real breakdown — while trades that survived to the 15-min DSC_SIGNAL_TIME exit
+    # were net PROFITABLE (52.4% win rate, +$13.57 across 372 trades), against SL exits
+    # being 0% win rate by definition (-$32.62). A 6% stop was cutting a large share of
+    # trades before they had any chance to reach the profitable branch. This does NOT
+    # fix flash-crash/rug risk — those trades already blow past 6% before the 1s
+    # monitor loop can react (confirmed: 5.5% of SL exits were beyond -20%, one as bad
+    # as -84.67%, regardless of the configured threshold) — no SL width prevents that.
+    # This is a hypothesis grounded in real outcome data, not a guarantee — the very
+    # thing this fix is meant to enable is auto_tune()'s BOND_SL loosen/tighten logic
+    # (currently scoped to strategy=="bond", which has 0 trades right now) eventually
+    # taking over once bond and/or dsc_signal accumulate a fresh sample under this
+    # wider stop. Re-check /trades/archive by exit reason after this has a real sample.
+    if s.get("strategy_version", "") != "steady_v2":
+        BOND_SL_PCT = 10.0
+        log("ok", f"SL widened 6%->10% (steady_v2 migration) — see commit message for the data behind this", "TUNE")
 
     # Restore open positions so bot doesn't re-buy after crash/redeploy
     saved_open = redis_load("bot_open_trades")
