@@ -120,7 +120,7 @@ ANALYZE_EVERY     = int(os.environ.get("ANALYZE_EVERY",   "5"))   # kept for ref
 BOND_ENTRY_MIN  = float(os.environ.get("BOND_ENTRY_MIN", "57"))  # 57%+ = confirmed momentum zone — coin has survived the early rug window
 BOND_ENTRY_MAX  = float(os.environ.get("BOND_ENTRY_MAX", "73"))
 BOND_TP_PCT     = float(os.environ.get("BOND_TP_PCT",    "10"))  # 10% TP — always take 10, compound fast
-BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "10"))  # widened from 6% 2026-09-03 — see steady_v2 migration below for why
+BOND_SL_PCT     = float(os.environ.get("BOND_SL_PCT",    "5"))  # 10% (steady_v2) made SL losses worse, not better — tightened to 5% 2026-09-21, see steady_v3 migration below
 BOND_GRAD_BOND  = float(os.environ.get("BOND_GRAD_BOND", "90"))  # graduation imminent — tighten TSL
 BOND_GRAD_TSL   = float(os.environ.get("BOND_GRAD_TSL",  "3"))   # tight TSL % near graduation
 BOND_MAX_SECS       = int(os.environ.get("BOND_MAX_SECS",       "240"))  # 4 min max — don't babysit slow coins
@@ -643,7 +643,7 @@ def _save_daily_state():
         "capital_epoch_start_value": _capital_epoch_start_value,
         "wallet_activity": activity_snap,
         "combat_events":   events_snap,
-        "strategy_version": "steady_v2",
+        "strategy_version": "steady_v3",
     }
     try:
         with open(STATE_FILE, "w") as f:
@@ -749,7 +749,7 @@ def _load_daily_state():
                 BOND_TP_PCT = _restored_tp if 5 <= _restored_tp <= 50 else 10.0
             if "bond_sl_pct"     in s:
                 _restored_sl = float(s["bond_sl_pct"])
-                BOND_SL_PCT = _restored_sl if 3 <= _restored_sl <= 30 else 10.0
+                BOND_SL_PCT = _restored_sl if 3 <= _restored_sl <= 30 else 5.0
             if "bond_stale_secs" in s: BOND_STALE_SECS = int(s["bond_stale_secs"])
             if "bond_max_secs"   in s: BOND_MAX_SECS   = int(s["bond_max_secs"])
             if "spike_tp_pct"    in s: SPIKE_TP_PCT    = float(s["spike_tp_pct"])
@@ -816,7 +816,7 @@ def _load_daily_state():
     # Checks "not applied yet" rather than "!= steady_v1" — the latter would also misfire
     # once strategy_version advances past steady_v1 (e.g. to steady_v2 below), re-clobbering
     # BOND_SL_PCT back to this block's own default on every future boot. Caught in testing.
-    if s.get("strategy_version", "") not in ("steady_v1", "steady_v2"):
+    if s.get("strategy_version", "") not in ("steady_v1", "steady_v2", "steady_v3"):
         global TSL_ACTIVATE_PCT, PARTIAL_TP1_PCT, PARTIAL_TP2_PCT
         BOND_TP_PCT      = float(os.environ.get("BOND_TP_PCT",     "10"))
         BOND_SL_PCT      = float(os.environ.get("BOND_SL_PCT",     "5"))
@@ -844,9 +844,23 @@ def _load_daily_state():
     # (currently scoped to strategy=="bond", which has 0 trades right now) eventually
     # taking over once bond and/or dsc_signal accumulate a fresh sample under this
     # wider stop. Re-check /trades/archive by exit reason after this has a real sample.
-    if s.get("strategy_version", "") != "steady_v2":
+    if s.get("strategy_version", "") not in ("steady_v2", "steady_v3"):
         BOND_SL_PCT = 10.0
         log("ok", f"SL widened 6%->10% (steady_v2 migration) — see commit message for the data behind this", "TUNE")
+
+    # One-time migration: tighten the SL back down, 10% -> 5% — steady_v2 (above) was
+    # itself a hypothesis, and it didn't hold up. Checked the archive again 2026-09-21
+    # after a real sample under the 10% stop: SL exits stayed roughly the same SHARE of
+    # trades (~21% vs ~23% before), so widening did NOT catch more "recoverable noise" as
+    # hypothesized — these are mostly real breakdowns, not noise. But each SL exit now
+    # lost far more on average (-17.54% vs -9.87%), because a wider stop just lets more of
+    # a flash-crash happen before the bot reacts. Net: SL-bucket losses roughly doubled
+    # (-$32.62 -> -$70.73) while TIME-exit profit only grew modestly (+$13.57 -> +$19.58,
+    # confirming that part of the hypothesis), for a worse total. User explicitly asked
+    # for 5% (tighter than the original 6%, not just a revert) after seeing this data.
+    if s.get("strategy_version", "") != "steady_v3":
+        BOND_SL_PCT = 5.0
+        log("ok", f"SL tightened 10%->5% (steady_v3 migration, user-directed) — steady_v2's widening made SL losses worse, not better", "TUNE")
 
     # Restore open positions so bot doesn't re-buy after crash/redeploy
     saved_open = redis_load("bot_open_trades")
