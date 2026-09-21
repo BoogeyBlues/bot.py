@@ -117,6 +117,25 @@ are still the dominant loss driver at 10%, the next lever to check is entry filt
 (liquidity/holder-concentration gates) to avoid the flash-crash-prone coins in the first
 place, not just widening the stop further.
 
+**Update, 2026-09-21 — the widening above did NOT work, checked with a real sample:**
+SL exits stayed roughly the same *share* of trades (21.3% at 10% vs. 22.8% at 6%) — most
+SL hits are real breakdowns, not recoverable noise, refuting the "give it room" half of
+the hypothesis. But each SL hit now lost far more on average (-17.54% vs -9.87%), since
+a wider stop just lets more of a flash-crash happen before the bot reacts. SL-bucket
+losses roughly doubled (-$32.62 → -$70.73) against only a modest TIME-exit profit gain
+(+$13.57 → +$19.58) — net worse, worst single trade went from -84.67% to -99.98%.
+**User directed a tighten to 5%** (tighter than the original 6%, not just a revert) via
+a new `steady_v3` migration — same value-already-in-Redis problem, same migration
+pattern. Also had to extend the `steady_v1`/`steady_v2` migration guards to include
+`steady_v3` in their "already applied" checks, or they'd re-clobber this on every future
+boot (this exact bug was caught once already when `steady_v2` was introduced — the
+pattern is: any time a new `steady_vN` is added, every earlier migration's guard needs
+that new version added to its "already applied" set, not just its own). **This value has
+not yet been validated against a real sample — check `/trades/archive` by exit reason
+again once one exists, the same way the 10% experiment was checked.** Two strategy
+changes to this one parameter in one session, one of them wrong — treat SL width as
+still unsettled, not solved, until a wider sample says otherwise.
+
 ## Reset behavior (do not regress this)
 **LIVE mode (`PAPER_MODE=false`):** no reset endpoint should ever delete trade history,
 USDC-locked tracking, wallet activity, or combat stats — this was audited and fixed
