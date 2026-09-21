@@ -590,7 +590,13 @@ def trade_size():
         cap = capital
     pct, _ = _cap_tier(cap)
     raw = cap * pct
-    return round(max(MIN_TRADE, min(MAX_TRADE, raw)), 2)
+    size = round(max(MIN_TRADE, min(MAX_TRADE, raw)), 2)
+    # MIN_TRADE is a hard floor with no ceiling tied to actual capital — once capital
+    # drops below it (confirmed live: cap=$2.86, this was still returning $3.00), every
+    # enter_trade() call gets silently rejected by its own "capital < amount" guard and
+    # the bot stops trading entirely, forever, with no error or log calling that out.
+    # Never size a trade larger than capital actually has.
+    return round(min(size, cap), 2)
 
 def daily_trade_limit():
     with capital_lock:
