@@ -205,6 +205,15 @@ that's a separate subsystem from trade PnL and wasn't part of what was asked.
   ~94%+ of real trade volume and PumpPortal doesn't return quote data the same way.
 
 ## Fixed this pass (see commit history on `main` for exact diffs)
+- **`trade_size()` was sizing trades above actual capital, silently halting the bot.**
+  `MIN_TRADE` ($3) is a hard floor with no ceiling tied to capital — caught live at
+  capital=$2.86, trade_size=$3.00. `enter_trade()`'s own `capital < amount` guard then
+  rejects every single entry, forever, with no error/log — the bot just sits there
+  reporting `scanning:true` while never actually trading again. Fixed by capping
+  `trade_size()` at current capital. The existing "capital < $2 → halt scanner" safety
+  net elsewhere is the real, intentional floor and wasn't touched. **If capital is ever
+  low and trade counts stop climbing with no errors, check `trade_size()` vs `capital`
+  in `/status/api` first** — this is exactly what that looks like.
 - Bond TP auto-tune floor formula (`PARTIAL_TP2_PCT+2` → `BOND_SL_PCT+2`) that was
   computing 101% once partials got disabled; added restore-time sanity clamps for
   `BOND_TP_PCT` (5–50%) and `BOND_ENTRY_MIN/MAX` (40–65% / 45–85%) so a broken formula
