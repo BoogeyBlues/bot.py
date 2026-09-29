@@ -136,6 +136,22 @@ again once one exists, the same way the 10% experiment was checked.** Two strate
 changes to this one parameter in one session, one of them wrong — treat SL width as
 still unsettled, not solved, until a wider sample says otherwise.
 
+**Update, 2026-09-29 — checked the 5% stop against a real sample, it's looking better:**
+118 `DSC_SIGNAL_SL` exits: avg loss back down to -9.91% (vs -17.54% at 10%, and about the
+same as the original 6% stop's -9.87% — the overshoot-vs-threshold ratio seems fairly
+constant regardless of stop width, consistent with overshoot being driven by check-
+interval/flash-crash dynamics rather than the threshold itself), SL total pnl -$35.74
+(vs -$70.73 at 10%), only 3.4% of SL hits beyond -20% (vs 5.5% at 6%, worse at 10%).
+`DSC_SIGNAL_TIME` also improved to 53.7% WR / +$26.20 (376 trades) — some of that is
+likely the adaptive learner increasingly avoiding bad signal-tags (`BOOST`,
+`BOOST+TOP`, `TOP` all flagged `avoiding:true` in `/status/api` now) rather than the SL
+width alone, so don't attribute all of the gain to one change. Net `dsc_signal`: -$10.52
+over 800 trades, well up from -$59.81 at the last checkpoint. Still not "solved" — this
+is one more data point, not a final verdict — but 5% is holding up better than either
+6% or 10% did. Also confirmed separately: the `trade_size()` capital-lockup fix (see
+"Fixed this pass" below) is working live — capital and trade_size are moving together
+correctly instead of trade_size sticking above capital.
+
 ## Reset behavior (do not regress this)
 **LIVE mode (`PAPER_MODE=false`):** no reset endpoint should ever delete trade history,
 USDC-locked tracking, wallet activity, or combat stats — this was audited and fixed
