@@ -96,6 +96,25 @@ few days to see whether bond/trench/copy actually start producing volume now, an
 whether that volume is any good.** `birdeye`/`dsc_organic`/`gmgn_signal` are still fully
 dead (external API key/endpoint issue, not a code gate — see below).
 
+## Position sizing, coin selection, compounding (reference, not a change)
+- **Sizing**: `trade_size()` — capital-tiered % (`RISK_LEVEL`, default "standard": 8% under
+  $100 cap, 12% at $100-500, 15% at $500-5k, 18% at $5k+), bounded by `MIN_TRADE`/
+  `MAX_TRADE`, and (fixed this session) never larger than actual current capital.
+- **`dsc_signal` coin selection**: pool = union of DexScreener's own public lists — tokens
+  currently paying for boosts, top boost spenders, new/updated DSC profiles, paid-ad
+  tokens, community-takeover revivals. Gates before entry: not already open/recently sold,
+  liquidity ≥ `MIN_LIQ`, no mint/freeze authority or avoided bundler (rugcheck), no smart-
+  money selling, 5-min volume ≥ `MIN_VOL_5M`, combined signal score ≥ `MIN_SIGNAL_SCORE`,
+  1-min price trend not bearish, and the adaptive avoid-list (`dsc_signal_type_avoid`) for
+  whichever DSC category tag(s) it matched. In short: "someone is visibly paying to
+  promote this coin," not a technical/fundamental signal.
+- **Compounding**: trade size scales with *current* capital, so wins do compound within
+  whatever's left in the tradeable pool — but the bot actively skims profit OUT of that
+  pool via the USDC-lock sweep (`_usdc_lock_min()`: banks every win above $0.10 under $50
+  capital, $2 at $50-99, $10 at $100+) rather than letting everything ride. So it's closer
+  to "size up with what's left to trade, bank wins aggressively into a separate secured
+  pot, let losses eat into the shrinking float" than full compounding.
+
 ## Adaptive learning (built to address "the bot has no personality / doesn't learn")
 Before this, `auto_tune()` only adjusted `bond`/`spike` parameters — zero learning logic
 touched `dsc_signal`, the strategy actually running. Added:
@@ -225,7 +244,15 @@ that's a separate subsystem from trade PnL and wasn't part of what was asked.
   `MIN_SIGNAL_SCORE` tuning
 - The momentum "double" strategy needs a real sample before anyone trusts it
 - `paper_mode` has been `true` for this entire session — nothing here has been proven
-  under real execution conditions (slippage, fills, latency)
+  under real execution conditions (latency, real wallet/RPC failures, real USDC-lock
+  swaps). **Partially narrowed 2026-10-09**: paper exits now deduct a real round-trip
+  network fee (`ROUND_TRIP_FEE_SOL`) and reconcile Jupiter-routed sells against a real,
+  read-only Jupiter quote (`_paper_jup_sell_quote`) instead of assuming a perfect fill —
+  so paper PnL is a closer, not perfect, preview of live. Still not modeled: entry-side
+  slippage (buy price still uses the raw market-data price, not a real quote — a bigger
+  change, touches `enter_trade`'s cost-basis math broadly, scoped out this pass),
+  non-Jupiter sells (PumpPortal — low volume, no quote-only endpoint to reuse), and
+  anything about real wallet/RPC reliability under live conditions.
 - Long-held momentum "ride" positions (`RIDE_MAX_SECS` up to 30 min) go a while between
   reconciler passes — a wide-enough Redis/state gap during that window and the position
   reconciler could disagree with the in-memory `open_trades` state briefly. Flagged, not
