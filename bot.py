@@ -195,6 +195,16 @@ JUPITER_SWAP_URL       = "https://api.jup.ag/swap/v1/swap"
 JUP_TOKENS_URL         = "https://api.jup.ag/tokens/v2"
 JUP_PRICE_V3_URL       = "https://api.jup.ag/price/v3/price"
 
+# Real round-trip network cost: the buy and sell swaps already set
+# prioritizationFeeLamports at 100_000 and 200_000 respectively — this is that same
+# cost, paid in SOL alongside the swap itself, not deducted from the swap's own
+# input/output amounts. Neither paper NOR live pnl accounted for it anywhere before
+# this — paper mode because it never built a transaction at all, live mode because
+# gas is paid separately from the token amounts exit_trade's pnl math is based on.
+# Deducted from every exit so recorded pnl reflects what would actually be left in
+# the wallet, not an idealized swap-only number.
+ROUND_TRIP_FEE_SOL    = 0.0003
+
 # sig -> real USD proceeds quoted by Jupiter for a live sell, so exit_trade's
 # optimistic pnl/capital credit (from the SL/TP trigger price) can be reconciled
 # against what the swap actually promised to deliver, once the sell is confirmed.
@@ -2726,6 +2736,38 @@ def execute_buy_jupiter(mint, symbol, amount):
         log("err", f"JUP buy error [{type(e).__name__}]: {e}", symbol)
         return None
 
+def _paper_jup_sell_quote(mint, tokens_estimate):
+    """Paper-mode only: fetch a REAL Jupiter sell quote — read-only, no wallet/signing,
+    nothing executed — so paper fills reflect actual on-chain liquidity/price-impact
+    instead of assuming a perfect fill at the raw market-data price with zero slippage.
+    This is the same quote execute_sell_jupiter's live path uses, minus building and
+    sending the transaction. Returns real USD proceeds, or None on any failure (callers
+    fall back to the existing trigger-price estimate, same as today)."""
+    if not PAPER_MODE:
+        return None
+    try:
+        raw_amount = int(tokens_estimate * (10 ** 6))
+        if raw_amount <= 0:
+            return None
+        hdrs = _jup_hdrs()
+        sell_params = {
+            "inputMint": mint, "outputMint": WSOL_MINT,
+            "amount": raw_amount, "swapMode": "ExactIn", "slippageBps": 500,
+        }
+        r = _session.get(JUPITER_QUOTE_URL, params=sell_params, headers=hdrs, timeout=6)
+        if r.status_code == 401:
+            hdrs.pop("x-api-key", None)
+            r = _session.get(JUPITER_QUOTE_URL, params=sell_params, headers=hdrs, timeout=6)
+        if r.status_code != 200:
+            return None
+        out_lamports = float(r.json().get("outAmount", 0) or 0)
+        sol_price    = get_sol_price()
+        if out_lamports <= 0 or not sol_price:
+            return None
+        return (out_lamports / 1e9) * sol_price
+    except Exception:
+        return None
+
 def execute_sell_jupiter(mint, symbol, tokens_estimate):
     """Sell via Jupiter — fetches actual wallet token balance to avoid amount mismatch."""
     if PAPER_MODE:
@@ -2916,6 +2958,13 @@ def _partial_exit(mint, price, fraction, label):
         # Cap: this partial slice is worth at most fraction*amount*(1+5x) — blocks token-count inflation
         max_proceeds = trade["amount"] * fraction * 6.0
         proceeds = min(raw_proceeds, max_proceeds)
+        # This is its own real sell transaction (the eventual final exit pays its own
+        # fee separately via ROUND_TRIP_FEE_SOL in exit_trade) — same sell-leg cost as
+        # a live swap's prioritizationFeeLamports, deducted here so partial exits aren't
+        # treated as free.
+        _sol_px = get_sol_price()
+        if _sol_px:
+            proceeds -= 0.0002 * _sol_px
         trade["tokens"]            -= tokens_to_sell
         trade["partial_proceeds"]  += proceeds
         trade["partial_tp_done"]   += 1
@@ -3171,7 +3220,22 @@ def _apply_slippage_correction(trade_id, delta):
 def _verify_sell_and_retry(sig, trade, mint, clamped_return, reason, trade_id=None, final_value=0.0):
     """Background: verify sell tx landed. Uses Helius first, balance check as ground truth."""
     if sig == "PAPER_TX":
-        return  # paper mode — no on-chain tx to verify
+        # No real swap to verify, but fetch a real Jupiter quote anyway (read-only, no
+        # wallet/signing) so paper fills reflect actual on-chain liquidity/price-impact
+        # instead of silently assuming a perfect fill at the raw market-data price —
+        # same "mirror live trading" reconciliation the live path gets, just synchronous
+        # since there's no on-chain confirmation to wait for here.
+        if trade.get("use_jupiter") and trade_id is not None and final_value > 0:
+            # exit_trade() starts this thread before it finishes building/appending the
+            # trade record — without this wait, _apply_slippage_correction's lookup can
+            # race the main thread and silently fail to patch the record (capital still
+            # gets corrected, but the per-trade pnl wouldn't match it). Caught in testing.
+            time.sleep(2)
+            usd_out = _paper_jup_sell_quote(mint, trade.get("tokens", 0))
+            if usd_out is not None:
+                delta = max(-final_value, min(usd_out - final_value, final_value))
+                _apply_slippage_correction(trade_id, delta)
+        return
     symbol = trade["symbol"]
 
     def _reconcile_fill():
@@ -3260,6 +3324,12 @@ def exit_trade(mint, price, reason, bond=0):
     hold_m           = (time.time() - trade["opened_at"]) / 60
     final_value      = trade["tokens"] * price if price > 0 else 0
     pnl              = (partial_proceeds + final_value) - amount
+    # Real network/priority fee, same cost a live swap pays regardless of outcome —
+    # see ROUND_TRIP_FEE_SOL. Applied in both paper and live mode so recorded pnl
+    # isn't an idealized swap-only number in either case.
+    _sol_px = get_sol_price()
+    if _sol_px:
+        pnl -= ROUND_TRIP_FEE_SOL * _sol_px
     pnl              = max(-amount, min(pnl, amount * 5))
     clamped_return   = max(0.0, amount - partial_proceeds + pnl)
 
