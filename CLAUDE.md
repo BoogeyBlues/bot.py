@@ -108,12 +108,18 @@ dead (external API key/endpoint issue, not a code gate — see below).
   1-min price trend not bearish, and the adaptive avoid-list (`dsc_signal_type_avoid`) for
   whichever DSC category tag(s) it matched. In short: "someone is visibly paying to
   promote this coin," not a technical/fundamental signal.
-- **Compounding**: trade size scales with *current* capital, so wins do compound within
-  whatever's left in the tradeable pool — but the bot actively skims profit OUT of that
-  pool via the USDC-lock sweep (`_usdc_lock_min()`: banks every win above $0.10 under $50
-  capital, $2 at $50-99, $10 at $100+) rather than letting everything ride. So it's closer
-  to "size up with what's left to trade, bank wins aggressively into a separate secured
-  pot, let losses eat into the shrinking float" than full compounding.
+- **Compounding, updated 2026-10-09**: trade size scales with *current* capital at
+  entry (as before), but a running position now ALSO grows mid-trade — each profit
+  tier's back-to-capital half gets reinvested straight into the same coin if it's
+  still trending (`_add_to_position`), and a shallow dip gets one top-up
+  (`DIP_BUY_PCT`/`DIP_BUY_FRAC`). So a single winning position's total size can end up
+  well above its original entry — that's intentional now, not drift. The bot still
+  actively skims profit OUT of the loop too: half of every tier's proceeds goes
+  straight to USDC Locked (`PROFIT_SPLIT_LOCK_FRAC`), on top of the pre-existing
+  `_usdc_lock_min()` sweep on full exits. Net effect: winners compound harder than
+  before (both at entry AND mid-trade), losers are capped the same as always by the
+  unchanged 5% stop, and more of each win gets banked immediately rather than riding
+  the whole position on one outcome.
 
 ## Adaptive learning (built to address "the bot has no personality / doesn't learn")
 Before this, `auto_tune()` only adjusted `bond`/`spike` parameters — zero learning logic
@@ -242,7 +248,17 @@ that's a separate subsystem from trade PnL and wasn't part of what was asked.
   API key audit before assuming this is fixed
 - GMGN signal endpoints unreliable — no confirmed fix, just worked around via
   `MIN_SIGNAL_SCORE` tuning
-- The momentum "double" strategy needs a real sample before anyone trusts it
+- **2026-10-09: the momentum "double" strategy was replaced** (user-directed) — it
+  required a full +100% gain before banking anything, which real data showed almost
+  never happened before SL/time caught the trade first. Now banks progressively at
+  +5%/+10%/+20% (`PROFIT_TIER1/2/3_PCT`), splits each tier's proceeds 50/50 between
+  USDC Locked and reinvestment into the same coin (if still trending — `_add_to_position`,
+  `_partial_profit_take`), and does one shallow dip-buy (`DIP_BUY_PCT=-2.5%`, always
+  inside the 5% stop so it can't fight it). See the "Position sizing..." section below
+  for the mechanics. **No real trade sample yet under this design — the old "needs a
+  real sample" caveat applies even more now, this is a bigger behavior change than the
+  SL-width tweaks.** Check `/trades/archive` by exit reason (`DSC_SIGNAL_TIER1/2/3`,
+  `_TIER_CAP`, `_RIDE_TSL`, `_RIDE_CAP`) once trades accumulate.
 - `paper_mode` has been `true` for this entire session — nothing here has been proven
   under real execution conditions (latency, real wallet/RPC failures, real USDC-lock
   swaps). **Partially narrowed 2026-10-09**: paper exits now deduct a real round-trip
