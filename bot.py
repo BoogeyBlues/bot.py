@@ -96,6 +96,29 @@ MOMENTUM_DOUBLE_PCT  = float(os.environ.get("MOMENTUM_DOUBLE_PCT",  "100"))  # p
 MOMENTUM_BANK_FRAC   = float(os.environ.get("MOMENTUM_BANK_FRAC",   "0.5")) # fraction sold at the double — 0.5 recovers exactly the original cost basis
 MOMENTUM_DEV_SECS    = int(os.environ.get("MOMENTUM_DEV_SECS",      "900")) # time allowed to reach the double before giving up on it
 RIDE_MAX_SECS        = int(os.environ.get("RIDE_MAX_SECS",         "1800")) # safety valve: even a banked/riding position force-closes after this long if it plateaus, so the one slot isn't blocked forever
+
+# 2026-10-09, user-directed: bank profit progressively instead of waiting for a full
+# double, which real data showed almost never happens — see _partial_profit_take and
+# the momentum branch of _check_one_position. Each tier sells PROFIT_TIER_SELL_FRAC of
+# whatever tokens remain; proceeds split PROFIT_SPLIT_LOCK_FRAC to USDC Locked
+# (permanently secured) and the rest back toward capital — reinvested into the same
+# coin via _add_to_position if it's still passing the same 1-min uptrend check the
+# entry gate itself requires, otherwise it just joins capital like MOMENTUM_BANK_FRAC
+# always did. Once all three tiers are banked, the remainder rides the existing
+# trailing stop (TSL_ACTIVATE_PCT / RIDE_MAX_SECS) exactly as before.
+PROFIT_TIER1_PCT       = float(os.environ.get("PROFIT_TIER1_PCT",       "5"))
+PROFIT_TIER2_PCT       = float(os.environ.get("PROFIT_TIER2_PCT",       "10"))
+PROFIT_TIER3_PCT       = float(os.environ.get("PROFIT_TIER3_PCT",       "20"))
+PROFIT_TIERS           = [PROFIT_TIER1_PCT, PROFIT_TIER2_PCT, PROFIT_TIER3_PCT]
+PROFIT_TIER_SELL_FRAC  = float(os.environ.get("PROFIT_TIER_SELL_FRAC",  "0.20"))
+PROFIT_SPLIT_LOCK_FRAC = float(os.environ.get("PROFIT_SPLIT_LOCK_FRAC", "0.5"))
+
+# Dip-buy: a pullback shallower than the stop-loss gets topped up once instead of just
+# watched and hoped-for. DIP_BUY_PCT must stay shallower than -BOND_SL_PCT or it would
+# fight the stop outright (buying into a position the SL is about to close anyway).
+DIP_BUY_PCT  = float(os.environ.get("DIP_BUY_PCT",  "-2.5"))
+DIP_BUY_FRAC = float(os.environ.get("DIP_BUY_FRAC", "0.5"))
+
 MAX_TRADE         = float(os.environ.get("MAX_TRADE",   "500"))
 FIXED_TRADE_SIZE  = float(os.environ.get("FIXED_TRADE_SIZE", "0"))   # 0 = use tiered % sizing
 
@@ -2999,6 +3022,109 @@ def _partial_exit(mint, price, fraction, label):
     notify(f"📤 {label} {symbol}", f"Sold {pct_sold}% at +{move_pct:.1f}%\nProceeds: +${proceeds:.4f}\nCapital: ${capital:.2f}")
 
 
+def _add_to_position(mint, add_amount, price):
+    """Buy more of an already-open position — used by _partial_profit_take's reinvest
+    share and by the dip-buy check in _check_one_position. Reuses the same capital-
+    reservation pattern as a fresh entry (reserve, buy, refund on failure). Deliberately
+    does NOT touch trade["entry"] — the SL and profit-tier thresholds are meant to keep
+    tracking the position's original cost basis, not a blended average; amount/tokens
+    (what the final pnl calc actually uses) correctly reflect the real blended total."""
+    global capital
+    if add_amount <= 0 or price <= 0:
+        return False
+    with trades_lock:
+        if mint not in open_trades:
+            return False
+        trade       = open_trades[mint]
+        symbol      = trade["symbol"]
+        pump_swap   = trade.get("pump_swap", False)
+        raydium     = trade.get("raydium", False)
+        use_jupiter = trade.get("use_jupiter", False)
+    with capital_lock:
+        if capital < add_amount:
+            return False
+        capital -= add_amount
+    sig = execute_buy(mint, symbol, add_amount, pump_swap=pump_swap, raydium=raydium, use_jupiter=use_jupiter)
+    if not sig:
+        with capital_lock:
+            capital += add_amount  # refund — buy never happened
+        return False
+    new_tokens = add_amount / price
+    with trades_lock:
+        if mint not in open_trades:
+            # Position closed between the buy firing and landing here — nothing left
+            # to add to, refund instead of silently losing the money.
+            with capital_lock:
+                capital += add_amount
+            return False
+        open_trades[mint]["tokens"] += new_tokens
+        open_trades[mint]["amount"] += add_amount
+    log("ok", f"ADD ${add_amount:.4f} → {symbol} (now ${open_trades[mint]['amount']:.2f} total in)", symbol)
+    notify(f"➕ ADD {symbol}", f"Added ${add_amount:.4f}\nTotal in: ${open_trades[mint]['amount']:.2f}")
+    return True
+
+
+def _partial_profit_take(mint, price, sell_fraction, label):
+    """Tiered profit-take step — see PROFIT_TIER1/2/3_PCT. Sells sell_fraction of
+    remaining tokens, splits proceeds PROFIT_SPLIT_LOCK_FRAC to USDC Locked (via the
+    same real lock_profit_to_usdc path every other win uses) and the rest back toward
+    capital — reinvested into the same coin via _add_to_position if it's still passing
+    the entry gate's own 1-min uptrend check, otherwise that half just joins capital
+    like a normal partial exit."""
+    global capital
+    with trades_lock:
+        if mint not in open_trades:
+            return
+        trade = open_trades[mint]
+        tokens_to_sell = int(trade["tokens"] * sell_fraction)
+        if tokens_to_sell <= 0:
+            return
+        raw_proceeds = tokens_to_sell * price
+        max_proceeds = trade["amount"] * sell_fraction * 6.0
+        proceeds = min(raw_proceeds, max_proceeds)
+        _sol_px = get_sol_price()
+        if _sol_px:
+            proceeds -= 0.0002 * _sol_px
+        proceeds = max(proceeds, 0.0)
+        trade["tokens"]            -= tokens_to_sell
+        trade["partial_proceeds"]  += proceeds
+        trade["partial_tp_done"]    = trade.get("partial_tp_done", 0) + 1
+        symbol      = trade["symbol"]
+        pump_swap   = trade.get("pump_swap", False)
+        raydium     = trade.get("raydium", False)
+        use_jupiter = trade.get("use_jupiter", False)
+
+    sell_ok = execute_sell(tokens_to_sell, mint, symbol, pump_swap=pump_swap, raydium=raydium, use_jupiter=use_jupiter)
+    if not sell_ok:
+        with trades_lock:
+            if mint in open_trades:
+                open_trades[mint]["tokens"]           += tokens_to_sell
+                open_trades[mint]["partial_proceeds"] -= proceeds
+                open_trades[mint]["partial_tp_done"]  -= 1
+        log("err", f"[{label}] Profit-tier sell failed — trade state reverted", symbol)
+        return
+    with _jup_sell_quotes_lock:
+        _jup_sell_quotes.pop(sell_ok, None)
+
+    lock_half     = proceeds * PROFIT_SPLIT_LOCK_FRAC
+    reinvest_half = proceeds - lock_half
+    if lock_half > 0:
+        # Never touched capital — goes straight to the lock, same as every other real
+        # win's secured share, just not routed through the batched _pending_lock_usd
+        # pot since this is a direct, immediate per-tier split.
+        threading.Thread(target=lock_profit_to_usdc, args=(lock_half,), daemon=True).start()
+    with capital_lock:
+        capital += reinvest_half
+
+    log("ok", f"[{label}] Sold {int(sell_fraction*100)}% → ${proceeds:.4f} (${lock_half:.4f} locked, ${reinvest_half:.4f} to capital)", symbol)
+    notify(f"📤 {label} {symbol}", f"Sold {int(sell_fraction*100)}%\nLocked: ${lock_half:.4f}\nTo capital: ${reinvest_half:.4f}")
+
+    if reinvest_half > 0.01:
+        market = get_market_data(mint)
+        if market and is_1m_trending_up(market.get("pair_address", ""), market):
+            _add_to_position(mint, reinvest_half, market["price"])
+
+
 # ── GHOST POSITION CLEANUP ───────────────────────────────────────
 def _check_token_balance(mint):
     """Return wallet's token balance for a mint. 0 if not found or error."""
@@ -3641,27 +3767,47 @@ def _check_one_position(mint):
                 exit_trade(mint, price, "MIGRATE_TIME", bond); return
 
         elif strategy in ("birdeye", "dsc_organic", "gmgn_signal", "dsc_signal", "jup_signal"):
-            # Momentum: hop in, ride to a double, bank half (recovers the original
-            # cost basis exactly), let the other half keep riding on a trailing
-            # stop for further upside. MOMENTUM_DOUBLE_PCT is a percentage, so this
-            # scales with capital/trade size automatically — a $7 trade and a $50
-            # trade both target the same relative move, just different dollar amounts.
+            # Momentum, 2026-10-09 redesign: bank a slice progressively at +5%/+10%/+20%
+            # gain (PROFIT_TIERS) instead of waiting for a full double, which real data
+            # showed almost never happens before SL/time catches the trade first. Each
+            # tier's proceeds split toward USDC Locked and back-to-capital (reinvested
+            # into the same coin if it's still trending, via _partial_profit_take). A
+            # shallow pullback gets one dip-buy rather than just being watched. Once all
+            # three tiers are banked, the remainder rides the existing trailing stop —
+            # same final phase as the original double-then-ride design, just reached in
+            # three smaller steps instead of one big one.
             move = ((price - trade["entry"]) / max(trade["entry"], 1e-12)) * 100
-            mom_banked = trade.get("partial_tp_done", 0) > 0
+            tiers_done = trade.get("partial_tp_done", 0)
+            mom_banked = tiers_done >= len(PROFIT_TIERS)
+
+            # Hard stop — always active until fully banked, regardless of tier progress.
+            if not mom_banked and price <= trade["entry"] * (1 - BOND_SL_PCT / 100):
+                exit_trade(mint, price, f"{strategy.upper()}_SL", bond); return
+
+            # One-shot dip-buy: a pullback shallower than the stop gets added to once
+            # instead of just hoped back up.
+            if (not mom_banked and not trade.get("dip_bought", False)
+                    and DIP_BUY_PCT >= move > -BOND_SL_PCT):
+                with trades_lock:
+                    if mint in open_trades:
+                        open_trades[mint]["dip_bought"] = True
+                _add_to_position(mint, trade_size() * DIP_BUY_FRAC, price)
 
             if not mom_banked:
-                # Hasn't doubled yet — protect against it never developing
-                if price <= trade["entry"] * (1 - BOND_SL_PCT / 100):
-                    exit_trade(mint, price, f"{strategy.upper()}_SL", bond); return
-                if move >= MOMENTUM_DOUBLE_PCT:
-                    _partial_exit(mint, price, MOMENTUM_BANK_FRAC, f"{strategy.upper()}_DOUBLE")
-                    return  # re-evaluate next tick — now in the "ride the rest" phase
-                if elapsed >= MOMENTUM_DEV_SECS:
+                if tiers_done < len(PROFIT_TIERS) and move >= PROFIT_TIERS[tiers_done]:
+                    _partial_profit_take(mint, price, PROFIT_TIER_SELL_FRAC,
+                                          f"{strategy.upper()}_TIER{tiers_done + 1}")
+                    return  # re-evaluate next tick
+                # Hasn't banked anything yet — protect against it never developing.
+                if tiers_done == 0 and elapsed >= MOMENTUM_DEV_SECS:
                     exit_trade(mint, price, f"{strategy.upper()}_TIME", bond); return
+                # Already banked at least one tier but stalled short of the third —
+                # same slot-isn't-blocked-forever safety valve as the fully-ridden case.
+                if tiers_done > 0 and elapsed >= RIDE_MAX_SECS:
+                    exit_trade(mint, price, f"{strategy.upper()}_TIER_CAP", bond); return
             else:
-                # Principal already recovered — remainder is riding on the trailing
-                # stop (armed once peak gain crosses TSL_ACTIVATE_PCT, which it will
-                # already have well past a double) until the trend actually breaks.
+                # All three tiers banked — remainder rides on the trailing stop (armed
+                # once peak gain crosses TSL_ACTIVATE_PCT) until the trend breaks.
                 if price <= tsl_price:
                     exit_trade(mint, price, f"{strategy.upper()}_RIDE_TSL", bond); return
                 if elapsed >= RIDE_MAX_SECS:
@@ -10238,8 +10384,8 @@ def _position_display_targets(strategy):
     showed a 99% target that has nothing to do with the real 100%-double-then-ride
     logic. Mirrors the real per-strategy branches in _check_one_position."""
     if strategy in ("birdeye", "dsc_organic", "gmgn_signal", "dsc_signal", "jup_signal"):
-        return {"sl_pct": BOND_SL_PCT, "tp_pct": MOMENTUM_DOUBLE_PCT,
-                "tp_note": f"bank {int(MOMENTUM_BANK_FRAC*100)}% at the double, ride the rest"}
+        return {"sl_pct": BOND_SL_PCT, "tp_pct": PROFIT_TIER1_PCT,
+                "tp_note": f"bank {int(PROFIT_TIER_SELL_FRAC*100)}% at +{PROFIT_TIER1_PCT:.0f}%/+{PROFIT_TIER2_PCT:.0f}%/+{PROFIT_TIER3_PCT:.0f}%, then ride"}
     if strategy == "spike":
         return {"sl_pct": SPIKE_SL_PCT, "tp_pct": SPIKE_TP_PCT, "tp_note": "hard TP"}
     if strategy == "copy":
