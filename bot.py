@@ -361,7 +361,15 @@ MIN_SIGNAL_SCORE = int(os.environ.get("MIN_SIGNAL_SCORE", "1"))     # bond/trenc
 MAX_RUG_SCORE    = int(os.environ.get("MAX_RUG_SCORE",    "400"))   # rugcheck score ceiling (higher = riskier)
 
 # General
-MAX_OPEN      = int(os.environ.get("MAX_OPEN",      "1"))   # 1 at a time — full focus, compound cleanly
+MAX_OPEN      = int(os.environ.get("MAX_OPEN",      "4"))   # was 1 — that meant the whole bot could hold exactly
+                                                              # one position system-wide, and dsc_signal (by far the
+                                                              # most frequent-firing strategy) almost always held it,
+                                                              # crowding out bond/trench/spike/copy/fast even on the
+                                                              # rare occasion their own filters passed. Confirmed live:
+                                                              # copy trading had 1,293 real detections on a verified
+                                                              # wallet but only 1 actual entry. Raised to let other
+                                                              # strategies actually get a turn; not unlimited — still
+                                                              # a real cap, just not a single global bottleneck slot.
 SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "2"))
 RSI_ENTRY_MAX = float(os.environ.get("RSI_ENTRY_MAX", "70"))  # skip if 5m RSI above this — was hardcoded 70 in the Aug 8 profile
 
@@ -4278,12 +4286,24 @@ def scanner_loop():
                     bool(coin.get("twitter") or coin.get("twitter_url") or _soc.get("twitter")),
                     bool(coin.get("website") or coin.get("website_url") or _soc.get("website")),
                 ])
-                if social_count < MIN_SOCIALS:
-                    _log_scan(symbol, mint, bond, social_count, "social", 0, f"ONLY {social_count}/{MIN_SOCIALS} SOCIALS")
-                    continue
-                if coin.get("replies", 0) < MIN_REPLIES:
-                    _log_scan(symbol, mint, bond, social_count, "rep", 0, f"ONLY {coin.get('replies', 0)} REPLIES")
-                    continue
+                # Bond-range coins (45-65% bonded, freshly bonding) skip the social/replies
+                # bar entirely — confirmed live via scan_log that this was the actual reason
+                # bond got ~0 trades despite its own MIN_SIGNAL_SCORE gate being fixed
+                # earlier: fresh coins this young essentially never have both Twitter+website
+                # live AND 2+ replies yet. The code already said the real signal here is
+                # bond's own momentum threshold, not social proof ("bond % (57%+) is the
+                # real momentum proof") — this makes that actually true instead of stacking
+                # a social-proof wall in front of it. Bond still goes through its own much
+                # longer gate chain below (bundler/rugcheck/mint-freeze/holder-concentration/
+                # dev-history/smart-money-selling) before it can ever enter.
+                _bond_range_coin = BOND_ENTRY_MIN <= bond <= BOND_ENTRY_MAX
+                if not _bond_range_coin:
+                    if social_count < MIN_SOCIALS:
+                        _log_scan(symbol, mint, bond, social_count, "social", 0, f"ONLY {social_count}/{MIN_SOCIALS} SOCIALS")
+                        continue
+                    if coin.get("replies", 0) < MIN_REPLIES:
+                        _log_scan(symbol, mint, bond, social_count, "rep", 0, f"ONLY {coin.get('replies', 0)} REPLIES")
+                        continue
                 n_social += 1
                 last_trade = coin.get("last_trade", 0)
                 if last_trade > 0 and time.time() - last_trade / 1000 > 480:
@@ -4459,7 +4479,7 @@ def scanner_loop():
                 time.sleep(0.5)
 
             # ── Birdeye Trending Scan ─────────────────────────────────
-            # PRIMARY MOMENTUM FEED — runs first so it gets the MAX_OPEN=1 slot.
+            # PRIMARY MOMENTUM FEED — runs first so it gets first crack at open slots.
             # Any Solana token with real volume momentum — any age, any DEX.
             with _birdeye_lock:
                 be_pool = list(_birdeye_trending_mints - blacklisted_mints)
