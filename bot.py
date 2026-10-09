@@ -406,6 +406,15 @@ MAX_OPEN      = int(os.environ.get("MAX_OPEN",      "4"))   # was 1 — that mea
 SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL", "2"))
 RSI_ENTRY_MAX = float(os.environ.get("RSI_ENTRY_MAX", "70"))  # skip if 5m RSI above this — was hardcoded 70 in the Aug 8 profile
 
+# Backtest data collection — periodic price snapshots recorded on every open position,
+# saved onto the trade record at close (see _check_one_position / exit_trade). 5s
+# covers every exit mechanism's real granularity (the SL/profit-tier checks run on the
+# 1s monitor loop, but nothing in the strategy reacts meaningfully faster than a few
+# seconds) without bloating the archive — 300 points covers the full RIDE_MAX_SECS
+# (1800s) hold at that interval.
+PRICE_HISTORY_INTERVAL_SECS = int(os.environ.get("PRICE_HISTORY_INTERVAL_SECS", "5"))
+PRICE_HISTORY_MAX_POINTS    = int(os.environ.get("PRICE_HISTORY_MAX_POINTS",    "300"))
+
 SOL_RPC         = os.environ.get("SOL_RPC", "https://api.mainnet-beta.solana.com")
 HELIUS_API_KEY        = os.environ.get("HELIUS_API_KEY", "")
 HELIUS_WEBHOOK_AUTH   = os.environ.get("HELIUS_WEBHOOK_AUTH", "")   # set same value in Helius dashboard → Auth Header
@@ -1357,6 +1366,165 @@ def dsc_signal_type_avoid(tag: str) -> bool:
     if not stats or stats["trades"] < DSC_LEARN_MIN_SAMPLE:
         return False
     return stats["win_rate"] < DSC_LEARN_AVOID_WR
+
+# ── BACKTESTING ───────────────────────────────────────────────────
+# 2026-10-09: pure, side-effect-free replay of the momentum strategy's exact decision
+# logic (see the momentum branch of _check_one_position) against a RECORDED real price
+# path — not a guess, not a synthetic candle, the actual price_history every trade now
+# saves to the permanent archive (see PRICE_HISTORY_INTERVAL_SECS). No trades fire, no
+# capital moves, nothing here touches live state. Lets "what if SL were 7% instead of
+# 5%" or "what if tiers were 8/15/30% instead of 5/10/20%" get tested against real
+# captured market action instead of waiting weeks for a live sample every time, which is
+# the cycle every other strategy-parameter change this session had to go through.
+#
+# Known approximation vs the live bot (documented, not hidden): the live reinvest-on-
+# tier-bank decision checks a real 1-min trend indicator (is_1m_trending_up) that isn't
+# captured in price_history — this replay approximates "still green light" as "price
+# hasn't fallen back below this tier's own trigger level" instead. Dip-buy/reinvest
+# sizing also can't reference live capital (a backtest replays one trade in isolation),
+# so both scale off the trade's own original `amount` instead of a live trade_size().
+# Trades recorded before 2026-10-09 have no price_history at all (feature didn't exist
+# yet) and simply can't be replayed — see backtest_archive()'s "skipped" count.
+
+def backtest_strategy(price_history, entry, amount, params=None):
+    """Replay one trade's recorded price path under either the live config or a
+    supplied override dict. Returns exit reason, hold time, tiers banked, and final
+    pnl/pnl_pct — or {"error": ...} if there's nothing to replay."""
+    p = params or {}
+    sl_pct       = p.get("sl_pct", BOND_SL_PCT)
+    tsl_activate = p.get("tsl_activate_pct", TSL_ACTIVATE_PCT)
+    tiers        = p.get("tiers", PROFIT_TIERS)
+    tier_frac    = p.get("tier_sell_frac", PROFIT_TIER_SELL_FRAC)
+    lock_frac    = p.get("lock_frac", PROFIT_SPLIT_LOCK_FRAC)
+    dip_pct      = p.get("dip_buy_pct", DIP_BUY_PCT)
+    dip_frac     = p.get("dip_buy_frac", DIP_BUY_FRAC)
+    dev_secs     = p.get("dev_secs", MOMENTUM_DEV_SECS)
+    ride_max     = p.get("ride_max_secs", RIDE_MAX_SECS)
+
+    if not price_history or entry <= 0 or amount <= 0:
+        return {"error": "no price history / invalid entry or amount for this trade"}
+
+    tokens       = amount / entry
+    tiers_done   = 0
+    dip_bought   = False
+    price_high   = entry
+    locked_total = 0.0
+    events       = []
+    last_t, last_price = 0.0, entry
+
+    def _close(t, price, reason):
+        proceeds = tokens * price
+        pnl = (proceeds + locked_total) - amount
+        return {
+            "exit_reason": reason, "hold_s": round(t, 1), "tiers_banked": tiers_done,
+            "dip_bought": dip_bought, "locked_total": round(locked_total, 4),
+            "final_value": round(proceeds, 4), "pnl": round(pnl, 4),
+            "pnl_pct": round(pnl / amount * 100, 2), "events": events,
+        }
+
+    for pt in price_history:
+        t, price = pt.get("t", 0), pt.get("p", 0)
+        if price <= 0:
+            continue
+        last_t, last_price = t, price
+        price_high = max(price_high, price)
+        move = (price - entry) / entry * 100
+        mom_banked = tiers_done >= len(tiers)
+
+        if not mom_banked:
+            if move <= -sl_pct:
+                events.append({"t": t, "type": "SL", "price": price})
+                return _close(t, price, "SL")
+
+            if not dip_bought and dip_pct >= move > -sl_pct:
+                dip_bought = True
+                add_amt = amount * dip_frac
+                tokens += add_amt / price
+                events.append({"t": t, "type": "DIP_BUY", "price": price, "amount": round(add_amt, 4)})
+
+            if tiers_done < len(tiers) and move >= tiers[tiers_done]:
+                sell_tok      = tokens * tier_frac
+                proceeds      = sell_tok * price
+                tokens       -= sell_tok
+                lock_half     = proceeds * lock_frac
+                reinvest_half = proceeds - lock_half
+                locked_total += lock_half
+                # Approximation — see module note above.
+                if price >= entry * (1 + tiers[tiers_done] / 100):
+                    tokens += reinvest_half / price
+                tiers_done += 1
+                events.append({"t": t, "type": f"TIER{tiers_done}", "price": price,
+                                "locked": round(lock_half, 4), "reinvested": round(reinvest_half, 4)})
+                continue
+
+            if tiers_done == 0 and t >= dev_secs:
+                return _close(t, price, "TIME")
+            if tiers_done > 0 and t >= ride_max:
+                return _close(t, price, "TIER_CAP")
+        else:
+            entry_gain = (price_high - entry) / entry * 100
+            tsl_price = (price_high if entry_gain >= tsl_activate else entry) * (1 - sl_pct / 100)
+            if price <= tsl_price:
+                events.append({"t": t, "type": "RIDE_TSL", "price": price})
+                return _close(t, price, "RIDE_TSL")
+            if t >= ride_max:
+                return _close(t, price, "RIDE_CAP")
+
+    # Recorded data ran out before any exit condition fired — report mark-to-market
+    # at the last known point rather than pretending there's a real outcome.
+    return _close(last_t, last_price, "STILL_OPEN_AT_DATA_END")
+
+def backtest_archive(params=None, limit=500):
+    """Replay every dsc_signal-family archive trade that has price_history recorded
+    (2026-10-09 onward) under the given params (or live config if None), and compare
+    against what actually happened. Pure read-only analysis."""
+    archive = redis_load("bot_trades_archive") or []
+    candidates = [t for t in archive[-limit:]
+                  if t.get("strategy") in ("birdeye", "dsc_organic", "gmgn_signal", "dsc_signal", "jup_signal")]
+    skipped = [t for t in candidates if not t.get("price_history")]
+    runnable = [t for t in candidates if t.get("price_history")]
+
+    results = []
+    for t in runnable:
+        r = backtest_strategy(t["price_history"], t["entry"], t["amount"], params)
+        if "error" not in r:
+            r["trade_id"] = t.get("id")
+            r["actual_result"] = t.get("result")
+            r["actual_pnl"] = t.get("pnl")
+            results.append(r)
+
+    bt_pnl     = sum(r["pnl"] for r in results)
+    bt_wins    = sum(1 for r in results if r["pnl"] > 0)
+    real_pnl   = sum(t.get("pnl", 0) for t in runnable)
+    real_wins  = sum(1 for t in runnable if t.get("pnl", 0) > 0)
+    by_reason = {}
+    for r in results:
+        d = by_reason.setdefault(r["exit_reason"], {"trades": 0, "pnl": 0.0, "wins": 0})
+        d["trades"] += 1
+        d["pnl"] += r["pnl"]
+        if r["pnl"] > 0:
+            d["wins"] += 1
+    for d in by_reason.values():
+        d["pnl"] = round(d["pnl"], 4)
+        d["win_rate"] = round(d["wins"] / max(d["trades"], 1) * 100, 1)
+
+    return {
+        "replayed": len(results),
+        "skipped_no_price_history": len(skipped),
+        "params_used": {
+            "sl_pct": (params or {}).get("sl_pct", BOND_SL_PCT),
+            "tiers": (params or {}).get("tiers", PROFIT_TIERS),
+            "tier_sell_frac": (params or {}).get("tier_sell_frac", PROFIT_TIER_SELL_FRAC),
+            "lock_frac": (params or {}).get("lock_frac", PROFIT_SPLIT_LOCK_FRAC),
+            "dip_buy_pct": (params or {}).get("dip_buy_pct", DIP_BUY_PCT),
+            "dip_buy_frac": (params or {}).get("dip_buy_frac", DIP_BUY_FRAC),
+        },
+        "backtest":  {"total_pnl": round(bt_pnl, 4), "wins": bt_wins,
+                      "win_rate": round(bt_wins / max(len(results), 1) * 100, 1)},
+        "actual":    {"total_pnl": round(real_pnl, 4), "wins": real_wins,
+                      "win_rate": round(real_wins / max(len(runnable), 1) * 100, 1)},
+        "by_exit_reason": by_reason,
+    }
 
 def _epoch_stats():
     """Total/wins/win_rate/pnl since the LAST explicit capital reset/set — this is
@@ -3530,7 +3698,12 @@ def exit_trade(mint, price, reason, bond=0):
         "time":       time.strftime("%H:%M:%S"),
     }
     completed_trades.append(rec)
-    record_trade(rec)
+    # price_history only goes into the permanent archive, not the working-view
+    # (bot_trades) copy — record_trade()'s own bot_trades save reads from
+    # completed_trades directly, ignoring this argument except to pass it to
+    # _archive_trade(), so this doesn't bloat the 200-trade working view. Backtesting
+    # only ever needs the archive.
+    record_trade({**rec, "price_history": trade.get("price_history", [])})
     check_milestones()
     _save_daily_state()
 
@@ -3612,6 +3785,21 @@ def _check_one_position(mint):
                 open_trades[mint]["price_high"] = price
             if price > 0:
                 open_trades[mint]["_last_price"] = price
+                # Backtest data collection: periodic (not every-tick) price snapshots
+                # for the life of the position, saved onto the trade record at close.
+                # Without this, future strategy-parameter changes (SL width, profit
+                # tiers, dip-buy threshold, etc.) can never be properly replayed against
+                # real price action — only approximated from entry/peak/exit, which
+                # can't tell what order things actually happened in. See
+                # PRICE_HISTORY_INTERVAL_SECS / PRICE_HISTORY_MAX_POINTS and
+                # backtest_strategy() in the admin section.
+                _ph = open_trades[mint].setdefault("price_history", [])
+                _ph_last = open_trades[mint].get("_ph_last_ts", 0)
+                _now_ph = time.time()
+                if (_now_ph - _ph_last >= PRICE_HISTORY_INTERVAL_SECS
+                        and len(_ph) < PRICE_HISTORY_MAX_POINTS):
+                    _ph.append({"t": round(_now_ph - trade["opened_at"], 1), "p": price})
+                    open_trades[mint]["_ph_last_ts"] = _now_ph
             bond_high       = open_trades[mint]["bond_high"]
             bond_prev       = open_trades[mint]["bond_prev"]
             bond_last_moved = open_trades[mint].get("bond_last_moved", time.time())
@@ -9961,8 +10149,30 @@ def trades_archive():
         "by_strategy": by_strategy,
         "oldest_kept": archive[0].get("time") if archive else None,
         "newest": archive[-1].get("time") if archive else None,
-        "recent_500": archive[-500:],
+        # price_history stripped here — it'd bloat this general-purpose response for
+        # every caller even when nobody asked for it. Full records (with it) are what
+        # /backtest/api reads directly from Redis; nothing here needs to re-expose it.
+        "recent_500": [{k: v for k, v in t.items() if k != "price_history"} for t in archive[-500:]],
     })
+
+@app.route("/backtest/api", methods=["GET", "POST"])
+def backtest_api():
+    """Replay the momentum strategy's exact decision logic against every archived
+    trade's recorded price_history, under either the live config or a supplied
+    override — pure read-only analysis, no trades fire. GET uses live config; POST a
+    JSON body to override any of sl_pct, tiers (list), tier_sell_frac, lock_frac,
+    dip_buy_pct, dip_buy_frac, limit (how many recent archive trades to consider)."""
+    body = request.get_json(silent=True) or {} if request.method == "POST" else {}
+    limit = int(body.get("limit", 500))
+    params = {k: v for k, v in body.items()
+              if k in ("sl_pct", "tiers", "tier_sell_frac", "lock_frac", "dip_buy_pct", "dip_buy_frac",
+                       "dev_secs", "ride_max_secs", "tsl_activate_pct")} or None
+    try:
+        return jsonify(backtest_archive(params=params, limit=limit))
+    except Exception as e:
+        import traceback
+        log("warn", f"/backtest/api error: {traceback.format_exc()[:400]}", "BACKTEST")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/export/all", methods=["GET"])
 def export_all():
