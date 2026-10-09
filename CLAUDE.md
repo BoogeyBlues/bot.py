@@ -78,6 +78,24 @@ strategies (`birdeye`, `dsc_organic`, `gmgn_signal`, `bond`, `spike`, `trench`, 
   `MIN_SIGNAL_SCORE=2`, then fixed again. **If bond/trench show 0 trades again, check
   `MIN_SIGNAL_SCORE` first before assuming anything else is wrong.**
 
+**Update, 2026-10-09 — two more root causes found, both addressed:** `MIN_SIGNAL_SCORE`
+being fixed didn't actually get bond/trench trading, because two further things were
+blocking them. (1) `MAX_OPEN=1` meant the whole bot could hold exactly one position
+system-wide, and dsc_signal — by far the most frequent-firing strategy — almost always
+held that slot, crowding out every other strategy even when their own filters passed.
+Confirmed via copy trading specifically: 1,293 real detections on a verified wallet,
+only 1 actual entry. Raised to 4. (2) The scanner's phase-1 pre-filter (`MIN_SOCIALS=2`,
+`MIN_REPLIES=2`) applies to the whole candidate feed before any strategy logic runs —
+confirmed via live `scan_log` that bond-range coins (45-65% bonded, freshly bonding)
+were getting rejected here, since coins that young essentially never have both
+Twitter+website live and 2+ replies yet. Bond-range coins now skip this one gate (still
+go through their own much longer chain: bundler/rugcheck/mint-freeze/holder-
+concentration/dev-history/smart-money-selling). **Neither of these has a real trade
+sample yet — check `/status/api` → `strategies` and `/wallets` → `copy_entries` in a
+few days to see whether bond/trench/copy actually start producing volume now, and
+whether that volume is any good.** `birdeye`/`dsc_organic`/`gmgn_signal` are still fully
+dead (external API key/endpoint issue, not a code gate — see below).
+
 ## Adaptive learning (built to address "the bot has no personality / doesn't learn")
 Before this, `auto_tune()` only adjusted `bond`/`spike` parameters — zero learning logic
 touched `dsc_signal`, the strategy actually running. Added:
