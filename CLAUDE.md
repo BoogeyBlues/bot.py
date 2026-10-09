@@ -282,6 +282,28 @@ that's a separate subsystem from trade PnL and wasn't part of what was asked.
   ~94%+ of real trade volume and PumpPortal doesn't return quote data the same way.
 
 ## Fixed this pass (see commit history on `main` for exact diffs)
+- **Built a real backtesting system** (user-directed, chose this over a weaker
+  approximate backtest on existing history — the archive only ever stored
+  entry/peak/exit, not the actual price path, so it can't accurately replay anything).
+  Every open position now records price snapshots (`PRICE_HISTORY_INTERVAL_SECS=5s`,
+  capped `PRICE_HISTORY_MAX_POINTS=300`) and saves them onto the trade record at
+  close — but only into the permanent archive, not the working-view copy or the
+  general `/trades/archive` JSON response (kept lean on purpose). `backtest_strategy()`
+  replays the exact live momentum decision logic (SL, dip-buy, three profit tiers,
+  ride phase) against a recorded real price path with zero side effects — no trades
+  fire. `backtest_archive()` runs that across every archived trade that has
+  price_history, comparing backtested vs. actual outcome. `GET/POST /backtest/api`
+  exposes it; POST a JSON body to override `sl_pct`/`tiers`/`tier_sell_frac`/
+  `lock_frac`/`dip_buy_pct`/`dip_buy_frac` and test a parameter change against real
+  captured price action before shipping it, instead of the deploy-and-wait-weeks cycle
+  every SL/tier change this session went through. **No data exists yet** — recording
+  only starts from this deploy forward; `/backtest/api` will report
+  `skipped_no_price_history` for everything until trades accumulate under it. Two
+  documented approximations where live data isn't captured: the reinvest-on-tier-bank
+  "still trending" check can't replay the live 1-min trend indicator (not recorded),
+  so it proxies "still above this tier's own trigger price" instead; dip-buy/reinvest
+  sizing scales off the trade's own `amount` rather than live capital, since a
+  backtest replays one trade in isolation with no capital context.
 - **`trade_size()` was sizing trades above actual capital, silently halting the bot.**
   `MIN_TRADE` ($3) is a hard floor with no ceiling tied to capital — caught live at
   capital=$2.86, trade_size=$3.00. `enter_trade()`'s own `capital < amount` guard then
