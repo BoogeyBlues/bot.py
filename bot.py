@@ -6167,6 +6167,13 @@ def status_api():
         "career_pnl":      round(_astats["pnl"], 4),
         "net_worth":       round(cap + locked, 2),
         "net_pnl_all_time": round(cap + locked - STARTING_CAPITAL, 4),
+        # Mark-to-market value of whatever's currently held in open positions — NOT
+        # included in net_worth/net_pnl_all_time above (those only count settled
+        # capital+locked). This is why career_pnl (archive, closed trades only) and
+        # net_pnl_all_time can legitimately differ while trades are open: neither
+        # included open-position value on its own. Add this to either one for a true
+        # total-wealth figure. See _open_positions_value().
+        "open_positions_value": _open_positions_value(),
         "dsc_signal_learning": {
             tag: {**s, "avoiding": dsc_signal_type_avoid(tag)}
             for tag, s in dsc_signal_type_stats().items()
@@ -10586,6 +10593,28 @@ def _pos_price(trade):
         if bond_e > 0 and bond_h >= bond_e:
             return entry * (1 + (bond_h - bond_e) / 100)
     return trade.get("price_high", trade["entry"])
+
+def _open_positions_value():
+    """Mark-to-market value of tokens currently held across every open position —
+    NOT including partial_proceeds, which is already reflected in live capital/
+    usdc_locked the moment each tier/partial sale happens (lock_half goes straight to
+    usdc_locked, reinvest_half either becomes more tokens — captured here via
+    tokens*price — or joins capital directly). Adding partial_proceeds on top of this
+    would double-count money that's already settled. This is the real root cause
+    behind career_pnl (archive-only) and net_worth/net_pnl_all_time (settled
+    capital+locked only) drifting apart while trades are open — neither included
+    open-position value, and now that MAX_OPEN is 4 instead of 1 the amount
+    genuinely "in flight" at any moment is large enough that the gap is actually
+    visible instead of a rounding blip. Not a bug — this is what makes it visible and
+    explained instead of a mystery."""
+    with trades_lock:
+        trades = list(open_trades.values())
+    total = 0.0
+    for t in trades:
+        price = _pos_price(t)
+        if price > 0:
+            total += t.get("tokens", 0) * price
+    return round(total, 4)
 
 def _position_display_targets(strategy):
     """What this position's exit plan actually is, for accurate dashboard display.
