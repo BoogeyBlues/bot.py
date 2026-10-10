@@ -282,6 +282,25 @@ that's a separate subsystem from trade PnL and wasn't part of what was asked.
   ~94%+ of real trade volume and PumpPortal doesn't return quote data the same way.
 
 ## Fixed this pass (see commit history on `main` for exact diffs)
+- **Investigated "numbers look inflated" after the tiered-profit redesign.** First
+  suspected the reinvestment math double-counts (`partial_proceeds` includes both the
+  locked AND reinvested half of a tier sale, and the reinvested half's tokens get
+  valued again via `final_value` at close) — ran a full tier1→tier2→tier3→final-exit
+  simulation and manually verified the true economic outcome against recorded `pnl`:
+  they matched exactly. **That suspicion was wrong**, caught before touching any code
+  — worth remembering next time this math looks suspicious by eye. The real, confirmed
+  finding: live `career_pnl` ($281.50, archive sum of closed trades) and
+  `net_pnl_all_time` ($230.28, from capital+locked) had drifted $51.22 apart because 4
+  open positions (MAX_OPEN is now 4, not 1) held $87.47 of committed capital that's
+  "in flight" — reserved out of `capital`, not yet closed into the archive, and never
+  counted by either figure. Not a bug, just newly visible now that MAX_OPEN allows a
+  much bigger in-flight bucket than the ~1-trade sliver it used to be. Added
+  `_open_positions_value()` (mark-to-market value of held tokens, deliberately
+  excluding `partial_proceeds` since that's already reflected in live capital/locked)
+  exposed as `open_positions_value` in `/status/api`, so the gap is explained instead
+  of mysterious. **If `career_pnl` and `net_pnl_all_time` ever disagree again, check
+  `open_positions_value` first before assuming something's broken** — `career_pnl +
+  0` vs `net_pnl_all_time + open_positions_value` (roughly) should reconcile.
 - **Built a real backtesting system** (user-directed, chose this over a weaker
   approximate backtest on existing history — the archive only ever stored
   entry/peak/exit, not the actual price path, so it can't accurately replay anything).
