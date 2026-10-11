@@ -195,6 +195,29 @@ is one more data point, not a final verdict — but 5% is holding up better than
 "Fixed this pass" below) is working live — capital and trade_size are moving together
 correctly instead of trade_size sticking above capital.
 
+## CRITICAL — the permanent archive was silently wiped once (2026-10-11), fixed
+Not a reset-endpoint bug this time — a Redis payload-size failure that nothing logged.
+`_archive_trade()` reloads the WHOLE `bot_trades_archive` blob, appends one trade, saves
+the whole thing back, on every single close. The 2026-10-09 backtest feature merged
+`price_history` (up to 300 points/trade) into each archived record, growing that payload
+past what Upstash's REST API would accept — and `_redis_cmd`/`redis_save` swallowed
+every failure completely silently (no logging, ever, by design up to that point). Found
+live: `/trades/archive` showed 0 trades despite 850+ real trades' worth of pnl already
+reflected in capital/usdc_locked. **The ~850 trades lost before this was caught are very
+likely gone for good** — no local copy exists to restore from.
+
+Fixed: `price_history` now lives under its own `price_hist:<id>` key (30-day TTL), never
+merged into the archive blob — a secondary/newer feature must never be able to put the
+"must never be lost" core ledger at risk again. `_redis_cmd` now logs a WARN on any
+non-200/exception instead of silently returning `None`; `redis_save` warns before even
+attempting a save once a payload crosses ~900KB, so the NEXT thing that tries to grow a
+single Redis key without bound gets caught early instead of discovered as data loss.
+**The lesson that generalizes:** before adding ANY new field to a value that already
+gets fully reloaded-and-resaved on every write (the archive, `bot_trades`, `bot_state`,
+`bot_wallets` — anything following this load-whole/append/save-whole pattern), ask
+whether that field's size is bounded, and whether a save failure for it would be visible
+or silent. It wasn't checked here and real permanent data was lost as a result.
+
 ## Reset behavior (do not regress this)
 **LIVE mode (`PAPER_MODE=false`):** no reset endpoint should ever delete trade history,
 USDC-locked tracking, wallet activity, or combat stats — this was audited and fixed
