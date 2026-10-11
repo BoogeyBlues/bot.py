@@ -52,12 +52,31 @@ def _redis_cmd(*args):
         )
         if r.status_code == 200:
             return r.json().get("result")
-    except Exception:
-        pass
+        # 2026-10-11: this used to swallow a non-200 silently, with zero logging
+        # anywhere — that's exactly how bot_trades_archive went to 0 trades without
+        # a single warning in the logs: once its payload grew too large for Upstash's
+        # REST API to accept, every SET just silently no-op'd forever. Log it instead.
+        cmd = args[0] if args else "?"
+        key = args[1] if len(args) > 1 else "?"
+        log("warn", f"Redis {cmd} {key} failed: HTTP {r.status_code} {r.text[:150]}", "REDIS")
+    except Exception as e:
+        cmd = args[0] if args else "?"
+        key = args[1] if len(args) > 1 else "?"
+        log("warn", f"Redis {cmd} {key} error: {e}", "REDIS")
     return None
 
-def redis_save(key, obj):
-    _redis_cmd("SET", key, json.dumps(obj))
+def redis_save(key, obj, ttl_secs=None):
+    """ttl_secs: optional expiry (Redis EX) — used for data that's fine to age out
+    rather than needing to live forever (e.g. per-trade price history)."""
+    payload = json.dumps(obj)
+    # Early warning instead of a silent failure once this gets too big to save —
+    # Upstash's free/low REST tiers commonly reject requests above ~1MB.
+    if len(payload) > 900_000:
+        log("warn", f"Redis SET {key}: payload {len(payload)/1024:.0f}KB, approaching typical REST size limits", "REDIS")
+    if ttl_secs:
+        _redis_cmd("SET", key, payload, "EX", str(ttl_secs))
+    else:
+        _redis_cmd("SET", key, payload)
 
 def redis_load(key):
     raw = _redis_cmd("GET", key)
@@ -414,6 +433,11 @@ RSI_ENTRY_MAX = float(os.environ.get("RSI_ENTRY_MAX", "70"))  # skip if 5m RSI a
 # (1800s) hold at that interval.
 PRICE_HISTORY_INTERVAL_SECS = int(os.environ.get("PRICE_HISTORY_INTERVAL_SECS", "5"))
 PRICE_HISTORY_MAX_POINTS    = int(os.environ.get("PRICE_HISTORY_MAX_POINTS",    "300"))
+# Stored under its own per-trade key (price_hist:<id>), NOT inside the permanent
+# archive blob — see the 2026-10-11 note in exit_trade for why that separation matters.
+# 30 days is plenty for "did this week's parameter change actually work," and lets
+# these keys age out on their own instead of accumulating forever.
+PRICE_HISTORY_TTL_SECS = int(os.environ.get("PRICE_HISTORY_TTL_SECS", str(30 * 86400)))
 
 SOL_RPC         = os.environ.get("SOL_RPC", "https://api.mainnet-beta.solana.com")
 HELIUS_API_KEY        = os.environ.get("HELIUS_API_KEY", "")
@@ -1475,12 +1499,16 @@ def backtest_strategy(price_history, entry, amount, params=None):
     return _close(last_t, last_price, "STILL_OPEN_AT_DATA_END")
 
 def backtest_archive(params=None, limit=500):
-    """Replay every dsc_signal-family archive trade that has price_history recorded
+    """Replay every dsc_signal-family archive trade that has price history recorded
     (2026-10-09 onward) under the given params (or live config if None), and compare
-    against what actually happened. Pure read-only analysis."""
+    against what actually happened. Pure read-only analysis. price_history lives under
+    its own price_hist:<id> key (see exit_trade), not inside the archive record
+    itself — fetched per-candidate here."""
     archive = redis_load("bot_trades_archive") or []
     candidates = [t for t in archive[-limit:]
                   if t.get("strategy") in ("birdeye", "dsc_organic", "gmgn_signal", "dsc_signal", "jup_signal")]
+    for t in candidates:
+        t["price_history"] = redis_load(f"price_hist:{t.get('id')}") or []
     skipped = [t for t in candidates if not t.get("price_history")]
     runnable = [t for t in candidates if t.get("price_history")]
 
@@ -3698,12 +3726,19 @@ def exit_trade(mint, price, reason, bond=0):
         "time":       time.strftime("%H:%M:%S"),
     }
     completed_trades.append(rec)
-    # price_history only goes into the permanent archive, not the working-view
-    # (bot_trades) copy — record_trade()'s own bot_trades save reads from
-    # completed_trades directly, ignoring this argument except to pass it to
-    # _archive_trade(), so this doesn't bloat the 200-trade working view. Backtesting
-    # only ever needs the archive.
-    record_trade({**rec, "price_history": trade.get("price_history", [])})
+    record_trade(rec)
+    # price_history saved under its OWN key, separate from the main archive blob —
+    # 2026-10-11: it used to be merged into each archived trade record, which grew
+    # bot_trades_archive's total payload past what Upstash's REST API would accept on
+    # every save, and because redis_save used to fail completely silently, the archive
+    # went to 0 trades with no warning anywhere until this was found live. The core
+    # trade ledger must never be put at risk by a newer, secondary feature — price
+    # history is "nice to have for backtesting," the archive itself is "must never be
+    # lost." 30-day TTL (PRICE_HISTORY_TTL_SECS) since this is only useful for
+    # backtesting recent strategy behavior, not a permanent record like the archive.
+    _ph = trade.get("price_history")
+    if _ph:
+        redis_save(f"price_hist:{trade_id}", _ph, ttl_secs=PRICE_HISTORY_TTL_SECS)
     check_milestones()
     _save_daily_state()
 
